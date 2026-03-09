@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>ClickHouse.EntityFrameworkCore</RootNamespace>
     <AssemblyName>ClickHouse.EntityFrameworkCore</AssemblyName>
     <IsPackable>true</IsPackable>
@@ -33,5 +32,11 @@
     <None Include="icon.png" Link="icon.png" Pack="true" PackagePath="" />
     <None Include="README.nuget.md" Pack="true" PackagePath="" />
   </ItemGroup>
+
+    <Target Name="SetPackageReleaseNotes" BeforeTargets="GenerateNuspec">
+    <PropertyGroup>
+      <PackageReleaseNotes>$([System.IO.File]::ReadAllText("$(MSBuildProjectDirectory)/../RELEASENOTES.md"))</PackageReleaseNotes>
+    </PropertyGroup>
+  </Target>
 
 </Project>
