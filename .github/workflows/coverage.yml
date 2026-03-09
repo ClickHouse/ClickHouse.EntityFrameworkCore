@@ -41,4 +41,4 @@ jobs:
           fail_ci_if_error: true
           disable_search: true
           verbose: true
-          files: ./test/EFCore.ClickHouse.Tests/coverage.net10.0.opencover.xml
+          files: ./test/EFCore.ClickHouse.Tests/coverage.opencover.xml
