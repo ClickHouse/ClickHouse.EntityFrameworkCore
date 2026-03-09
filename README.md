@@ -12,12 +12,12 @@
 <img alt="NuGet Downloads" src="https://img.shields.io/nuget/dt/ClickHouse.EntityFrameworkCore">
 </a>
 
-<a href="https://github.com/ClickHouse/EntityFrameworkCore/actions/workflows/tests.yml">
-<img src="https://github.com/ClickHouse/EntityFrameworkCore/actions/workflows/tests.yml/badge.svg?branch=main">
+<a href="https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/actions/workflows/tests.yml">
+<img src="https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/actions/workflows/tests.yml/badge.svg?branch=main">
 </a>
 
-<a href="https://codecov.io/gh/ClickHouse/EntityFrameworkCore">
-<img src="https://codecov.io/gh/ClickHouse/EntityFrameworkCore/graph/badge.svg">
+<a href="https://codecov.io/gh/ClickHouse/ClickHouse.EntityFrameworkCore">
+<img src="https://codecov.io/gh/ClickHouse/ClickHouse.EntityFrameworkCore/graph/badge.svg">
 </a>
 
 </p>
