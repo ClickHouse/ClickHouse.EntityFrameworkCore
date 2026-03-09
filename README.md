@@ -1,6 +1,6 @@
 <p align="center">
 <img src=".static/logo.svg" width="200px" align="center">
-<h1 align="center">ClickHouse C# client</h1>
+<h1 align="center">ClickHouse Entity Framework Core Provider</h1>
 </p>
 <br/>
 <p align="center">
@@ -21,8 +21,6 @@
 </a>
 
 </p>
-
-# ClickHouse Entity Framework Core Provider
 
 The official Entity Framework Core provider for [ClickHouse](https://clickhouse.com/), built on top of [ClickHouse.Driver](https://github.com/ClickHouse/clickhouse-cs).
 
