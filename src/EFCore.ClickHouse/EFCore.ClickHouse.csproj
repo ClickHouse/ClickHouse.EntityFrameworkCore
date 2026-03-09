@@ -5,7 +5,7 @@
     <RootNamespace>ClickHouse.EntityFrameworkCore</RootNamespace>
     <AssemblyName>ClickHouse.EntityFrameworkCore</AssemblyName>
     <IsPackable>true</IsPackable>
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>dsxxxxxxxxxxxxcqw22222
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageProjectUrl>https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore</RepositoryUrl>
     <PackageIcon>icon.png</PackageIcon>
