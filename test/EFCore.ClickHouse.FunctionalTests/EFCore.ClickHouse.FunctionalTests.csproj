@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.*" />
+    <PackageReference Include="Testcontainers.ClickHouse" Version="4.*" />
+    <PackageReference Include="ClickHouse.Driver" Version="1.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational.Specification.Tests" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EFCore.ClickHouse\EFCore.ClickHouse.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="TestData\Northwind.ClickHouse.sql" CopyToOutputDirectory="Always" />
+  </ItemGroup>
+
+</Project>
