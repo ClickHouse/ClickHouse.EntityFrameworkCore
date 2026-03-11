@@ -1,7 +1,91 @@
 using Microsoft.EntityFrameworkCore;
+using Testcontainers.ClickHouse;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
+
+public class FloatEntity
+{
+    public long Id { get; set; }
+    public string Label { get; set; } = string.Empty;
+    public double ValFloat64 { get; set; }
+    public float ValFloat32 { get; set; }
+}
+
+public class FloatDbContext : DbContext
+{
+    public DbSet<FloatEntity> Floats => Set<FloatEntity>();
+
+    private readonly string _connectionString;
+
+    public FloatDbContext(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder.UseClickHouse(_connectionString);
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<FloatEntity>(entity =>
+        {
+            entity.ToTable("float_test");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.Label).HasColumnName("label");
+            entity.Property(e => e.ValFloat64).HasColumnName("val_f64");
+            entity.Property(e => e.ValFloat32).HasColumnName("val_f32");
+        });
+    }
+}
+
+public class FloatFixture : IAsyncLifetime
+{
+    private readonly ClickHouseContainer _container = new ClickHouseBuilder("clickhouse/clickhouse-server:latest").Build();
+
+    public string ConnectionString { get; private set; } = string.Empty;
+
+    public async Task InitializeAsync()
+    {
+        await _container.StartAsync();
+        ConnectionString = _container.GetConnectionString();
+
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(ConnectionString);
+        await connection.OpenAsync();
+
+        using var createCmd = connection.CreateCommand();
+        createCmd.CommandText = """
+            CREATE TABLE float_test (
+                id Int64,
+                label String,
+                val_f64 Float64,
+                val_f32 Float32
+            ) ENGINE = MergeTree()
+            ORDER BY id
+            """;
+        await createCmd.ExecuteNonQueryAsync();
+
+        using var insertCmd = connection.CreateCommand();
+        insertCmd.CommandText = """
+            INSERT INTO float_test (id, label, val_f64, val_f32) VALUES
+            (1, 'normal', 42.5, 42.5),
+            (2, 'negative', -10.0, -10.0),
+            (3, 'pos_inf', inf, inf),
+            (4, 'neg_inf', -inf, -inf),
+            (5, 'nan', nan, nan),
+            (6, 'zero', 0.0, 0.0)
+            """;
+        await insertCmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task DisposeAsync()
+    {
+        await _container.DisposeAsync();
+    }
+}
 
 public class MathTranslationTests : IClassFixture<ClickHouseFixture>
 {
@@ -242,5 +326,110 @@ public class MathTranslationTests : IClassFixture<ClickHouseFixture>
         Assert.Equal("Frank", results[1].Name);
         Assert.Equal("Grace", results[2].Name);
         Assert.Equal("Ivy", results[3].Name);
+    }
+}
+
+/// <summary>
+/// Tests for math translator special cases that aren't in the simple
+/// dictionary lookup: Log(x, base), IsPositiveInfinity, IsNegativeInfinity.
+/// </summary>
+public class MathSpecialCaseTests : IClassFixture<FloatFixture>
+{
+    private readonly FloatFixture _fixture;
+
+    public MathSpecialCaseTests(FloatFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    [Fact]
+    public async Task Math_LogWithBase_TranslatesCorrectly()
+    {
+        // Math.Log(x, base) → log(x) / log(base)
+        await using var context = new FloatDbContext(_fixture.ConnectionString);
+
+        var results = await context.Floats
+            .Where(e => e.Label == "normal")
+            .Select(e => new { e.Label, LogBase10 = Math.Log(e.ValFloat64, 10) })
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Single(results);
+        Assert.Equal(Math.Log(42.5, 10), results[0].LogBase10, 8);
+    }
+
+    [Fact]
+    public async Task Math_LogWithBase2_TranslatesCorrectly()
+    {
+        await using var context = new FloatDbContext(_fixture.ConnectionString);
+
+        var results = await context.Floats
+            .Where(e => e.Label == "normal")
+            .Select(e => new { e.Label, LogBase2 = Math.Log(e.ValFloat64, 2) })
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Single(results);
+        Assert.Equal(Math.Log(42.5, 2), results[0].LogBase2, 6);
+    }
+
+    [Fact]
+    public async Task Double_IsPositiveInfinity_FiltersCorrectly()
+    {
+        // double.IsPositiveInfinity(x) → isInfinite(x) AND x > 0
+        await using var context = new FloatDbContext(_fixture.ConnectionString);
+
+        var results = await context.Floats
+            .Where(e => double.IsPositiveInfinity(e.ValFloat64))
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Single(results);
+        Assert.Equal("pos_inf", results[0].Label);
+    }
+
+    [Fact]
+    public async Task Double_IsNegativeInfinity_FiltersCorrectly()
+    {
+        // double.IsNegativeInfinity(x) → isInfinite(x) AND x < 0
+        await using var context = new FloatDbContext(_fixture.ConnectionString);
+
+        var results = await context.Floats
+            .Where(e => double.IsNegativeInfinity(e.ValFloat64))
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Single(results);
+        Assert.Equal("neg_inf", results[0].Label);
+    }
+
+    [Fact]
+    public async Task Float_IsPositiveInfinity_FiltersCorrectly()
+    {
+        // float.IsPositiveInfinity(x) → isInfinite(x) AND x > 0
+        await using var context = new FloatDbContext(_fixture.ConnectionString);
+
+        var results = await context.Floats
+            .Where(e => float.IsPositiveInfinity(e.ValFloat32))
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Single(results);
+        Assert.Equal("pos_inf", results[0].Label);
+    }
+
+    [Fact]
+    public async Task Float_IsNegativeInfinity_FiltersCorrectly()
+    {
+        // float.IsNegativeInfinity(x) → isInfinite(x) AND x < 0
+        await using var context = new FloatDbContext(_fixture.ConnectionString);
+
+        var results = await context.Floats
+            .Where(e => float.IsNegativeInfinity(e.ValFloat32))
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Single(results);
+        Assert.Equal("neg_inf", results[0].Label);
     }
 }
