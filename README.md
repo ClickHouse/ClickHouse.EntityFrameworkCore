@@ -62,15 +62,30 @@ public class PageView
 
 ## Current Status
 
-This provider is in early development. It only support **Read-only queries**. You can map entities to existing ClickHouse tables and query them with LINQ (`Where`, `OrderBy`, `Take`, `Skip`, `Select`, `First`, `Single`, `Any`, `Count`, `Sum`, `Min`, `Max`, `Average`, `Distinct`, `GroupBy`).
+This provider is in early development. It supports **read-only queries** — you can map entities to existing ClickHouse tables and query them with LINQ.
 
-String methods translate to ClickHouse equivalents: `Contains`, `StartsWith`, `EndsWith`, `IndexOf`, `Replace`, `Substring`, `Trim`, `ToLower`, `ToUpper`, `Length`, and string concatenation all work.
+### LINQ Queries
+
+`Where`, `OrderBy`, `Take`, `Skip`, `Select`, `First`, `Single`, `Any`, `Count`, `Distinct`, `AsNoTracking`
+
+### GROUP BY & Aggregates
+
+`GroupBy` with `Count`, `LongCount`, `Sum`, `Average`, `Min`, `Max` — including `HAVING` (`.Where()` after `.GroupBy()`), multiple aggregates in a single projection, and `OrderBy` on aggregate results.
+
+### String Methods
+
+`Contains`, `StartsWith`, `EndsWith`, `IndexOf`, `Replace`, `Substring`, `Trim`/`TrimStart`/`TrimEnd`, `ToLower`, `ToUpper`, `Length`, `IsNullOrEmpty`, `Concat` (and `+` operator)
+
+### Math Functions
+
+`Math.Abs`, `Floor`, `Ceiling`, `Round`, `Truncate`, `Pow`, `Sqrt`, `Cbrt`, `Exp`, `Log`, `Log2`, `Log10`, `Sign`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Atan2`, `RadiansToDegrees`, `DegreesToRadians`, `IsNaN`, `IsInfinity`, `IsFinite`, `IsPositiveInfinity`, `IsNegativeInfinity` — with both `Math` and `MathF` overloads.
 
 ### Not Yet Implemented
 
 - INSERT / UPDATE / DELETE (modification commands are stubbed)
 - Migrations
-- Advanced types, collection types, TimeSpan / TimeOnly, Tuple, Nullable(T), LowCardinality, Nested, other decimal, etc. type mappings
+- JOINs, subqueries, set operations
+- Advanced types: Array, Tuple, Nullable(T), LowCardinality, Nested, TimeSpan/TimeOnly
 - Batched inserts
 
 ## Building
