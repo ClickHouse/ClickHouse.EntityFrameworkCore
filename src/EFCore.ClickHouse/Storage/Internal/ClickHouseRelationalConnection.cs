@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using ClickHouse.Driver;
 using ClickHouse.Driver.ADO;
 using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using Microsoft.EntityFrameworkCore;
@@ -69,4 +70,14 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         IsolationLevel isolationLevel,
         CancellationToken cancellationToken = default)
         => Task.FromResult<IDbContextTransaction>(new ClickHouseTransaction());
+
+    public IClickHouseClient GetClickHouseClient()
+    {
+        if (_dataSource is ClickHouseDataSource clickHouseDataSource)
+            return clickHouseDataSource.GetClient();
+
+        throw new InvalidOperationException(
+            "Cannot obtain IClickHouseClient. The connection must be configured with a connection string " +
+            "or ClickHouseDataSource, not a raw DbConnection.");
+    }
 }

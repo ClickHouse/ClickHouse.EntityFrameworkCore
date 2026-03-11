@@ -6,13 +6,31 @@ namespace EFCore.ClickHouse.Tests;
 public class WritePathFailFastTests
 {
     [Fact]
-    public async Task SaveChanges_Throws_NotSupportedException()
+    public async Task SaveChanges_Update_Throws_NotSupportedException()
     {
         await using var context = new WritePathDbContext();
-        context.Entities.Add(new WritePathEntity { Id = 1, Name = "test" });
+
+        // Attach an existing entity and modify it to trigger UPDATE
+        var entity = new WritePathEntity { Id = 1, Name = "original" };
+        context.Entities.Attach(entity);
+        entity.Name = "modified";
 
         var ex = await Assert.ThrowsAsync<NotSupportedException>(() => context.SaveChangesAsync());
-        Assert.Contains("read-only query scenarios", ex.Message);
+        Assert.Contains("UPDATE", ex.Message);
+    }
+
+    [Fact]
+    public async Task SaveChanges_Delete_Throws_NotSupportedException()
+    {
+        await using var context = new WritePathDbContext();
+
+        // Attach and remove to trigger DELETE
+        var entity = new WritePathEntity { Id = 1, Name = "test" };
+        context.Entities.Attach(entity);
+        context.Entities.Remove(entity);
+
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(() => context.SaveChangesAsync());
+        Assert.Contains("DELETE", ex.Message);
     }
 
     private sealed class WritePathDbContext : DbContext

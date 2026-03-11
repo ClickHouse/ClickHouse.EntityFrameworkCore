@@ -1,15 +1,22 @@
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Update;
 
 namespace ClickHouse.EntityFrameworkCore.Update.Internal;
 
 public class ClickHouseModificationCommandBatchFactory : IModificationCommandBatchFactory
 {
-    public ClickHouseModificationCommandBatchFactory(ModificationCommandBatchFactoryDependencies dependencies)
+    private const int DefaultMaxBatchSize = 1000;
+    private readonly int _maxBatchSize;
+
+    public ClickHouseModificationCommandBatchFactory(
+        ModificationCommandBatchFactoryDependencies dependencies)
     {
+        _maxBatchSize = dependencies.CurrentContext.Context.GetService<IDbContextOptions>()
+            .Extensions.OfType<ClickHouseOptionsExtension>()
+            .FirstOrDefault()?.MaxBatchSize ?? DefaultMaxBatchSize;
     }
 
     public ModificationCommandBatch Create()
-        => throw new NotSupportedException(
-            "SaveChanges write operations are not supported by ClickHouse.EntityFrameworkCore yet. " +
-            "This provider currently supports read-only query scenarios.");
+        => new ClickHouseModificationCommandBatch(_maxBatchSize);
 }
