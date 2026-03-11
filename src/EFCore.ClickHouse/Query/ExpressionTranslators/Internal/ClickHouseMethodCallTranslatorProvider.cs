@@ -1,11 +1,13 @@
 using Microsoft.EntityFrameworkCore.Query;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 
 public class ClickHouseMethodCallTranslatorProvider : RelationalMethodCallTranslatorProvider
 {
     public ClickHouseMethodCallTranslatorProvider(
-        RelationalMethodCallTranslatorProviderDependencies dependencies)
+        RelationalMethodCallTranslatorProviderDependencies dependencies,
+        IRelationalTypeMappingSource typeMappingSource)
         : base(dependencies)
     {
         var sqlExpressionFactory = dependencies.SqlExpressionFactory;
@@ -14,6 +16,7 @@ public class ClickHouseMethodCallTranslatorProvider : RelationalMethodCallTransl
         [
             new ClickHouseStringMethodTranslator(sqlExpressionFactory),
             new ClickHouseLikeTranslator(sqlExpressionFactory),
+            new ClickHouseMathMethodTranslator(sqlExpressionFactory, typeMappingSource),
         ]);
     }
 }
