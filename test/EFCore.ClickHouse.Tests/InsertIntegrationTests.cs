@@ -45,6 +45,36 @@ public class NullableInsertEntity
     public DateTime? NullableDatetime { get; set; }
 }
 
+public class ServerGenEntity
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+}
+
+public class ServerGenDbContext : DbContext
+{
+    private readonly string _connectionString;
+
+    public ServerGenDbContext(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder.UseClickHouse(_connectionString);
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<ServerGenEntity>(entity =>
+        {
+            entity.ToTable("insert_entities");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+            entity.Property(e => e.Name).HasColumnName("name");
+        });
+    }
+}
+
 public class InsertDbContext : DbContext
 {
     public DbSet<InsertEntity> InsertEntities => Set<InsertEntity>();
@@ -420,6 +450,43 @@ public class InsertIntegrationTests : IClassFixture<InsertFixture>
             Assert.Equal(800 + i, results[i].Id);
             Assert.Equal($"bulk_{800 + i}", results[i].Name);
         }
+    }
+
+    [Fact]
+    public async Task SaveChanges_AcceptChangesOnSuccessFalse_EntitiesStayAdded()
+    {
+        await using var context = new InsertDbContext(_fixture.ConnectionString);
+
+        var entity = new InsertEntity { Id = 550, Name = "no_accept", Value = 1 };
+        context.InsertEntities.Add(entity);
+
+        Assert.Equal(EntityState.Added, context.Entry(entity).State);
+
+        await context.SaveChangesAsync(acceptAllChangesOnSuccess: false);
+
+        // Entity should remain Added because we told EF not to accept changes
+        Assert.Equal(EntityState.Added, context.Entry(entity).State);
+    }
+
+    [Fact]
+    public async Task SaveChanges_ServerGeneratedValue_Throws()
+    {
+        await using var context = new ServerGenDbContext(_fixture.ConnectionString);
+
+        context.Set<ServerGenEntity>().Add(new ServerGenEntity { Name = "test" });
+
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(() => context.SaveChangesAsync());
+        Assert.Contains("Server-generated values", ex.Message);
+    }
+
+    [Fact]
+    public async Task SaveChanges_EmptyChangeset_IsNoOp()
+    {
+        await using var context = new InsertDbContext(_fixture.ConnectionString);
+
+        // No changes tracked — should complete without error
+        var result = await context.SaveChangesAsync();
+        Assert.Equal(0, result);
     }
 
     [Fact]

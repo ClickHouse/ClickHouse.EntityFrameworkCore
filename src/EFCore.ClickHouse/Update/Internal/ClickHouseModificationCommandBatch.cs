@@ -7,17 +7,13 @@ namespace ClickHouse.EntityFrameworkCore.Update.Internal;
 
 public class ClickHouseModificationCommandBatch : ModificationCommandBatch
 {
-    private readonly IClickHouseRelationalConnection _connection;
     private readonly List<IReadOnlyModificationCommand> _commands = [];
     private readonly int _maxBatchSize;
     private bool _completed;
     private bool _moreExpected;
 
-    public ClickHouseModificationCommandBatch(
-        IClickHouseRelationalConnection connection,
-        int maxBatchSize)
+    public ClickHouseModificationCommandBatch(int maxBatchSize)
     {
-        _connection = connection;
         _maxBatchSize = maxBatchSize;
     }
 
@@ -81,23 +77,24 @@ public class ClickHouseModificationCommandBatch : ModificationCommandBatch
         if (_commands.Count == 0)
             return;
 
-        var client = _connection.GetClickHouseClient();
+        var clickHouseConnection = (IClickHouseRelationalConnection)connection;
+        var client = clickHouseConnection.GetClickHouseClient();
 
-        // Group commands by table name for efficient batching
-        var groups = _commands.GroupBy(c => c.TableName);
+        // Group commands by table name and write-column set for correct row alignment
+        var groups = _commands.GroupBy(c => (
+            c.TableName,
+            Columns: string.Join(",", c.ColumnModifications.Where(cm => cm.IsWrite).Select(cm => cm.ColumnName))));
 
         foreach (var group in groups)
         {
-            var tableName = group.Key;
+            var tableName = group.Key.TableName;
             var commands = group.ToList();
 
-            // Get column names from the first command's write columns
             var columns = commands[0].ColumnModifications
                 .Where(cm => cm.IsWrite)
                 .Select(cm => cm.ColumnName)
                 .ToList();
 
-            // Build rows as object arrays
             var rows = commands.Select(cmd =>
             {
                 var writeColumns = cmd.ColumnModifications.Where(cm => cm.IsWrite).ToList();
@@ -110,15 +107,6 @@ public class ClickHouseModificationCommandBatch : ModificationCommandBatch
             });
 
             await client.InsertBinaryAsync(tableName, columns, rows, cancellationToken: cancellationToken);
-        }
-
-        // Propagate state: mark all entries as Unchanged
-        foreach (var command in _commands)
-        {
-            foreach (var entry in command.Entries)
-            {
-                entry.EntityState = EntityState.Unchanged;
-            }
         }
     }
 }
