@@ -80,13 +80,51 @@ This provider is in early development. It supports **read-only queries** — you
 
 `Math.Abs`, `Floor`, `Ceiling`, `Round`, `Truncate`, `Pow`, `Sqrt`, `Cbrt`, `Exp`, `Log`, `Log2`, `Log10`, `Sign`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Atan2`, `RadiansToDegrees`, `DegreesToRadians`, `IsNaN`, `IsInfinity`, `IsFinite`, `IsPositiveInfinity`, `IsNegativeInfinity` — with both `Math` and `MathF` overloads.
 
+### INSERT via SaveChanges
+
+`SaveChanges` supports INSERT operations using the driver's native `InsertBinaryAsync` API — RowBinary encoding with GZip compression, far more efficient than parameterized SQL.
+
+```csharp
+await using var ctx = new AnalyticsContext();
+
+ctx.PageViews.Add(new PageView
+{
+    Id = 1,
+    Path = "/home",
+    Date = new DateOnly(2024, 6, 15),
+    UserAgent = "Mozilla/5.0"
+});
+
+await ctx.SaveChangesAsync();
+```
+
+Entities transition from `Added` to `Unchanged` after save, just like any other EF Core provider.
+
+**Batch size** is configurable (default 1000) — controls how many entities are accumulated before flushing to ClickHouse:
+
+```csharp
+optionsBuilder.UseClickHouse("Host=localhost", o => o.MaxBatchSize(5000));
+```
+
+### Bulk Insert
+
+For high-throughput loads that don't need change tracking, use `BulkInsertAsync`:
+
+```csharp
+var events = Enumerable.Range(0, 100_000)
+    .Select(i => new PageView { Id = i, Path = $"/page/{i}", Date = DateOnly.FromDateTime(DateTime.Today) });
+
+long rowsInserted = await ctx.BulkInsertAsync(events);
+```
+
+This calls `InsertBinaryAsync` directly, bypassing EF Core's change tracker entirely. Entities are **not** tracked after insert.
+
 ### Not Yet Implemented
 
-- INSERT / UPDATE / DELETE (modification commands are stubbed)
+- UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
 - Migrations
 - JOINs, subqueries, set operations
 - Advanced types: Array, Tuple, Nullable(T), LowCardinality, Nested, TimeSpan/TimeOnly
-- Batched inserts
 
 ## Building
 
