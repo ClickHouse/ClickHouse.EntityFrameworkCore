@@ -60,7 +60,12 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         => GetValueMethod;
 
     public override Expression CustomizeDataReaderExpression(Expression expression)
-        => Expression.Convert(expression, ClrType);
+    {
+        // When there's a ValueConverter (e.g. List<T> ↔ T[]), the data reader must produce
+        // the provider type (T[]). EF Core applies the converter afterward.
+        var targetType = Converter?.ProviderClrType ?? ClrType;
+        return Expression.Convert(expression, targetType);
+    }
 
     protected override string GenerateNonNullSqlLiteral(object value)
     {
