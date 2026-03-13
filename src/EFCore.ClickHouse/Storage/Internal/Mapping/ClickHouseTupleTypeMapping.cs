@@ -72,7 +72,6 @@ public class ClickHouseTupleTypeMapping : RelationalTypeMapping
             var factory = ConstructorCache.GetOrAdd(typeof(T), static type =>
             {
                 var ctorParams = type.GetConstructors()[0].GetParameters();
-                var paramExprs = new ParameterExpression[ctorParams.Length];
                 var argsParam = Expression.Parameter(typeof(object[]), "args");
                 var bodyArgs = new Expression[ctorParams.Length];
 

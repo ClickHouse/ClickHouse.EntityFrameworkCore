@@ -8,21 +8,14 @@ namespace EFCore.ClickHouse.Tests;
 
 public class DatabaseCreatorFixture : IAsyncLifetime
 {
-    private readonly ClickHouseContainer _container =
-        new ClickHouseBuilder("clickhouse/clickhouse-server:latest").Build();
-
     public string ConnectionString { get; private set; } = string.Empty;
 
     public async Task InitializeAsync()
     {
-        await _container.StartAsync();
-        ConnectionString = _container.GetConnectionString();
+        ConnectionString = await SharedContainer.GetConnectionStringAsync();
     }
 
-    public async Task DisposeAsync()
-    {
-        await _container.DisposeAsync();
-    }
+    public Task DisposeAsync() => Task.CompletedTask;
 }
 
 /// <summary>

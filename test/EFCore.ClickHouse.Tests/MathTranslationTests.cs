@@ -44,14 +44,11 @@ public class FloatDbContext : DbContext
 
 public class FloatFixture : IAsyncLifetime
 {
-    private readonly ClickHouseContainer _container = new ClickHouseBuilder("clickhouse/clickhouse-server:latest").Build();
-
     public string ConnectionString { get; private set; } = string.Empty;
 
     public async Task InitializeAsync()
     {
-        await _container.StartAsync();
-        ConnectionString = _container.GetConnectionString();
+        ConnectionString = await SharedContainer.GetConnectionStringAsync();
 
         using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(ConnectionString);
         await connection.OpenAsync();
@@ -81,10 +78,7 @@ public class FloatFixture : IAsyncLifetime
         await insertCmd.ExecuteNonQueryAsync();
     }
 
-    public async Task DisposeAsync()
-    {
-        await _container.DisposeAsync();
-    }
+    public Task DisposeAsync() => Task.CompletedTask;
 }
 
 public class MathTranslationTests : IClassFixture<ClickHouseFixture>

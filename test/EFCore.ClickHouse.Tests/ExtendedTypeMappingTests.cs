@@ -337,13 +337,11 @@ public class BigIntegerDbContext : DbContext
 
 public class ExtendedTypesFixture : IAsyncLifetime
 {
-    private readonly ClickHouseContainer _container = new ClickHouseBuilder("clickhouse/clickhouse-server:latest").Build();
     public string ConnectionString { get; private set; } = string.Empty;
 
     public async Task InitializeAsync()
     {
-        await _container.StartAsync();
-        ConnectionString = _container.GetConnectionString();
+        ConnectionString = await SharedContainer.GetConnectionStringAsync();
 
         using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(ConnectionString);
         await connection.OpenAsync();
@@ -543,17 +541,22 @@ public class ExtendedTypesFixture : IAsyncLifetime
         }
     }
 
-    public async Task DisposeAsync()
-    {
-        await _container.DisposeAsync();
-    }
+    public Task DisposeAsync() => Task.CompletedTask;
 }
+
+#endregion
+
+#region Collection Fixture
+
+[CollectionDefinition("ExtendedTypes")]
+public class ExtendedTypesCollection : ICollectionFixture<ExtendedTypesFixture>;
 
 #endregion
 
 #region Tests
 
-public class NullableLowCardinalityTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class NullableLowCardinalityTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public NullableLowCardinalityTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -622,7 +625,8 @@ public class NullableLowCardinalityTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class EnumTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class EnumTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public EnumTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -655,7 +659,8 @@ public class EnumTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class ClrEnumTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class ClrEnumTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public ClrEnumTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -689,7 +694,8 @@ public class ClrEnumTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class IpAddressTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class IpAddressTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public IpAddressTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -721,7 +727,8 @@ public class IpAddressTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class DecimalVariantTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class DecimalVariantTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public DecimalVariantTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -753,7 +760,8 @@ public class DecimalVariantTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class BigDecimalTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class BigDecimalTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public BigDecimalTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -774,7 +782,8 @@ public class BigDecimalTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class ArrayTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class ArrayTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public ArrayTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -798,7 +807,8 @@ public class ArrayTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class ListArrayTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class ListArrayTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public ListArrayTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -822,7 +832,8 @@ public class ListArrayTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class MapTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class MapTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public MapTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -846,7 +857,8 @@ public class MapTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class TupleTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class TupleTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public TupleTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -865,7 +877,8 @@ public class TupleTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class RefTupleTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class RefTupleTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public RefTupleTests(ExtendedTypesFixture fixture) => _fixture = fixture;
@@ -884,7 +897,8 @@ public class RefTupleTests : IClassFixture<ExtendedTypesFixture>
     }
 }
 
-public class BigIntegerTests : IClassFixture<ExtendedTypesFixture>
+[Collection("ExtendedTypes")]
+public class BigIntegerTests
 {
     private readonly ExtendedTypesFixture _fixture;
     public BigIntegerTests(ExtendedTypesFixture fixture) => _fixture = fixture;
