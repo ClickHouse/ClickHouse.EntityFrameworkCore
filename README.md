@@ -63,7 +63,7 @@ public class PageView
 | **Integers** | `Int8`/`Int16`/`Int32`/`Int64`, `UInt8`/`UInt16`/`UInt32`/`UInt64` | `sbyte`, `short`, `int`, `long`, `byte`, `ushort`, `uint`, `ulong` |
 | **Big integers** | `Int128`, `Int256`, `UInt128`, `UInt256` | `BigInteger` |
 | **Floats** | `Float32`, `Float64`, `BFloat16` | `float`, `double` |
-| **Decimals** | `Decimal(P,S)`, `Decimal32(S)`, `Decimal64(S)`, `Decimal128(S)` | `decimal` or `ClickHouseDecimal` |
+| **Decimals** | `Decimal(P,S)`, `Decimal32(S)`, `Decimal64(S)`, `Decimal128(S)`, `Decimal256(S)` | `decimal` or `ClickHouseDecimal` (use `ClickHouseDecimal` for Decimal128/256 to avoid .NET decimal overflow) |
 | **Bool** | `Bool` | `bool` |
 | **Strings** | `String`, `FixedString(N)` | `string` |
 | **Enums** | `Enum8(...)`, `Enum16(...)` | `string` or C# `enum` |

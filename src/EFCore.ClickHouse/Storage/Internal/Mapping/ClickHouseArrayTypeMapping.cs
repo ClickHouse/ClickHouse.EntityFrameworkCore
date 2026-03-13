@@ -69,13 +69,13 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
 
     protected override string GenerateNonNullSqlLiteral(object value)
     {
-        var array = value as Array ?? ((IEnumerable<object>)value).ToArray();
         var sb = new StringBuilder("[");
-        for (var i = 0; i < array.Length; i++)
+        var first = true;
+        foreach (var element in (IEnumerable)value)
         {
-            if (i > 0) sb.Append(", ");
-            var element = array.GetValue(i);
+            if (!first) sb.Append(", ");
             sb.Append(element is null ? "NULL" : ElementMapping.GenerateSqlLiteral(element));
+            first = false;
         }
         sb.Append(']');
         return sb.ToString();
@@ -100,7 +100,7 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
     private static ValueComparer<T[]?> CreateTypedArrayComparer<T>()
         => new(
             (a, b) => StructuralComparisons.StructuralEqualityComparer.Equals(a, b),
-            o => StructuralComparisons.StructuralEqualityComparer.GetHashCode(o!),
+            o => o == null ? 0 : StructuralComparisons.StructuralEqualityComparer.GetHashCode(o),
             source => source == null ? null : (T[])source.Clone());
 
     private static ValueComparer<List<T>?> CreateTypedListComparer<T>()

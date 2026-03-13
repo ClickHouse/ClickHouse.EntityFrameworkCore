@@ -1025,6 +1025,15 @@ public class TypeMappingSourceUnwrapTests
     }
 
     [Fact]
+    public void TimeSpanMapping_GeneratesCorrectLiteral_NegativeDuration()
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(typeof(TimeSpan))!;
+        var literal = mapping.GenerateSqlLiteral(TimeSpan.FromHours(-1.5));
+        Assert.Equal("'-01:30:00'", literal);
+    }
+
+    [Fact]
     public void TimeSpanMapping_Time_TruncatesSubSecond()
     {
         var source = GetTypeMappingSource();

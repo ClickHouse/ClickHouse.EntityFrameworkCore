@@ -28,14 +28,20 @@ public class ClickHouseTimeSpanTypeMapping : RelationalTypeMapping
     protected override string GenerateNonNullSqlLiteral(object value)
     {
         var ts = (TimeSpan)value;
-        // Use TotalHours (not hh) to support values >= 24 hours
-        var basePart = $"{(int)ts.TotalHours:00}:{ts.Minutes:00}:{ts.Seconds:00}";
+        // Use absolute ticks to correctly handle negative TimeSpan values
+        var sign = ts < TimeSpan.Zero ? "-" : "";
+        var absTicks = Math.Abs(ts.Ticks);
+        var totalSeconds = absTicks / TimeSpan.TicksPerSecond;
+        var hours = totalSeconds / 3600;
+        var minutes = (totalSeconds % 3600) / 60;
+        var seconds = totalSeconds % 60;
+        var basePart = $"{sign}{hours:00}:{minutes:00}:{seconds:00}";
 
         if (_fractionalDigits <= 0)
             return $"'{basePart}'";
 
         // 1 tick = 100ns = 10^-7s, so 7 digits at full resolution; truncate to _fractionalDigits
-        var fraction = (ts.Ticks % TimeSpan.TicksPerSecond).ToString("0000000")[.._fractionalDigits];
+        var fraction = (absTicks % TimeSpan.TicksPerSecond).ToString("0000000")[.._fractionalDigits];
         return $"'{basePart}.{fraction}'";
     }
 

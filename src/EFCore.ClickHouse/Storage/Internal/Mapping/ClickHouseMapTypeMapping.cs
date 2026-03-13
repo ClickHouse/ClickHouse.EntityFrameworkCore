@@ -76,7 +76,7 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
     private static ValueComparer<Dictionary<TKey, TValue>?> CreateTypedDictionaryComparer<TKey, TValue>()
         where TKey : notnull
         => new(
-            (a, b) => a != null && b != null && a.Count == b.Count && !a.Except(b).Any(),
+            (a, b) => (a == null && b == null) || (a != null && b != null && a.Count == b.Count && !a.Except(b).Any()),
             o => o == null ? 0 : o.Aggregate(0, (hash, kvp) => hash ^ HashCode.Combine(kvp.Key, kvp.Value)),
             source => source == null ? null : new Dictionary<TKey, TValue>(source));
 }

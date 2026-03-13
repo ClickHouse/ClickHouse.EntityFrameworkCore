@@ -49,6 +49,6 @@ public class ClickHouseBigIntegerTypeMapping : RelationalTypeMapping
             ulong ul => new BigInteger(ul),
             int i => new BigInteger(i),
             uint ui => new BigInteger(ui),
-            _ => BigInteger.Parse(value.ToString()!)
+            _ => BigInteger.Parse(value.ToString()!, CultureInfo.InvariantCulture)
         };
 }
