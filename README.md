@@ -56,11 +56,27 @@ public class PageView
 
 ## Supported Types
 
-`String`, `Bool`, `Int8`/`Int16`/`Int32`/`Int64`, `UInt8`/`UInt16`/`UInt32`/`UInt64`, `Float32`/`Float64`, `Decimal(P, S)`, `Date`/`Date32`, `DateTime`, `DateTime64(P, 'TZ')`, `FixedString(N)`, `UUID`
+| Category | ClickHouse Types | CLR Types |
+|---|---|---|
+| **Integers** | `Int8`/`Int16`/`Int32`/`Int64`, `UInt8`/`UInt16`/`UInt32`/`UInt64` | `sbyte`, `short`, `int`, `long`, `byte`, `ushort`, `uint`, `ulong` |
+| **Big integers** | `Int128`, `Int256`, `UInt128`, `UInt256` | `BigInteger` |
+| **Floats** | `Float32`, `Float64`, `BFloat16` | `float`, `double` |
+| **Decimals** | `Decimal(P,S)`, `Decimal32(S)`, `Decimal64(S)`, `Decimal128(S)`, `Decimal256(S)` | `decimal` or `ClickHouseDecimal` (use `ClickHouseDecimal` for Decimal128/256 to avoid .NET decimal overflow) |
+| **Bool** | `Bool` | `bool` |
+| **Strings** | `String`, `FixedString(N)` | `string` |
+| **Enums** | `Enum8(...)`, `Enum16(...)` | `string` or C# `enum` |
+| **Date/time** | `Date`, `Date32`, `DateTime`, `DateTime64(P, 'TZ')` | `DateOnly`, `DateTime` |
+| **Time** | `Time`, `Time64(N)` | `TimeSpan` |
+| **UUID** | `UUID` | `Guid` |
+| **Network** | `IPv4`, `IPv6` | `IPAddress` |
+| **Arrays** | `Array(T)` | `T[]` or `List<T>` |
+| **Maps** | `Map(K, V)` | `Dictionary<K,V>` |
+| **Tuples** | `Tuple(T1, ...)` | `Tuple<...>` or `ValueTuple<...>` |
+| **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
 
 ## Current Status
 
-This provider is in early development. It supports **read-only queries** — you can map entities to existing ClickHouse tables and query them with LINQ.
+This provider is in early development. It supports **read-only queries** and **inserts** — you can map entities to existing ClickHouse tables, query them with LINQ, and write data via `SaveChanges`.
 
 ### LINQ Queries
 
@@ -122,7 +138,7 @@ This calls `InsertBinaryAsync` directly, bypassing EF Core's change tracker enti
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
 - Migrations
 - JOINs, subqueries, set operations
-- Advanced types: Array, Tuple, Nullable(T), LowCardinality, Nested, TimeSpan/TimeOnly
+- Nested type, Variant, Dynamic, JSON, Geo types
 
 ## Building
 
