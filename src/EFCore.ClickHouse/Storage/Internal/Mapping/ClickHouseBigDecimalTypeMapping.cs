@@ -67,5 +67,5 @@ public class ClickHouseBigDecimalTypeMapping : RelationalTypeMapping
         };
 
     private static string FormatStoreType(int precision, int scale)
-        => $"Decimal({precision}, {scale})";
+        => $"Decimal({precision},{scale})";
 }

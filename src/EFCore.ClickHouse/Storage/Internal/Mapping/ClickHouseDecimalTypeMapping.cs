@@ -32,5 +32,5 @@ public class ClickHouseDecimalTypeMapping : RelationalTypeMapping
         => Convert.ToDecimal(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture);
 
     private static string FormatStoreType(int precision, int scale)
-        => $"Decimal({precision}, {scale})";
+        => $"Decimal({precision},{scale})";
 }

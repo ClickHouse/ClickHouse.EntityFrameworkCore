@@ -93,6 +93,12 @@ public class RefTupleEntity
     public Tuple<int, string> IntStringTuple { get; set; } = Tuple.Create(0, "");
 }
 
+public class BigIntegerEntity
+{
+    public long Id { get; set; }
+    public BigInteger Val128 { get; set; }
+}
+
 #endregion
 
 #region DbContexts
@@ -307,6 +313,24 @@ public class RefTupleDbContext : DbContext
     }
 }
 
+public class BigIntegerDbContext : DbContext
+{
+    public DbSet<BigIntegerEntity> Entities => Set<BigIntegerEntity>();
+    private readonly string _connectionString;
+    public BigIntegerDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<BigIntegerEntity>(e =>
+        {
+            e.ToTable("bigint_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Val128).HasColumnName("val128").HasColumnType("Int128");
+        });
+    }
+}
+
 #endregion
 
 #region Fixtures
@@ -491,6 +515,29 @@ public class ExtendedTypesFixture : IAsyncLifetime
                 (1, (42, 'hello')),
                 (2, (0, '')),
                 (3, (-1, 'world'))
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // BigInteger table
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE bigint_test (
+                    id Int64,
+                    val128 Int128
+                ) ENGINE = MergeTree() ORDER BY id
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                INSERT INTO bigint_test VALUES
+                (1, 123456789012345678),
+                (2, -99999999999999999),
+                (3, 0)
                 """;
             await cmd.ExecuteNonQueryAsync();
         }
@@ -834,6 +881,36 @@ public class RefTupleTests : IClassFixture<ExtendedTypesFixture>
         Assert.Equal(Tuple.Create(42, "hello"), rows[0].IntStringTuple);
         Assert.Equal(Tuple.Create(0, ""), rows[1].IntStringTuple);
         Assert.Equal(Tuple.Create(-1, "world"), rows[2].IntStringTuple);
+    }
+}
+
+public class BigIntegerTests : IClassFixture<ExtendedTypesFixture>
+{
+    private readonly ExtendedTypesFixture _fixture;
+    public BigIntegerTests(ExtendedTypesFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task ReadAll_BigInteger_RoundTrip()
+    {
+        await using var ctx = new BigIntegerDbContext(_fixture.ConnectionString);
+        var rows = await ctx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+
+        Assert.Equal(3, rows.Count);
+
+        Assert.Equal(BigInteger.Parse("123456789012345678"), rows[0].Val128);
+        Assert.Equal(BigInteger.Parse("-99999999999999999"), rows[1].Val128);
+        Assert.Equal(BigInteger.Zero, rows[2].Val128);
+    }
+
+    [Fact]
+    public async Task Where_BigInteger_Filter()
+    {
+        await using var ctx = new BigIntegerDbContext(_fixture.ConnectionString);
+        var result = await ctx.Entities
+            .Where(e => e.Id == 1)
+            .AsNoTracking().SingleAsync();
+
+        Assert.Equal(BigInteger.Parse("123456789012345678"), result.Val128);
     }
 }
 
