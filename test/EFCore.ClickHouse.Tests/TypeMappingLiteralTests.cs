@@ -2,6 +2,9 @@ using System.Net;
 using System.Numerics;
 using ClickHouse.Driver.Numerics;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
@@ -303,5 +306,89 @@ public class TypeMappingLiteralTests
         var mapping = new ClickHouseTupleTypeMapping([intMapping, strMapping]);
         var literal = mapping.GenerateSqlLiteral(null);
         Assert.Equal("NULL", literal);
+    }
+
+    // --- Variant (ClickHouseVariantTypeMapping) ---
+
+    [Fact]
+    public void Variant_StringValue_GeneratesCastLiteral()
+    {
+        var strMapping = new ClickHouseStringTypeMapping();
+        var uint64Mapping = new ClickHouseIntegerTypeMapping("UInt64", typeof(ulong), System.Data.DbType.UInt64);
+        var mapping = new ClickHouseVariantTypeMapping([strMapping, uint64Mapping]);
+        var literal = mapping.GenerateSqlLiteral("hello");
+        Assert.Equal("'hello'::String", literal);
+    }
+
+    [Fact]
+    public void Variant_UInt64Value_GeneratesCastLiteral()
+    {
+        var strMapping = new ClickHouseStringTypeMapping();
+        var uint64Mapping = new ClickHouseIntegerTypeMapping("UInt64", typeof(ulong), System.Data.DbType.UInt64);
+        var mapping = new ClickHouseVariantTypeMapping([strMapping, uint64Mapping]);
+        var literal = mapping.GenerateSqlLiteral(42UL);
+        Assert.Equal("42::UInt64", literal);
+    }
+
+    [Fact]
+    public void Variant_Null_GeneratesNullLiteral()
+    {
+        var strMapping = new ClickHouseStringTypeMapping();
+        var uint64Mapping = new ClickHouseIntegerTypeMapping("UInt64", typeof(ulong), System.Data.DbType.UInt64);
+        var mapping = new ClickHouseVariantTypeMapping([strMapping, uint64Mapping]);
+        var literal = mapping.GenerateSqlLiteral(null);
+        Assert.Equal("NULL", literal);
+    }
+
+    [Fact]
+    public void Variant_NoMatchingType_Throws()
+    {
+        var strMapping = new ClickHouseStringTypeMapping();
+        var mapping = new ClickHouseVariantTypeMapping([strMapping]);
+        Assert.Throws<InvalidOperationException>(() => mapping.GenerateSqlLiteral(42));
+    }
+
+    // --- Dynamic (ClickHouseDynamicTypeMapping) ---
+
+    [Fact]
+    public void Dynamic_StringValue_GeneratesLiteral()
+    {
+        var source = GetTypeMappingSource();
+        var mapping = new ClickHouseDynamicTypeMapping(source);
+        var literal = mapping.GenerateSqlLiteral("hello");
+        Assert.Equal("'hello'", literal);
+    }
+
+    [Fact]
+    public void Dynamic_IntValue_GeneratesLiteral()
+    {
+        var source = GetTypeMappingSource();
+        var mapping = new ClickHouseDynamicTypeMapping(source);
+        var literal = mapping.GenerateSqlLiteral(42);
+        Assert.Equal("42", literal);
+    }
+
+    [Fact]
+    public void Dynamic_Null_GeneratesNullLiteral()
+    {
+        var mapping = new ClickHouseDynamicTypeMapping();
+        var literal = mapping.GenerateSqlLiteral(null);
+        Assert.Equal("NULL", literal);
+    }
+
+    [Fact]
+    public void Dynamic_NoSource_Throws()
+    {
+        var mapping = new ClickHouseDynamicTypeMapping();
+        Assert.Throws<InvalidOperationException>(() => mapping.GenerateSqlLiteral("hello"));
+    }
+
+    private static Microsoft.EntityFrameworkCore.Storage.IRelationalTypeMappingSource GetTypeMappingSource()
+    {
+        var builder = new DbContextOptionsBuilder();
+        builder.UseClickHouse("Host=localhost;Protocol=http");
+        using var ctx = new DbContext(builder.Options);
+        return ((IInfrastructure<IServiceProvider>)ctx).Instance
+            .GetRequiredService<Microsoft.EntityFrameworkCore.Storage.IRelationalTypeMappingSource>();
     }
 }

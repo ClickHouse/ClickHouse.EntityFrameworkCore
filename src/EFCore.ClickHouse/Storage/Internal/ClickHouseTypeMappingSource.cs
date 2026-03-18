@@ -203,10 +203,11 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             return baseName;
         }
 
-        // Array(...), Map(...), Tuple(...) — return base name, inner parsing in FindMapping
+        // Array(...), Map(...), Tuple(...), Variant(...) — return base name, inner parsing in FindMapping
         if (string.Equals(baseName, "Array", StringComparison.OrdinalIgnoreCase)
             || string.Equals(baseName, "Map", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(baseName, "Tuple", StringComparison.OrdinalIgnoreCase))
+            || string.Equals(baseName, "Tuple", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(baseName, "Variant", StringComparison.OrdinalIgnoreCase))
         {
             return baseName;
         }
@@ -225,6 +226,8 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
            ?? FindArrayMapping(mappingInfo)
            ?? FindMapMapping(mappingInfo)
            ?? FindTupleMapping(mappingInfo)
+           ?? FindVariantMapping(mappingInfo)
+           ?? FindDynamicMapping(mappingInfo)
            ?? FindEnumMapping(mappingInfo)
            ?? FindExistingMapping(mappingInfo)
            ?? FindDecimalMapping(mappingInfo);
@@ -407,6 +410,39 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         }
 
         return null;
+    }
+
+    private RelationalTypeMapping? FindVariantMapping(in RelationalTypeMappingInfo mappingInfo)
+    {
+        if (!string.Equals(mappingInfo.StoreTypeNameBase, "Variant", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var storeTypeName = mappingInfo.StoreTypeName;
+        if (storeTypeName is null)
+            return null;
+
+        var innerTypes = ExtractInnerTypes(storeTypeName, "Variant");
+        if (innerTypes is null || innerTypes.Count == 0)
+            return null;
+
+        var elementMappings = new List<RelationalTypeMapping>();
+        foreach (var innerType in innerTypes)
+        {
+            var mapping = FindMapping(innerType);
+            if (mapping is null)
+                return null;
+            elementMappings.Add(mapping);
+        }
+
+        return new ClickHouseVariantTypeMapping(elementMappings);
+    }
+
+    private RelationalTypeMapping? FindDynamicMapping(in RelationalTypeMappingInfo mappingInfo)
+    {
+        if (!string.Equals(mappingInfo.StoreTypeNameBase, "Dynamic", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return new ClickHouseDynamicTypeMapping(this);
     }
 
     private static bool IsReferenceTuple(Type? type)

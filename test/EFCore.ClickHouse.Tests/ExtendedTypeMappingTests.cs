@@ -99,6 +99,18 @@ public class BigIntegerEntity
     public BigInteger Val128 { get; set; }
 }
 
+public class VariantEntity
+{
+    public long Id { get; set; }
+    public object? Val { get; set; }
+}
+
+public class DynamicEntity
+{
+    public long Id { get; set; }
+    public object? Val { get; set; }
+}
+
 #endregion
 
 #region DbContexts
@@ -331,6 +343,42 @@ public class BigIntegerDbContext : DbContext
     }
 }
 
+public class VariantDbContext : DbContext
+{
+    public DbSet<VariantEntity> Entities => Set<VariantEntity>();
+    private readonly string _connectionString;
+    public VariantDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<VariantEntity>(e =>
+        {
+            e.ToTable("variant_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Val).HasColumnName("val").HasColumnType("Variant(String, UInt64, Array(UInt64))");
+        });
+    }
+}
+
+public class DynamicDbContext : DbContext
+{
+    public DbSet<DynamicEntity> Entities => Set<DynamicEntity>();
+    private readonly string _connectionString;
+    public DynamicDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<DynamicEntity>(e =>
+        {
+            e.ToTable("dynamic_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Val).HasColumnName("val").HasColumnType("Dynamic");
+        });
+    }
+}
+
 #endregion
 
 #region Fixtures
@@ -537,6 +585,80 @@ public class ExtendedTypesFixture : IAsyncLifetime
                 (2, -99999999999999999),
                 (3, 0)
                 """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // Variant table
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SET allow_experimental_variant_type = 1";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE variant_test (
+                    id Int64,
+                    val Variant(String, UInt64, Array(UInt64))
+                ) ENGINE = MergeTree() ORDER BY id
+                SETTINGS allow_experimental_variant_type = 1
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                INSERT INTO variant_test VALUES
+                (1, 'hello'::String),
+                (2, 42::UInt64),
+                (3, [1, 2, 3]::Array(UInt64))
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // NULL must be inserted separately to avoid ClickHouse type coercion within a batch
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "INSERT INTO variant_test VALUES (4, NULL)";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // Dynamic table
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SET allow_experimental_dynamic_type = 1";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE dynamic_test (
+                    id Int64,
+                    val Dynamic
+                ) ENGINE = MergeTree() ORDER BY id
+                SETTINGS allow_experimental_dynamic_type = 1
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                INSERT INTO dynamic_test VALUES
+                (1, 'world'::String),
+                (2, 99::UInt64),
+                (3, 3.14::Float64)
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // NULL must be inserted separately to avoid ClickHouse type coercion within a batch
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "INSERT INTO dynamic_test VALUES (4, NULL)";
             await cmd.ExecuteNonQueryAsync();
         }
     }
@@ -928,6 +1050,90 @@ public class BigIntegerTests
     }
 }
 
+[Collection("ExtendedTypes")]
+public class VariantTests
+{
+    private readonly ExtendedTypesFixture _fixture;
+    public VariantTests(ExtendedTypesFixture fixture) => _fixture = fixture;
+
+    [Fact(Skip ="Variant null incompatibility for the moment in the client")]
+    public async Task ReadAll_Variant_MixedTypes_RoundTrip()
+    {
+        await using var ctx = new VariantDbContext(_fixture.ConnectionString);
+        var rows = await ctx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+
+        Assert.Equal(4, rows.Count);
+
+        // Row 1: String
+        Assert.IsType<string>(rows[0].Val);
+        Assert.Equal("hello", rows[0].Val);
+
+        // Row 2: UInt64
+        Assert.IsType<ulong>(rows[1].Val);
+        Assert.Equal(42UL, rows[1].Val);
+
+        // Row 3: Array(UInt64)
+        Assert.IsType<ulong[]>(rows[2].Val);
+        Assert.Equal(new ulong[] { 1, 2, 3 }, (ulong[])rows[2].Val!);
+
+        // Row 4: NULL
+        Assert.Null(rows[3].Val);
+    }
+
+    [Fact]
+    public async Task Where_Variant_ById()
+    {
+        await using var ctx = new VariantDbContext(_fixture.ConnectionString);
+        var result = await ctx.Entities
+            .Where(e => e.Id == 2)
+            .AsNoTracking().SingleAsync();
+
+        Assert.Equal(42UL, result.Val);
+    }
+}
+
+[Collection("ExtendedTypes")]
+public class DynamicTests
+{
+    private readonly ExtendedTypesFixture _fixture;
+    public DynamicTests(ExtendedTypesFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task ReadAll_Dynamic_MixedTypes_RoundTrip()
+    {
+        await using var ctx = new DynamicDbContext(_fixture.ConnectionString);
+        var rows = await ctx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+
+        Assert.Equal(4, rows.Count);
+
+        // Row 1: String
+        Assert.IsType<string>(rows[0].Val);
+        Assert.Equal("world", rows[0].Val);
+
+        // Row 2: UInt64
+        Assert.IsType<ulong>(rows[1].Val);
+        Assert.Equal(99UL, rows[1].Val);
+
+        // Row 3: Float64
+        Assert.IsType<double>(rows[2].Val);
+        Assert.Equal(3.14, (double)rows[2].Val!, 2);
+
+        // Row 4: NULL
+        Assert.Null(rows[3].Val);
+    }
+
+    [Fact]
+    public async Task Where_Dynamic_ById()
+    {
+        await using var ctx = new DynamicDbContext(_fixture.ConnectionString);
+        var result = await ctx.Entities
+            .Where(e => e.Id == 1)
+            .AsNoTracking().SingleAsync();
+
+        Assert.Equal("world", result.Val);
+    }
+}
+
 #endregion
 
 #region Unit Tests for Type Mapping Source
@@ -1161,6 +1367,29 @@ public class TypeMappingSourceUnwrapTests
         // And back
         var back = mapping.Converter.ConvertFromProvider("b");
         Assert.Equal(TestEnum8.b, back);
+    }
+
+    [Theory]
+    [InlineData("Variant(String, UInt64)")]
+    [InlineData("Variant(String, Int64, Float64)")]
+    [InlineData("Variant(String, Array(Int32))")]
+    public void FindMapping_VariantTypes_Resolves(string storeType)
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(typeof(object), storeType);
+        Assert.NotNull(mapping);
+        Assert.Equal(typeof(object), mapping.ClrType);
+        Assert.Equal(storeType, mapping.StoreType);
+    }
+
+    [Fact]
+    public void FindMapping_Dynamic_Resolves()
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(typeof(object), "Dynamic");
+        Assert.NotNull(mapping);
+        Assert.Equal(typeof(object), mapping.ClrType);
+        Assert.Equal("Dynamic", mapping.StoreType);
     }
 
     private static Microsoft.EntityFrameworkCore.Storage.IRelationalTypeMappingSource GetTypeMappingSource()
