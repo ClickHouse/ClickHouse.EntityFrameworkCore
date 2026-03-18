@@ -168,7 +168,7 @@ var ev = await ctx.Events.Where(e => e.Id == 1).SingleAsync();
 string action = ev.Payload!["action"]!.GetValue<string>(); // "click"
 ```
 
-If you prefer working with raw JSON strings, map the property as `string` with a `Json` column type — the provider applies a `ValueConverter` automatically:
+If you prefer working with raw JSON strings, map the property as `string` with a `Json` column type — the provider will store and retrieve the raw JSON string as-is:
 
 ```csharp
 public class Event

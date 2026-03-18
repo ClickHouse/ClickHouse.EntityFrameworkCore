@@ -599,6 +599,15 @@ public class GeoGeometryTests
 
         // Row 2: Ring/LineString [(0,0), (1,1), (2,0)] — driver returns Tuple<double,double>[]
         Assert.NotNull(rows[1].Val);
+        Assert.IsType<Tuple<double, double>[]>(rows[1].Val);
+        var ring = (Tuple<double, double>[])rows[1].Val!;
+        Assert.Equal(3, ring.Length);
+        Assert.Equal(0.0, ring[0].Item1);
+        Assert.Equal(0.0, ring[0].Item2);
+        Assert.Equal(1.0, ring[1].Item1);
+        Assert.Equal(1.0, ring[1].Item2);
+        Assert.Equal(2.0, ring[2].Item1);
+        Assert.Equal(0.0, ring[2].Item2);
     }
 }
 

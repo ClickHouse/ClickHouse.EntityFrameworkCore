@@ -492,12 +492,15 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         if (!string.Equals(mappingInfo.StoreTypeNameBase, "Json", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        // string CLR type + Json store type → ValueConverter-backed mapping
+        // string CLR type + Json store type → specific string Json mapping
         if (mappingInfo.ClrType == typeof(string))
-            return new ClickHouseJsonTypeMapping(typeof(string));
+            return StringJsonMapping;
 
         return JsonMapping;
     }
+
+    // Cached string-specific Json mapping to avoid repeated allocations
+     private static readonly RelationalTypeMapping StringJsonMapping = new ClickHouseJsonTypeMapping(typeof(string));
 
     private static bool IsReferenceTuple(Type? type)
         => type is not null && type.IsGenericType && type.FullName?.StartsWith("System.Tuple`") == true;
