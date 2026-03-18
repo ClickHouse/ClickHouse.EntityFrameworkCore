@@ -75,6 +75,7 @@ public class PageView
 | **Variant** | `Variant(T1, T2, ...)` | `object` |
 | **Dynamic** | `Dynamic` | `object` |
 | **JSON** | `Json` | `JsonNode` or `string` |
+| **Geographic** | `Point`, `Ring`, `LineString`, `Polygon`, `MultiLineString`, `MultiPolygon`, `Geometry` | `Tuple<double,double>` and arrays thereof; `object` for Geometry |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
 
 ## Current Status
@@ -167,7 +168,7 @@ var ev = await ctx.Events.Where(e => e.Id == 1).SingleAsync();
 string action = ev.Payload!["action"]!.GetValue<string>(); // "click"
 ```
 
-If you prefer working with raw JSON strings, map the property as `string` with a `Json` column type — the provider applies a `ValueConverter` automatically:
+If you prefer working with raw JSON strings, map the property as `string` with a `Json` column type — the provider will store and retrieve the raw JSON string as-is:
 
 ```csharp
 public class Event
@@ -192,7 +193,6 @@ entity.Property(e => e.Payload).HasColumnType("Json");
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
 - Migrations
 - JOINs, subqueries, set operations
-- Geo types
 
 ## Building
 

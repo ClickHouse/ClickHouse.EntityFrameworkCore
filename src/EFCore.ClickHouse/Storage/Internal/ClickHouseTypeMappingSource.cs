@@ -38,6 +38,32 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     private static readonly RelationalTypeMapping TimeMapping = new ClickHouseTimeSpanTypeMapping();
     private static readonly RelationalTypeMapping JsonMapping = new ClickHouseJsonTypeMapping();
 
+    // Geo types — structural aliases composed from existing Tuple/Array/Variant mappings.
+    // Driver returns Tuple<double, double> (reference tuple) for Point; array-based geo types
+    // require reference tuples because Expression.Convert cannot convert Tuple<>[] to ValueTuple<>[].
+    private static readonly RelationalTypeMapping GeoPointMapping =
+        new ClickHouseTupleTypeMapping([Float64Mapping, Float64Mapping], useValueTuple: false);
+    private static readonly RelationalTypeMapping GeoRingMapping =
+        new ClickHouseArrayTypeMapping(GeoPointMapping);
+    private static readonly RelationalTypeMapping GeoLineStringMapping =
+        new ClickHouseArrayTypeMapping(GeoPointMapping);
+    private static readonly RelationalTypeMapping GeoPolygonMapping =
+        new ClickHouseArrayTypeMapping(GeoRingMapping);
+    private static readonly RelationalTypeMapping GeoMultiLineStringMapping =
+        new ClickHouseArrayTypeMapping(GeoLineStringMapping);
+    private static readonly RelationalTypeMapping GeoMultiPolygonMapping =
+        new ClickHouseArrayTypeMapping(GeoPolygonMapping);
+    // Alphabetical order matches driver's GeometryType discriminator indices
+    private static readonly RelationalTypeMapping GeoGeometryMapping =
+        new ClickHouseVariantTypeMapping([
+            GeoLineStringMapping,      // 0
+            GeoMultiLineStringMapping, // 1
+            GeoMultiPolygonMapping,    // 2
+            GeoPointMapping,           // 3
+            GeoPolygonMapping,         // 4
+            GeoRingMapping,            // 5
+        ]);
+
     private static readonly Dictionary<Type, RelationalTypeMapping> ClrTypeMappings = new()
     {
         { typeof(string), StringMapping },
@@ -103,6 +129,15 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             ["IPv6"] = IPv6Mapping,
 
             ["Json"] = JsonMapping,
+
+            // Geo types (structural aliases for Tuple/Array/Variant)
+            ["Point"] = GeoPointMapping,
+            ["Ring"] = GeoRingMapping,
+            ["LineString"] = GeoLineStringMapping,
+            ["Polygon"] = GeoPolygonMapping,
+            ["MultiLineString"] = GeoMultiLineStringMapping,
+            ["MultiPolygon"] = GeoMultiPolygonMapping,
+            ["Geometry"] = GeoGeometryMapping,
         };
 
     // Matches a single-quoted string like 'UTC' or 'Asia/Tokyo'
@@ -457,12 +492,15 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         if (!string.Equals(mappingInfo.StoreTypeNameBase, "Json", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        // string CLR type + Json store type → ValueConverter-backed mapping
+        // string CLR type + Json store type → specific string Json mapping
         if (mappingInfo.ClrType == typeof(string))
-            return new ClickHouseJsonTypeMapping(typeof(string));
+            return StringJsonMapping;
 
         return JsonMapping;
     }
+
+    // Cached string-specific Json mapping to avoid repeated allocations
+     private static readonly RelationalTypeMapping StringJsonMapping = new ClickHouseJsonTypeMapping(typeof(string));
 
     private static bool IsReferenceTuple(Type? type)
         => type is not null && type.IsGenericType && type.FullName?.StartsWith("System.Tuple`") == true;
