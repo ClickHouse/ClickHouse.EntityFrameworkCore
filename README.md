@@ -75,6 +75,7 @@ public class PageView
 | **Variant** | `Variant(T1, T2, ...)` | `object` |
 | **Dynamic** | `Dynamic` | `object` |
 | **JSON** | `Json` | `JsonNode` or `string` |
+| **Geographic** | `Point`, `Ring`, `LineString`, `Polygon`, `MultiLineString`, `MultiPolygon`, `Geometry` | `Tuple<double,double>` and arrays thereof; `object` for Geometry |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
 
 ## Current Status
@@ -192,7 +193,6 @@ entity.Property(e => e.Payload).HasColumnType("Json");
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
 - Migrations
 - JOINs, subqueries, set operations
-- Geo types
 
 ## Building
 
