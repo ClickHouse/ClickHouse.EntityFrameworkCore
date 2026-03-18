@@ -72,6 +72,8 @@ public class PageView
 | **Arrays** | `Array(T)` | `T[]` or `List<T>` |
 | **Maps** | `Map(K, V)` | `Dictionary<K,V>` |
 | **Tuples** | `Tuple(T1, ...)` | `Tuple<...>` or `ValueTuple<...>` |
+| **Variant** | `Variant(T1, T2, ...)` | `object` |
+| **Dynamic** | `Dynamic` | `object` |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
 
 ## Current Status
@@ -138,7 +140,7 @@ This calls `InsertBinaryAsync` directly, bypassing EF Core's change tracker enti
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
 - Migrations
 - JOINs, subqueries, set operations
-- Nested type, Variant, Dynamic, JSON, Geo types
+- Nested type, JSON, Geo types
 
 ## Building
 
