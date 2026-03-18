@@ -74,6 +74,7 @@ public class PageView
 | **Tuples** | `Tuple(T1, ...)` | `Tuple<...>` or `ValueTuple<...>` |
 | **Variant** | `Variant(T1, T2, ...)` | `object` |
 | **Dynamic** | `Dynamic` | `object` |
+| **JSON** | `Json` | `JsonNode` or `string` |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
 
 ## Current Status
@@ -135,12 +136,63 @@ long rowsInserted = await ctx.BulkInsertAsync(events);
 
 This calls `InsertBinaryAsync` directly, bypassing EF Core's change tracker entirely. Entities are **not** tracked after insert.
 
+### JSON Columns
+
+The provider supports ClickHouse's `Json` column type, mapping to `System.Text.Json.Nodes.JsonNode` or `string`.
+
+```csharp
+using System.Text.Json.Nodes;
+
+public class Event
+{
+    public long Id { get; set; }
+    public JsonNode? Payload { get; set; }
+}
+
+// In OnModelCreating:
+entity.Property(e => e.Payload).HasColumnType("Json");
+```
+
+Reading and writing JSON works through both `SaveChanges` and `BulkInsertAsync`:
+
+```csharp
+ctx.Events.Add(new Event
+{
+    Id = 1,
+    Payload = JsonNode.Parse("""{"action": "click", "x": 100, "y": 200}""")
+});
+await ctx.SaveChangesAsync();
+
+var ev = await ctx.Events.Where(e => e.Id == 1).SingleAsync();
+string action = ev.Payload!["action"]!.GetValue<string>(); // "click"
+```
+
+If you prefer working with raw JSON strings, map the property as `string` with a `Json` column type — the provider applies a `ValueConverter` automatically:
+
+```csharp
+public class Event
+{
+    public long Id { get; set; }
+    public string? Payload { get; set; }  // raw JSON string
+}
+
+entity.Property(e => e.Payload).HasColumnType("Json");
+```
+
+**Limitations:**
+
+- **No JSON path translation** — `entity.Payload["name"]` in LINQ does not translate to ClickHouse's `data.name` SQL syntax. Filter on non-JSON columns or load entities and inspect JSON in memory.
+- **No owned entity mapping** — `.ToJson()` / `StructuralJsonTypeMapping` is not supported. JSON columns are opaque `JsonNode` or `string` values.
+- **`JsonElement` / `JsonDocument` not supported** — only `JsonNode` and `string` CLR types are mapped.
+- **NULL semantics** — ClickHouse's JSON type returns `{}` (empty object) for NULL values rather than SQL NULL. A row inserted with `Data = null` will read back as an empty `JsonNode`, not `null`.
+- **Integer precision** — ClickHouse JSON stores all integers as `Int64` unless the path is typed otherwise. When reading via `JsonNode`, use `GetValue<long>()` rather than `GetValue<int>()`.
+
 ### Not Yet Implemented
 
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
 - Migrations
 - JOINs, subqueries, set operations
-- Nested type, JSON, Geo types
+- Geo types
 
 ## Building
 

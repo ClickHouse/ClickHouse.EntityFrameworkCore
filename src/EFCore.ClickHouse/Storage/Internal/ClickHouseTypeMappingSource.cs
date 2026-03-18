@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Data;
 using System.Net;
 using System.Numerics;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using ClickHouse.Driver.Numerics;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
@@ -35,6 +36,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     private static readonly RelationalTypeMapping UInt128Mapping = new ClickHouseBigIntegerTypeMapping("UInt128");
     private static readonly RelationalTypeMapping UInt256Mapping = new ClickHouseBigIntegerTypeMapping("UInt256");
     private static readonly RelationalTypeMapping TimeMapping = new ClickHouseTimeSpanTypeMapping();
+    private static readonly RelationalTypeMapping JsonMapping = new ClickHouseJsonTypeMapping();
 
     private static readonly Dictionary<Type, RelationalTypeMapping> ClrTypeMappings = new()
     {
@@ -58,6 +60,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         { typeof(BigInteger), Int128Mapping },
         { typeof(TimeSpan), TimeMapping },
         { typeof(ClickHouseDecimal), new ClickHouseBigDecimalTypeMapping() },
+        { typeof(JsonNode), JsonMapping },
     };
 
     private static readonly Dictionary<string, RelationalTypeMapping> StoreTypeMappings =
@@ -98,6 +101,8 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
             ["IPv4"] = IPv4Mapping,
             ["IPv6"] = IPv6Mapping,
+
+            ["Json"] = JsonMapping,
         };
 
     // Matches a single-quoted string like 'UTC' or 'Asia/Tokyo'
@@ -203,11 +208,12 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             return baseName;
         }
 
-        // Array(...), Map(...), Tuple(...), Variant(...) — return base name, inner parsing in FindMapping
+        // Array(...), Map(...), Tuple(...), Variant(...), Json(...) — return base name, inner parsing in FindMapping
         if (string.Equals(baseName, "Array", StringComparison.OrdinalIgnoreCase)
             || string.Equals(baseName, "Map", StringComparison.OrdinalIgnoreCase)
             || string.Equals(baseName, "Tuple", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(baseName, "Variant", StringComparison.OrdinalIgnoreCase))
+            || string.Equals(baseName, "Variant", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(baseName, "Json", StringComparison.OrdinalIgnoreCase))
         {
             return baseName;
         }
@@ -228,6 +234,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
            ?? FindTupleMapping(mappingInfo)
            ?? FindVariantMapping(mappingInfo)
            ?? FindDynamicMapping(mappingInfo)
+           ?? FindJsonMapping(mappingInfo)
            ?? FindEnumMapping(mappingInfo)
            ?? FindExistingMapping(mappingInfo)
            ?? FindDecimalMapping(mappingInfo);
@@ -443,6 +450,18 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             return null;
 
         return new ClickHouseDynamicTypeMapping(this);
+    }
+
+    private static RelationalTypeMapping? FindJsonMapping(in RelationalTypeMappingInfo mappingInfo)
+    {
+        if (!string.Equals(mappingInfo.StoreTypeNameBase, "Json", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // string CLR type + Json store type → ValueConverter-backed mapping
+        if (mappingInfo.ClrType == typeof(string))
+            return new ClickHouseJsonTypeMapping(typeof(string));
+
+        return JsonMapping;
     }
 
     private static bool IsReferenceTuple(Type? type)
