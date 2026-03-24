@@ -1056,7 +1056,7 @@ public class VariantTests
     private readonly ExtendedTypesFixture _fixture;
     public VariantTests(ExtendedTypesFixture fixture) => _fixture = fixture;
 
-    [Fact(Skip ="Variant null incompatibility for the moment in the client")]
+    [Fact]
     public async Task ReadAll_Variant_MixedTypes_RoundTrip()
     {
         await using var ctx = new VariantDbContext(_fixture.ConnectionString);
