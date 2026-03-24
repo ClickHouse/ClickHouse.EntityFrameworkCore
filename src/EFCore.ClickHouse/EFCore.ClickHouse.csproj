@@ -25,7 +25,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.2" />
-    <PackageReference Include="ClickHouse.Driver" Version="1.0.0" />
+    <PackageReference Include="ClickHouse.Driver" Version="1.1.0" />
   </ItemGroup>
 
   <ItemGroup>
