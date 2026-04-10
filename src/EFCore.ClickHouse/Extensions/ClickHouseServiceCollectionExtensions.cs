@@ -7,8 +7,11 @@ using ClickHouse.EntityFrameworkCore.Query;
 using ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 using ClickHouse.EntityFrameworkCore.Query.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
+using ClickHouse.EntityFrameworkCore.Migrations;
+using ClickHouse.EntityFrameworkCore.Migrations.Internal;
 using ClickHouse.EntityFrameworkCore.Update.Internal;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Conventions.Infrastructure;
@@ -35,6 +38,9 @@ public static class ClickHouseServiceCollectionExtensions
             .TryAdd<IRelationalConnection>(p => p.GetRequiredService<IClickHouseRelationalConnection>())
             .TryAdd<IRelationalDatabaseCreator, ClickHouseDatabaseCreator>()
             .TryAdd<IExecutionStrategyFactory, ClickHouseExecutionStrategyFactory>()
+            .TryAdd<IMigrationsSqlGenerator, ClickHouseMigrationsSqlGenerator>()
+            .TryAdd<IHistoryRepository, ClickHouseHistoryRepository>()
+            .TryAdd<IMigrationsAnnotationProvider, ClickHouseMigrationsAnnotationProvider>()
             .TryAdd<IQueryableMethodTranslatingExpressionVisitorFactory, ClickHouseQueryableMethodTranslatingExpressionVisitorFactory>()
             .TryAdd<IMethodCallTranslatorProvider, ClickHouseMethodCallTranslatorProvider>()
             .TryAdd<IAggregateMethodCallTranslatorProvider, ClickHouseAggregateMethodCallTranslatorProvider>()
