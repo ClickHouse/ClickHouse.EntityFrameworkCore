@@ -112,23 +112,25 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         if (!string.IsNullOrWhiteSpace(defaultValue))
             builder.Append(" DEFAULT ").Append(defaultValue);
 
-        // CODEC
-        var codec = operation.FindAnnotation(ClickHouseAnnotationNames.ColumnCodec);
-        if (codec?.Value is string codecStr && !string.IsNullOrWhiteSpace(codecStr))
-            builder.Append($" CODEC({codecStr})");
+        // ClickHouse column definition order: DEFAULT → COMMENT → CODEC → TTL
 
-        // Column TTL
-        var columnTtl = operation.FindAnnotation(ClickHouseAnnotationNames.ColumnTtl);
-        if (columnTtl?.Value is string ttlStr && !string.IsNullOrWhiteSpace(ttlStr))
-            builder.Append($" TTL {ttlStr}");
-
-        // Column COMMENT
+        // COMMENT
         var comment = operation.FindAnnotation(ClickHouseAnnotationNames.ColumnComment);
         if (comment?.Value is string commentStr && !string.IsNullOrWhiteSpace(commentStr))
         {
             var escaped = commentStr.Replace("'", "\\'");
             builder.Append($" COMMENT '{escaped}'");
         }
+
+        // CODEC
+        var codec = operation.FindAnnotation(ClickHouseAnnotationNames.ColumnCodec);
+        if (codec?.Value is string codecStr && !string.IsNullOrWhiteSpace(codecStr))
+            builder.Append($" CODEC({codecStr})");
+
+        // TTL
+        var columnTtl = operation.FindAnnotation(ClickHouseAnnotationNames.ColumnTtl);
+        if (columnTtl?.Value is string ttlStr && !string.IsNullOrWhiteSpace(ttlStr))
+            builder.Append($" TTL {ttlStr}");
     }
 
     protected override void ComputedColumnDefinition(

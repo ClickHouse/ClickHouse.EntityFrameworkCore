@@ -18,17 +18,15 @@ public class SmokeDbContext : DbContext
             b.HasKey(e => e.Id);
             b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
             b.Property(e => e.Timestamp)
-                .HasColumnTtl("Timestamp + INTERVAL 90 DAY")
                 .HasColumnComment("Reading timestamp");
             b.HasIndex(e => e.Timestamp)
                 .HasSkippingIndexType("minmax")
                 .HasGranularity(4);
             b.ToTable("sensor_readings", t => t
                 .HasReplacingMergeTreeEngine("Version")
-                .WithOrderBy("SensorId", "Timestamp")
+                .WithOrderBy("Id", "Timestamp")
                 .WithPartitionBy("toYYYYMM(Timestamp)")
-                .WithPrimaryKey("SensorId")
-                .WithSampleBy("SensorId")
+                .WithPrimaryKey("Id")
                 .WithTtl("Timestamp + INTERVAL 1 YEAR")
                 .WithSetting("index_granularity", "4096"));
         });
@@ -60,8 +58,10 @@ public class SmokeDbContextFactory : IDesignTimeDbContextFactory<SmokeDbContext>
 {
     public SmokeDbContext CreateDbContext(string[] args)
     {
+        var connectionString = Environment.GetEnvironmentVariable("CLICKHOUSE_CONNECTION_STRING")
+            ?? "Host=localhost;Database=smoke_test";
         var optionsBuilder = new DbContextOptionsBuilder<SmokeDbContext>();
-        optionsBuilder.UseClickHouse("Host=localhost;Database=smoke_test");
+        optionsBuilder.UseClickHouse(connectionString);
         return new SmokeDbContext(optionsBuilder.Options);
     }
 }

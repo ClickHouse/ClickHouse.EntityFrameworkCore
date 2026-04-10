@@ -447,13 +447,13 @@ public class MigrationSqlGeneratorTests
             op.Columns.Add(col);
         });
 
-        // Verify order: type CODEC TTL COMMENT
+        // Verify order per ClickHouse docs: COMMENT → CODEC → TTL
         var tempLine = sql.Split('\n').First(l => l.Contains("`Temp`"));
+        var commentIdx = tempLine.IndexOf("COMMENT ", StringComparison.Ordinal);
         var codecIdx = tempLine.IndexOf("CODEC(", StringComparison.Ordinal);
         var ttlIdx = tempLine.IndexOf("TTL ", StringComparison.Ordinal);
-        var commentIdx = tempLine.IndexOf("COMMENT ", StringComparison.Ordinal);
+        Assert.True(commentIdx < codecIdx, "COMMENT should come before CODEC");
         Assert.True(codecIdx < ttlIdx, "CODEC should come before TTL");
-        Assert.True(ttlIdx < commentIdx, "TTL should come before COMMENT");
     }
 
     [Fact]

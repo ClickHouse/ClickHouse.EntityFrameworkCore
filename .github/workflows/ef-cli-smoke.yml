@@ -10,7 +10,7 @@ on:
 
 jobs:
   ef-cli-smoke:
-    name: dotnet-ef smoke test
+    name: dotnet-ef integration tests
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -24,72 +24,5 @@ jobs:
     - name: Install dotnet-ef
       run: dotnet tool install --global dotnet-ef
 
-    - name: Restore & Build
-      run: dotnet build test/EFCore.ClickHouse.DesignSmoke/EFCore.ClickHouse.DesignSmoke.csproj
-
-    - name: Add migration
-      run: |
-        dotnet-ef migrations add InitialCreate \
-          --project test/EFCore.ClickHouse.DesignSmoke \
-          --startup-project test/EFCore.ClickHouse.DesignSmoke
-
-    - name: Verify migration contains ClickHouse annotations
-      run: |
-        MIGRATION_FILE=$(find test/EFCore.ClickHouse.DesignSmoke/Migrations -name '*_InitialCreate.cs' ! -name '*.Designer.cs')
-        echo "Checking $MIGRATION_FILE"
-
-        grep -F 'ClickHouse:Engine' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:OrderBy' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:PartitionBy' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:PrimaryKey' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:SampleBy' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:Setting:index_granularity' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:Ttl' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:ColumnCodec' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:ColumnTtl' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:ColumnComment' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:SkippingIndex:Type' "$MIGRATION_FILE"
-        grep -F 'ClickHouse:SkippingIndex:Granularity' "$MIGRATION_FILE"
-        echo "All ClickHouse annotations present in migration."
-
-    - name: Generate SQL script
-      run: |
-        dotnet-ef migrations script \
-          --project test/EFCore.ClickHouse.DesignSmoke \
-          --startup-project test/EFCore.ClickHouse.DesignSmoke \
-          > migration.sql
-        cat migration.sql
-
-    - name: Verify SQL script content
-      run: |
-        # Engine and clauses
-        grep -F 'ENGINE = ReplacingMergeTree' migration.sql
-        grep -F 'ORDER BY' migration.sql
-        grep -F 'PARTITION BY' migration.sql
-        grep -F 'PRIMARY KEY' migration.sql
-        grep -F 'SAMPLE BY' migration.sql
-        grep -F 'TTL Timestamp + INTERVAL 1 YEAR' migration.sql
-        grep -F 'SETTINGS index_granularity = 4096' migration.sql
-        grep -F 'ADD INDEX' migration.sql
-        grep -F 'CODEC(Delta, ZSTD)' migration.sql
-
-        # Simple engine without parentheses
-        grep -F 'ENGINE = Memory' migration.sql
-        ! grep -F 'ENGINE = Memory()' migration.sql
-
-        # No transaction wrapping (ClickHouse does not support transactions)
-        ! grep -F 'START TRANSACTION' migration.sql
-        ! grep -F 'COMMIT' migration.sql
-
-        echo "SQL script content verified."
-
-    - name: Verify idempotent script is rejected
-      run: |
-        if dotnet-ef migrations script --idempotent \
-          --project test/EFCore.ClickHouse.DesignSmoke \
-          --startup-project test/EFCore.ClickHouse.DesignSmoke 2>&1; then
-          echo "ERROR: --idempotent should have failed"
-          exit 1
-        else
-          echo "Idempotent script correctly rejected."
-        fi
+    - name: Run dotnet-ef CLI tests
+      run: dotnet test test/EFCore.ClickHouse.Tests/EFCore.ClickHouse.Tests.csproj --filter "FullyQualifiedName~DotnetEfCliTests"
