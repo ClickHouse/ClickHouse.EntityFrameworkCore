@@ -24,5 +24,8 @@ jobs:
     - name: Install dotnet-ef
       run: dotnet tool install --global dotnet-ef
 
+    - name: Restore
+      run: dotnet restore
+
     - name: Run dotnet-ef CLI tests
       run: dotnet test test/EFCore.ClickHouse.Tests/EFCore.ClickHouse.Tests.csproj --filter "FullyQualifiedName~DotnetEfCliTests"
