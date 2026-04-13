@@ -314,6 +314,158 @@ public class MigrationIntegrationTests : IAsyncLifetime
         Assert.Equal("0", countAfter);
     }
 
+    // ── Nullable container types ────────────────────────────────────────────
+
+    [Fact]
+    public async Task Nullable_List_column_creates_Array_not_Nullable_Array()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<ListEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Tags).HasColumnType("Array(String)");
+                e.ToTable("list_nullable_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        // Verify column type is Array(String), not Nullable(Array(String))
+        var colType = await QueryScalar(ctx,
+            $"SELECT type FROM system.columns WHERE database = '{_databaseName}' AND table = 'list_nullable_test' AND name = 'Tags'");
+        Assert.StartsWith("Array(", colType!);
+        Assert.DoesNotContain("Nullable(Array", colType);
+    }
+
+    [Fact]
+    public async Task Nullable_Map_column_creates_Map_not_Nullable_Map()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<MapEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Meta).HasColumnType("Map(String, String)");
+                e.ToTable("map_nullable_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var colType = await QueryScalar(ctx,
+            $"SELECT type FROM system.columns WHERE database = '{_databaseName}' AND table = 'map_nullable_test' AND name = 'Meta'");
+        Assert.StartsWith("Map(", colType!);
+        Assert.DoesNotContain("Nullable(Map", colType);
+    }
+
+    [Fact]
+    public async Task Null_List_inserts_as_empty_array_and_reads_back()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<ListEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Tags).HasColumnType("Array(String)");
+                e.ToTable("list_null_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        // Insert with null list
+        ctx.Set<ListEntity>().Add(new ListEntity { Id = 1, Tags = null });
+        // Insert with populated list
+        ctx.Set<ListEntity>().Add(new ListEntity { Id = 2, Tags = ["a", "b"] });
+        await ctx.SaveChangesAsync();
+
+        await using var readCtx = CreateContext(b =>
+        {
+            b.Entity<ListEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Tags).HasColumnType("Array(String)");
+                e.ToTable("list_null_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+
+        var e1 = await readCtx.Set<ListEntity>().FirstAsync(e => e.Id == 1);
+        Assert.NotNull(e1.Tags);
+        Assert.Empty(e1.Tags);
+
+        var e2 = await readCtx.Set<ListEntity>().FirstAsync(e => e.Id == 2);
+        Assert.Equal(["a", "b"], e2.Tags);
+    }
+
+    // ── ReplacingMergeTree isDeleted ─────────────────────────────────────────
+
+    [Fact]
+    public async Task ReplacingMergeTree_with_isDeleted_creates_valid_table()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<VersionedDeleteEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("rmt_deleted_test", t => t
+                    .HasReplacingMergeTreeEngine("Version", "IsDeleted")
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var engine = await QueryScalar(ctx,
+            $"SELECT engine FROM system.tables WHERE database = '{_databaseName}' AND name = 'rmt_deleted_test'");
+        Assert.Equal("ReplacingMergeTree", engine);
+
+        // Verify the create_table_query includes both version and isDeleted args
+        var createSql = await QueryScalar(ctx,
+            $"SELECT create_table_query FROM system.tables WHERE database = '{_databaseName}' AND name = 'rmt_deleted_test'");
+        Assert.Contains("ReplacingMergeTree(", createSql!);
+        Assert.Contains("Version", createSql);
+        Assert.Contains("IsDeleted", createSql);
+    }
+
+    [Fact]
+    public async Task ReplacingMergeTree_with_isDeleted_insert_and_query()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<VersionedDeleteEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("rmt_deleted_rtrip", t => t
+                    .HasReplacingMergeTreeEngine("Version", "IsDeleted")
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        ctx.Set<VersionedDeleteEntity>().Add(new VersionedDeleteEntity
+        {
+            Id = 1, Name = "test", Version = 1, IsDeleted = 0
+        });
+        await ctx.SaveChangesAsync();
+
+        await using var readCtx = CreateContext(b =>
+        {
+            b.Entity<VersionedDeleteEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("rmt_deleted_rtrip", t => t
+                    .HasReplacingMergeTreeEngine("Version", "IsDeleted")
+                    .WithOrderBy("Id"));
+            });
+        });
+
+        var entity = await readCtx.Set<VersionedDeleteEntity>().FirstAsync(e => e.Id == 1);
+        Assert.Equal("test", entity.Name);
+        Assert.Equal((byte)0, entity.IsDeleted);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private TestContext CreateContext(Action<ModelBuilder> configure)
@@ -385,5 +537,25 @@ public class MigrationIntegrationTests : IAsyncLifetime
     {
         public long Id { get; set; }
         public DateTime Timestamp { get; set; }
+    }
+
+    public class ListEntity
+    {
+        public long Id { get; set; }
+        public List<string>? Tags { get; set; }
+    }
+
+    public class MapEntity
+    {
+        public long Id { get; set; }
+        public Dictionary<string, string>? Meta { get; set; }
+    }
+
+    public class VersionedDeleteEntity
+    {
+        public long Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public ulong Version { get; set; }
+        public byte IsDeleted { get; set; }
     }
 }

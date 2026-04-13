@@ -475,6 +475,78 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
+    public void Nullable_List_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Tags", ColumnType = "Array(String)", ClrType = typeof(List<string>), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Tags` Array(String)", sql);
+        Assert.DoesNotContain("Nullable(Array", sql);
+    }
+
+    [Fact]
+    public void Nullable_Map_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Meta", ColumnType = "Map(String, String)", ClrType = typeof(Dictionary<string, string>), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Meta` Map(String, String)", sql);
+        Assert.DoesNotContain("Nullable(Map", sql);
+    }
+
+    [Fact]
+    public void Nullable_Tuple_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Point", ColumnType = "Tuple(Float64, Float64)", ClrType = typeof(Tuple<double, double>), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Point` Tuple(Float64, Float64)", sql);
+        Assert.DoesNotContain("Nullable(Tuple", sql);
+    }
+
+    [Fact]
+    public void Nullable_Dynamic_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Data", ColumnType = "Dynamic", ClrType = typeof(object), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Data` Dynamic", sql);
+        Assert.DoesNotContain("Nullable(Dynamic", sql);
+    }
+
+    [Fact]
     public void OrderBy_mixed_expressions_and_columns()
     {
         var sql = GenerateCreateTable(op =>

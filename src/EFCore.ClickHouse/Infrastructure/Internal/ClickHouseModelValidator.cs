@@ -99,6 +99,15 @@ public class ClickHouseModelValidator : RelationalModelValidator
                         "which does not match any property.",
                         entityType.DisplayName(), version);
                 }
+
+                var isDeleted = entityType.GetReplacingMergeTreeIsDeleted();
+                if (isDeleted is not null && !HasPropertyWithColumn(entityType, isDeleted))
+                {
+                    logger.Logger.Log(LogLevel.Warning,
+                        "Entity type '{EntityType}' uses ReplacingMergeTree with isDeleted column '{IsDeleted}' " +
+                        "which does not match any property.",
+                        entityType.DisplayName(), isDeleted);
+                }
             }
         }
     }

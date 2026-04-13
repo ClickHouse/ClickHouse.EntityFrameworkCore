@@ -14,7 +14,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
     }
 
     // ClickHouse does not support transactions — suppress on all statements.
-    protected new void EndStatement(MigrationCommandListBuilder builder, bool suppressTransaction = true)
+    protected override void EndStatement(MigrationCommandListBuilder builder, bool suppressTransaction = true)
         => base.EndStatement(builder, suppressTransaction: true);
 
     // Custom operation dispatch
@@ -85,11 +85,10 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         var columnType = operation.ColumnType ?? GetColumnType(schema, table, name, operation, model)!;
 
-        // Wrap nullable non-array types in Nullable(T)
-        // Skip Json type — ClickHouse Json returns {} for NULL, not SQL NULL
-        if (operation.IsNullable && operation.ClrType?.IsArray != true
-            && !columnType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase)
-            && !columnType.StartsWith("Json", StringComparison.OrdinalIgnoreCase))
+        // Wrap nullable scalar types in Nullable(T).
+        // Skip: arrays (CLR T[] or List<T> → Array(T)), Map, Json, Tuple, Variant —
+        // ClickHouse does not support Nullable(Array(...)) etc.
+        if (operation.IsNullable && !IsNonNullableContainerType(operation.ClrType, columnType))
         {
             columnType = $"Nullable({columnType})";
         }
@@ -144,8 +143,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         var keyword = operation.IsStored == true ? " MATERIALIZED " : " ALIAS ";
         var columnType = operation.ColumnType ?? GetColumnType(schema, table, name, operation, model)!;
 
-        if (operation.IsNullable && operation.ClrType?.IsArray != true
-            && !columnType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase))
+        if (operation.IsNullable && !IsNonNullableContainerType(operation.ClrType, columnType))
         {
             columnType = $"Nullable({columnType})";
         }
@@ -612,6 +610,30 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Returns true for CLR/store types that ClickHouse does not allow inside Nullable().
+    /// Array, Map, Tuple, Variant, Dynamic, Json — and already-Nullable columns.
+    /// </summary>
+    private static bool IsNonNullableContainerType(Type? clrType, string columnType)
+    {
+        // CLR array (T[])
+        if (clrType?.IsArray == true)
+            return true;
+
+        // List<T> → maps to Array(T) at the store level
+        if (clrType is { IsGenericType: true } && clrType.GetGenericTypeDefinition() == typeof(List<>))
+            return true;
+
+        // Store-type check covers Array, Map, Tuple, Variant, Dynamic, Json, and already-wrapped Nullable
+        return columnType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase)
+            || columnType.StartsWith("Array(", StringComparison.OrdinalIgnoreCase)
+            || columnType.StartsWith("Map(", StringComparison.OrdinalIgnoreCase)
+            || columnType.StartsWith("Tuple(", StringComparison.OrdinalIgnoreCase)
+            || columnType.StartsWith("Variant(", StringComparison.OrdinalIgnoreCase)
+            || columnType.StartsWith("Json", StringComparison.OrdinalIgnoreCase)
+            || columnType.Equals("Dynamic", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsMergeTreeFamily(string engine)
