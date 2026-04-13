@@ -6,27 +6,39 @@ namespace EFCore.ClickHouse.Tests;
 /// <summary>
 /// End-to-end tests that shell out to the real dotnet-ef CLI tool
 /// and verify the resulting database state against a real ClickHouse instance.
+/// These tests skip automatically if dotnet-ef is not installed.
 /// </summary>
 public class DotnetEfCliTests : IAsyncLifetime
 {
     private string _connectionString = default!;
     private string _smokeProjectDir = default!;
     private string? _migrationsDir;
+    private bool _dotnetEfAvailable;
 
     public async Task InitializeAsync()
     {
+        _dotnetEfAvailable = await IsDotnetEfInstalled();
+        if (!_dotnetEfAvailable)
+            return;
+
         _connectionString = await SharedContainer.GetConnectionStringAsync();
 
         var testDir = Path.GetDirectoryName(typeof(DotnetEfCliTests).Assembly.Location)!;
         var repoRoot = Path.GetFullPath(Path.Combine(testDir, "..", "..", "..", "..", ".."));
         _smokeProjectDir = Path.Combine(repoRoot, "test", "EFCore.ClickHouse.DesignSmoke");
 
-        Assert.True(Directory.Exists(_smokeProjectDir),
-            $"DesignSmoke project not found at {_smokeProjectDir}");
+        if (!Directory.Exists(_smokeProjectDir))
+        {
+            _dotnetEfAvailable = false;
+            return;
+        }
 
         _migrationsDir = Path.Combine(_smokeProjectDir, "Migrations");
         if (Directory.Exists(_migrationsDir))
             Directory.Delete(_migrationsDir, recursive: true);
+
+        // Restore the DesignSmoke project (it's not in the solution file)
+        await RunProcess("dotnet", ["restore", _smokeProjectDir]);
     }
 
     public Task DisposeAsync()
@@ -39,6 +51,8 @@ public class DotnetEfCliTests : IAsyncLifetime
     [Fact]
     public async Task Database_update_creates_correct_schema()
     {
+        Skip.If(!_dotnetEfAvailable, "dotnet-ef is not installed");
+
         // Add migration and apply to real ClickHouse
         await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
         await RunDotnetEfSuccessfully("database", "update");
@@ -87,6 +101,8 @@ public class DotnetEfCliTests : IAsyncLifetime
     [Fact]
     public async Task Idempotent_script_is_rejected()
     {
+        Skip.If(!_dotnetEfAvailable, "dotnet-ef is not installed");
+
         await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
 
         var result = await RunDotnetEf("migrations", "script", "--idempotent");
@@ -129,6 +145,41 @@ public class DotnetEfCliTests : IAsyncLifetime
         await process.WaitForExitAsync();
 
         return new DotnetEfResult(process.ExitCode, stdout, stderr);
+    }
+
+    private static async Task<bool> IsDotnetEfInstalled()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("dotnet-ef", "--version")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            using var process = Process.Start(psi)!;
+            await process.WaitForExitAsync();
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task RunProcess(string fileName, string[] args)
+    {
+        var psi = new ProcessStartInfo(fileName)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        foreach (var arg in args)
+            psi.ArgumentList.Add(arg);
+
+        using var process = Process.Start(psi)!;
+        await process.WaitForExitAsync();
     }
 
     private static async Task<T> QueryScalar<T>(
