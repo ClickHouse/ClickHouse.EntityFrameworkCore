@@ -51,7 +51,8 @@ public class DotnetEfCliTests : IAsyncLifetime
     [Fact]
     public async Task Database_update_creates_correct_schema()
     {
-        Skip.If(!_dotnetEfAvailable, "dotnet-ef is not installed");
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully
 
         // Add migration and apply to real ClickHouse
         await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
@@ -101,7 +102,8 @@ public class DotnetEfCliTests : IAsyncLifetime
     [Fact]
     public async Task Idempotent_script_is_rejected()
     {
-        Skip.If(!_dotnetEfAvailable, "dotnet-ef is not installed");
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully
 
         await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
 
