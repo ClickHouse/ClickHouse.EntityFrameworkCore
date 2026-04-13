@@ -212,6 +212,50 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         ColumnDefinition(operation.Schema, operation.Table, operation.Name, operation, model, builder);
         EndStatement(builder);
+
+        // Emit REMOVE statements for column annotations that were present on the old column but not the new one.
+        // ClickHouse requires explicit REMOVE CODEC / REMOVE TTL / REMOVE COMMENT — a bare MODIFY COLUMN
+        // does not clear these attributes.
+        EmitColumnAnnotationRemovals(operation, builder);
+    }
+
+    private void EmitColumnAnnotationRemovals(AlterColumnOperation operation, MigrationCommandListBuilder builder)
+    {
+        ReadOnlySpan<string> removableAnnotations =
+        [
+            ClickHouseAnnotationNames.ColumnCodec,
+            ClickHouseAnnotationNames.ColumnTtl,
+            ClickHouseAnnotationNames.ColumnComment,
+        ];
+
+        foreach (var annotationName in removableAnnotations)
+        {
+            var oldValue = (string?)operation.OldColumn.FindAnnotation(annotationName)?.Value;
+            var newValue = (string?)operation.FindAnnotation(annotationName)?.Value;
+
+            if (string.IsNullOrWhiteSpace(oldValue) || !string.IsNullOrWhiteSpace(newValue))
+                continue;
+
+            var keyword = annotationName switch
+            {
+                ClickHouseAnnotationNames.ColumnCodec => "REMOVE CODEC",
+                ClickHouseAnnotationNames.ColumnTtl => "REMOVE TTL",
+                ClickHouseAnnotationNames.ColumnComment => "REMOVE COMMENT",
+                _ => null
+            };
+
+            if (keyword is null)
+                continue;
+
+            builder
+                .Append("ALTER TABLE ")
+                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
+                .Append(" MODIFY COLUMN ")
+                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
+                .Append(" ")
+                .Append(keyword);
+            EndStatement(builder);
+        }
     }
 
     protected override void Generate(
@@ -545,11 +589,29 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
     private string QuoteColumnOrExpression(string columnOrExpr)
     {
-        // If it contains '(' it's a function expression — emit verbatim
-        if (columnOrExpr.Contains('('))
-            return columnOrExpr;
+        // Simple identifier (letters, digits, underscore) → backtick quote.
+        // Anything else (operators, parentheses, spaces) → SQL expression, emit verbatim.
+        if (IsSimpleIdentifier(columnOrExpr))
+            return Dependencies.SqlGenerationHelper.DelimitIdentifier(columnOrExpr);
 
-        return Dependencies.SqlGenerationHelper.DelimitIdentifier(columnOrExpr);
+        return columnOrExpr;
+    }
+
+    private static bool IsSimpleIdentifier(string s)
+    {
+        if (s.Length == 0)
+            return false;
+
+        if (s[0] != '_' && !char.IsLetter(s[0]))
+            return false;
+
+        for (var i = 1; i < s.Length; i++)
+        {
+            if (s[i] != '_' && !char.IsLetterOrDigit(s[i]))
+                return false;
+        }
+
+        return true;
     }
 
     private static bool IsMergeTreeFamily(string engine)

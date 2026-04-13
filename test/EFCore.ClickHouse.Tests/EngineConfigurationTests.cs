@@ -338,6 +338,426 @@ public class EngineConfigurationTests
         Assert.Null(entityType.GetOrderBy());
     }
 
+    // --- Coverage gap tests: engine builders, fluent methods, entry points ---
+
+    [Fact]
+    public void HasAggregatingMergeTreeEngine_sets_engine()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasAggregatingMergeTreeEngine()
+                    .WithOrderBy("Id"));
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.AggregatingMergeTree, entityType.GetEngine());
+        Assert.Equal(["Id"], entityType.GetOrderBy());
+    }
+
+    [Fact]
+    public void HasTinyLogEngine_sets_engine()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasTinyLogEngine());
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.TinyLog, entityType.GetEngine());
+    }
+
+    [Fact]
+    public void HasLogEngine_sets_engine()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasLogEngine());
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.Log, entityType.GetEngine());
+    }
+
+    [Fact]
+    public void WithPrimaryKey_stores_columns()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasMergeTreeEngine()
+                    .WithOrderBy("Id", "Name")
+                    .WithPrimaryKey("Id"));
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(["Id"], entityType.GetClickHousePrimaryKey());
+    }
+
+    [Fact]
+    public void WithSampleBy_stores_columns()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasMergeTreeEngine()
+                    .WithOrderBy("Id")
+                    .WithSampleBy("Id"));
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(["Id"], entityType.GetSampleBy());
+    }
+
+    [Fact]
+    public void MergeTreeEngine_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasMergeTreeEngine()
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("toYYYYMM(Name)")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "4096"));
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.MergeTree, entityType.GetEngine());
+        Assert.Equal(["Id"], entityType.GetOrderBy());
+        Assert.Equal(["toYYYYMM(Name)"], entityType.GetPartitionBy());
+        Assert.Equal(["Id"], entityType.GetClickHousePrimaryKey());
+        Assert.Equal(["Id"], entityType.GetSampleBy());
+        Assert.Equal("Name + INTERVAL 1 DAY", entityType.GetTtl());
+        Assert.Equal("4096", entityType.GetSettings()["index_granularity"]);
+    }
+
+    [Fact]
+    public void CollapsingMergeTree_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasCollapsingMergeTreeEngine("Sign")
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("toYYYYMM(Name)")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "8192"));
+            });
+        });
+
+        var entityType = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.CollapsingMergeTree, entityType.GetEngine());
+        Assert.Equal("Sign", entityType.GetCollapsingMergeTreeSign());
+        Assert.Equal(["Id"], entityType.GetOrderBy());
+        Assert.Equal("8192", entityType.GetSettings()["index_granularity"]);
+    }
+
+    [Fact]
+    public void ReplacingMergeTree_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasReplacingMergeTreeEngine("Ver", "Del")
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("Name")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "4096"));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.ReplacingMergeTree, et.GetEngine());
+        Assert.Equal("Ver", et.GetReplacingMergeTreeVersion());
+        Assert.Equal(["Id"], et.GetOrderBy());
+        Assert.Equal(["Id"], et.GetClickHousePrimaryKey());
+        Assert.Equal(["Id"], et.GetSampleBy());
+    }
+
+    [Fact]
+    public void SummingMergeTree_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasSummingMergeTreeEngine("Name")
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("Name")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "4096"));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.SummingMergeTree, et.GetEngine());
+        Assert.Equal(["Id"], et.GetOrderBy());
+        Assert.Equal("4096", et.GetSettings()["index_granularity"]);
+    }
+
+    [Fact]
+    public void VersionedCollapsingMergeTree_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasVersionedCollapsingMergeTreeEngine("Sign", "Ver")
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("Name")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "4096"));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.VersionedCollapsingMergeTree, et.GetEngine());
+        Assert.Equal("Sign", et.GetVersionedCollapsingMergeTreeSign());
+        Assert.Equal(["Id"], et.GetOrderBy());
+    }
+
+    [Fact]
+    public void GraphiteMergeTree_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasGraphiteMergeTreeEngine("graphite_rollup")
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("Name")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "4096"));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.GraphiteMergeTree, et.GetEngine());
+        Assert.Equal("graphite_rollup", et.GetGraphiteMergeTreeConfigSection());
+        Assert.Equal(["Id"], et.GetOrderBy());
+    }
+
+    [Fact]
+    public void AggregatingMergeTree_full_fluent_chain()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasAggregatingMergeTreeEngine()
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("Name")
+                    .WithPrimaryKey("Id")
+                    .WithSampleBy("Id")
+                    .WithTtl("Name + INTERVAL 1 DAY")
+                    .WithSetting("index_granularity", "4096"));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.AggregatingMergeTree, et.GetEngine());
+        Assert.Equal(["Id"], et.GetOrderBy());
+        Assert.Equal(["Name"], et.GetPartitionBy());
+        Assert.Equal(["Id"], et.GetClickHousePrimaryKey());
+        Assert.Equal(["Id"], et.GetSampleBy());
+        Assert.Equal("Name + INTERVAL 1 DAY", et.GetTtl());
+        Assert.Equal("4096", et.GetSettings()["index_granularity"]);
+    }
+
+    [Fact]
+    public void Property_generic_HasCodec_works()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property<long>(x => x.Id).HasCodec("LZ4");
+                e.ToTable("test");
+            });
+        });
+
+        var property = model.FindEntityType(typeof(TestEntity))!.FindProperty("Id")!;
+        Assert.Equal("LZ4", property.GetCodec());
+    }
+
+    [Fact]
+    public void Property_generic_HasColumnTtl_works()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property<string>(x => x.Name).HasColumnTtl("ts + INTERVAL 1 DAY");
+                e.ToTable("test");
+            });
+        });
+
+        var property = model.FindEntityType(typeof(TestEntity))!.FindProperty("Name")!;
+        Assert.Equal("ts + INTERVAL 1 DAY", property.GetColumnTtl());
+    }
+
+    [Fact]
+    public void Property_generic_HasColumnComment_works()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property<string>(x => x.Name).HasColumnComment("test comment");
+                e.ToTable("test");
+            });
+        });
+
+        var property = model.FindEntityType(typeof(TestEntity))!.FindProperty("Name")!;
+        Assert.Equal("test comment", property.GetColumnComment());
+    }
+
+    [Fact]
+    public void Index_HasSkippingIndexParams_stores_annotation()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.HasIndex(x => x.Name)
+                    .HasSkippingIndexType("set")
+                    .HasGranularity(2)
+                    .HasSkippingIndexParams("100");
+                e.ToTable("test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+
+        var index = model.FindEntityType(typeof(TestEntity))!.GetIndexes().First();
+        Assert.Equal("set", index.GetSkippingIndexType());
+        Assert.Equal(2, index.GetGranularity());
+        Assert.Equal("100", index.GetSkippingIndexParams());
+    }
+
+    [Fact]
+    public void SimpleEngine_WithPartitionBy_throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t.HasTinyLogEngine().WithPartitionBy("Id"));
+                });
+            });
+        });
+    }
+
+    [Fact]
+    public void SimpleEngine_WithPrimaryKey_throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t.HasLogEngine().WithPrimaryKey("Id"));
+                });
+            });
+        });
+    }
+
+    [Fact]
+    public void SimpleEngine_WithSampleBy_throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t.HasStripeLogEngine().WithSampleBy("Id"));
+                });
+            });
+        });
+    }
+
+    [Fact]
+    public void SimpleEngine_WithTtl_throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t.HasMemoryEngine().WithTtl("Id + INTERVAL 1 DAY"));
+                });
+            });
+        });
+    }
+
+    [Fact]
+    public void SimpleEngine_WithSetting_throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t.HasMemoryEngine().WithSetting("k", "v"));
+                });
+            });
+        });
+    }
+
     private static Microsoft.EntityFrameworkCore.Metadata.IModel BuildModel(Action<ModelBuilder> configure)
     {
         var optionsBuilder = new DbContextOptionsBuilder()

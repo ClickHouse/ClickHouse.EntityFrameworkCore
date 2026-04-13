@@ -16,7 +16,11 @@ public class ClickHouseAnnotationProvider : RelationalAnnotationProvider
         if (!designTime)
             yield break;
 
-        var entityType = (IEntityType)table.EntityTypeMappings.First().TypeBase;
+        var mapping = table.EntityTypeMappings.FirstOrDefault();
+        if (mapping is null)
+            yield break;
+
+        var entityType = (IEntityType)mapping.TypeBase;
 
         foreach (var annotation in entityType.GetAnnotations())
         {
@@ -30,7 +34,9 @@ public class ClickHouseAnnotationProvider : RelationalAnnotationProvider
         if (!designTime)
             yield break;
 
-        var modelIndex = index.MappedIndexes.First();
+        var modelIndex = index.MappedIndexes.FirstOrDefault();
+        if (modelIndex is null)
+            yield break;
 
         foreach (var annotation in modelIndex.GetAnnotations())
         {
@@ -44,9 +50,11 @@ public class ClickHouseAnnotationProvider : RelationalAnnotationProvider
         if (!designTime)
             yield break;
 
-        var property = column.PropertyMappings.First().Property;
+        var mapping = column.PropertyMappings.FirstOrDefault();
+        if (mapping is null)
+            yield break;
 
-        foreach (var annotation in property.GetAnnotations())
+        foreach (var annotation in mapping.Property.GetAnnotations())
         {
             if (annotation.Name.StartsWith(ClickHouseAnnotationNames.Prefix, StringComparison.Ordinal))
                 yield return annotation;
