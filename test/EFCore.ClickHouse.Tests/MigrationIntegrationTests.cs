@@ -75,6 +75,86 @@ public class MigrationIntegrationTests : IAsyncLifetime
         Assert.Contains("Id % 4", partitionKey!);
     }
 
+    [Fact]
+    public async Task Multi_column_partitionBy_creates_valid_table()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<EventEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("multi_part_test", t => t
+                    .HasMergeTreeEngine()
+                    .WithOrderBy("Id")
+                    .WithPartitionBy("Region", "toYYYYMM(CreatedAt)"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var partitionKey = await QueryScalar(ctx,
+            $"SELECT partition_key FROM system.tables WHERE database = '{_databaseName}' AND name = 'multi_part_test'");
+        Assert.Contains("Region", partitionKey!);
+        Assert.Contains("toYYYYMM(CreatedAt)", partitionKey);
+    }
+
+    [Fact]
+    public async Task SampleBy_with_expression_creates_valid_table()
+    {
+        // SAMPLE BY requires unsigned integer — use cityHash64() which returns UInt64
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<EventEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("sample_expr_test", t => t
+                    .HasMergeTreeEngine()
+                    .WithOrderBy("cityHash64(Id)", "Id")
+                    .WithSampleBy("cityHash64(Id)"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var samplingKey = await QueryScalar(ctx,
+            $"SELECT sampling_key FROM system.tables WHERE database = '{_databaseName}' AND name = 'sample_expr_test'");
+        Assert.Contains("cityHash64(Id)", samplingKey!);
+    }
+
+    [Fact]
+    public async Task PartitionBy_sampleBy_and_primaryKey_together()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<EventEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("combo_clause_test", t => t
+                    .HasMergeTreeEngine()
+                    .WithOrderBy("cityHash64(Id)", "Region", "Id")
+                    .WithPartitionBy("Region", "toYYYYMM(CreatedAt)")
+                    .WithPrimaryKey("cityHash64(Id)", "Region")
+                    .WithSampleBy("cityHash64(Id)"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var partitionKey = await QueryScalar(ctx,
+            $"SELECT partition_key FROM system.tables WHERE database = '{_databaseName}' AND name = 'combo_clause_test'");
+        Assert.Contains("Region", partitionKey!);
+        Assert.Contains("toYYYYMM(CreatedAt)", partitionKey);
+
+        var primaryKey = await QueryScalar(ctx,
+            $"SELECT primary_key FROM system.tables WHERE database = '{_databaseName}' AND name = 'combo_clause_test'");
+        Assert.Contains("cityHash64(Id)", primaryKey!);
+        Assert.Contains("Region", primaryKey);
+
+        var samplingKey = await QueryScalar(ctx,
+            $"SELECT sampling_key FROM system.tables WHERE database = '{_databaseName}' AND name = 'combo_clause_test'");
+        Assert.Contains("cityHash64(Id)", samplingKey!);
+    }
+
     // ── Finding 2: Column annotation removal ────────────────────────────────
 
     [Fact]
@@ -466,6 +546,97 @@ public class MigrationIntegrationTests : IAsyncLifetime
         Assert.Equal((byte)0, entity.IsDeleted);
     }
 
+    // ── Column with all features: default + codec + comment + TTL ──────────
+
+    [Fact]
+    public async Task Column_with_default_codec_comment_and_ttl()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<FullFeaturedEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Name)
+                    .HasDefaultValue("unnamed")
+                    .HasCodec("ZSTD")
+                    .HasColumnComment("The display name");
+                e.Property(x => x.CreatedAt)
+                    .HasDefaultValueSql("now()")
+                    .HasColumnTtl("CreatedAt + INTERVAL 30 DAY")
+                    .HasColumnComment("Row creation time")
+                    .HasCodec("Delta, ZSTD");
+                e.ToTable("full_feat_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        // Verify Name column: default, codec, comment
+        var nameDefault = await QueryScalar(ctx,
+            $"SELECT default_expression FROM system.columns WHERE database = '{_databaseName}' AND table = 'full_feat_test' AND name = 'Name'");
+        Assert.Contains("unnamed", nameDefault!);
+
+        var nameCodec = await QueryScalar(ctx,
+            $"SELECT compression_codec FROM system.columns WHERE database = '{_databaseName}' AND table = 'full_feat_test' AND name = 'Name'");
+        Assert.Contains("ZSTD", nameCodec!);
+
+        var nameComment = await QueryScalar(ctx,
+            $"SELECT comment FROM system.columns WHERE database = '{_databaseName}' AND table = 'full_feat_test' AND name = 'Name'");
+        Assert.Equal("The display name", nameComment);
+
+        // Verify CreatedAt column: default (now()), codec, comment, TTL
+        var createdDefault = await QueryScalar(ctx,
+            $"SELECT default_expression FROM system.columns WHERE database = '{_databaseName}' AND table = 'full_feat_test' AND name = 'CreatedAt'");
+        Assert.Contains("now()", createdDefault!);
+
+        var createdCodec = await QueryScalar(ctx,
+            $"SELECT compression_codec FROM system.columns WHERE database = '{_databaseName}' AND table = 'full_feat_test' AND name = 'CreatedAt'");
+        Assert.Contains("Delta", createdCodec!);
+        Assert.Contains("ZSTD", createdCodec);
+
+        var createdComment = await QueryScalar(ctx,
+            $"SELECT comment FROM system.columns WHERE database = '{_databaseName}' AND table = 'full_feat_test' AND name = 'CreatedAt'");
+        Assert.Equal("Row creation time", createdComment);
+
+        // TTL appears in the CREATE TABLE statement
+        var createSql = await QueryScalar(ctx,
+            $"SELECT create_table_query FROM system.tables WHERE database = '{_databaseName}' AND name = 'full_feat_test'");
+        Assert.Contains("TTL", createSql!);
+        Assert.Contains("CreatedAt", createSql);
+    }
+
+    [Fact]
+    public async Task Column_with_default_value_applied_by_clickhouse_on_insert()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<FullFeaturedEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Name).HasDefaultValue("unnamed");
+                e.Property(x => x.CreatedAt).HasDefaultValueSql("now()");
+                e.ToTable("default_val_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        // Insert via raw SQL (omitting Name and CreatedAt so ClickHouse applies defaults)
+        using var conn = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO default_val_test (Id) VALUES (1)";
+        await cmd.ExecuteNonQueryAsync();
+
+        // Verify defaults were applied
+        var name = await QueryScalar(ctx, "SELECT Name FROM default_val_test WHERE Id = 1");
+        Assert.Equal("unnamed", name);
+
+        var createdAt = await QueryScalar(ctx, "SELECT CreatedAt FROM default_val_test WHERE Id = 1");
+        Assert.NotNull(createdAt);
+        Assert.NotEqual("1970-01-01 00:00:00", createdAt); // not epoch — got now()
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private TestContext CreateContext(Action<ModelBuilder> configure)
@@ -557,5 +728,20 @@ public class MigrationIntegrationTests : IAsyncLifetime
         public string Name { get; set; } = string.Empty;
         public ulong Version { get; set; }
         public byte IsDeleted { get; set; }
+    }
+
+    public class EventEntity
+    {
+        public long Id { get; set; }
+        public long UserId { get; set; }
+        public string Region { get; set; } = string.Empty;
+        public DateTime CreatedAt { get; set; }
+    }
+
+    public class FullFeaturedEntity
+    {
+        public long Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public DateTime CreatedAt { get; set; }
     }
 }
