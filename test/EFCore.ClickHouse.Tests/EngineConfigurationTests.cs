@@ -758,6 +758,97 @@ public class EngineConfigurationTests
         });
     }
 
+    // ── Lambda-based overloads ────────────────────────────────────────────
+
+    [Fact]
+    public void Lambda_ReplacingMergeTree_sets_version_and_isDeleted()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasReplacingMergeTreeEngine<TestEntity>(
+                    x => x.Version, x => x.IsDeleted));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(ClickHouseAnnotationNames.ReplacingMergeTree, et.GetEngine());
+        Assert.Equal("Version", et.GetReplacingMergeTreeVersion());
+        Assert.Equal("IsDeleted", et.GetReplacingMergeTreeIsDeleted());
+    }
+
+    [Fact]
+    public void Lambda_ReplacingMergeTree_version_only()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasReplacingMergeTreeEngine<TestEntity>(
+                    version: x => x.Version));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal("Version", et.GetReplacingMergeTreeVersion());
+        Assert.Null(et.GetReplacingMergeTreeIsDeleted());
+    }
+
+    [Fact]
+    public void Lambda_CollapsingMergeTree_sets_sign()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasCollapsingMergeTreeEngine<TestEntity>(
+                    x => x.Sign));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal("Sign", et.GetCollapsingMergeTreeSign());
+    }
+
+    [Fact]
+    public void Lambda_VersionedCollapsingMergeTree_sets_sign_and_version()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasVersionedCollapsingMergeTreeEngine<TestEntity>(
+                    x => x.Sign, x => x.Version));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal("Sign", et.GetVersionedCollapsingMergeTreeSign());
+        Assert.Equal("Version", et.GetVersionedCollapsingMergeTreeVersion());
+    }
+
+    [Fact]
+    public void Lambda_SummingMergeTree_sets_columns()
+    {
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t.HasSummingMergeTreeEngine<TestEntity>(
+                    x => x.Amount, x => x.Count));
+            });
+        });
+
+        var et = model.FindEntityType(typeof(TestEntity))!;
+        Assert.Equal(["Amount", "Count"], et.GetSummingMergeTreeColumns());
+    }
+
     // ── Validator: column-not-found for engine parameters ────────────────
 
     [Fact]
