@@ -487,7 +487,7 @@ public class EngineConfigurationTests
             b.Entity<TestEntity>(e =>
             {
                 e.HasKey(x => x.Id);
-                e.ToTable("test", t => t.HasReplacingMergeTreeEngine("Ver", "Del")
+                e.ToTable("test", t => t.HasReplacingMergeTreeEngine("Ver", "IsDeleted")
                     .WithOrderBy("Id")
                     .WithPartitionBy("Name")
                     .WithPrimaryKey("Id")
@@ -758,6 +758,220 @@ public class EngineConfigurationTests
         });
     }
 
+    // ── Validator: column-not-found for engine parameters ────────────────
+
+    [Fact]
+    public void VersionedCollapsingMergeTree_warns_on_missing_sign_column()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasVersionedCollapsingMergeTreeEngine("NonExistentSign", "NonExistentVersion")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("NonExistentSign", ex.Message);
+    }
+
+    [Fact]
+    public void VersionedCollapsingMergeTree_warns_on_missing_version_column()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<VersionedEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasVersionedCollapsingMergeTreeEngine("Sign", "NonExistentVersion")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("NonExistentVersion", ex.Message);
+    }
+
+    [Fact]
+    public void SummingMergeTree_warns_on_missing_sum_columns()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasSummingMergeTreeEngine("NonExistentColumn")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("NonExistentColumn", ex.Message);
+    }
+
+    [Fact]
+    public void CollapsingMergeTree_warns_on_missing_sign_column()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasCollapsingMergeTreeEngine("NonExistentSign")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("NonExistentSign", ex.Message);
+    }
+
+    [Fact]
+    public void ReplacingMergeTree_warns_on_missing_version_column()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<TestEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasReplacingMergeTreeEngine("NonExistentVersion")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("NonExistentVersion", ex.Message);
+    }
+
+    [Fact]
+    public void ReplacingMergeTree_warns_on_missing_isDeleted_column()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<VersionedEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasReplacingMergeTreeEngine("Version", "NonExistentIsDeleted")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("NonExistentIsDeleted", ex.Message);
+    }
+
+    // ── Validator: wrong CLR type for engine parameters ──────────────────
+
+    [Fact]
+    public void CollapsingMergeTree_rejects_non_Int8_sign_column()
+    {
+        // Sign is int → maps to Int32, but ClickHouse requires Int8
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<BadSignEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasCollapsingMergeTreeEngine("Sign")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("Sign", ex.Message);
+        Assert.Contains("Int8", ex.Message);
+    }
+
+    [Fact]
+    public void VersionedCollapsingMergeTree_rejects_non_Int8_sign_column()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<BadSignEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasVersionedCollapsingMergeTreeEngine("Sign", "Version")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("Sign", ex.Message);
+        Assert.Contains("Int8", ex.Message);
+    }
+
+    [Fact]
+    public void ReplacingMergeTree_rejects_non_UInt8_isDeleted_column()
+    {
+        // IsDeleted is int → maps to Int32, but ClickHouse requires UInt8
+        var ex = Assert.ThrowsAny<Exception>(() =>
+        {
+            BuildModel(b =>
+            {
+                b.Entity<BadIsDeletedEntity>(e =>
+                {
+                    e.HasKey(x => x.Id);
+                    e.ToTable("test", t => t
+                        .HasReplacingMergeTreeEngine("Version", "IsDeleted")
+                        .WithOrderBy("Id"));
+                });
+            });
+        });
+        Assert.Contains("IsDeleted", ex.Message);
+        Assert.Contains("UInt8", ex.Message);
+    }
+
+    [Fact]
+    public void CollapsingMergeTree_accepts_sbyte_sign_column()
+    {
+        // sbyte maps to Int8 — should pass
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t
+                    .HasCollapsingMergeTreeEngine("Sign")
+                    .WithOrderBy("Id"));
+            });
+        });
+        Assert.Equal("Sign", model.FindEntityType(typeof(TestEntity))!.GetCollapsingMergeTreeSign());
+    }
+
+    [Fact]
+    public void ReplacingMergeTree_accepts_byte_isDeleted_column()
+    {
+        // byte maps to UInt8 — should pass
+        var model = BuildModel(b =>
+        {
+            b.Entity<TestEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("test", t => t
+                    .HasReplacingMergeTreeEngine("Version", "IsDeleted")
+                    .WithOrderBy("Id"));
+            });
+        });
+        Assert.Equal("IsDeleted", model.FindEntityType(typeof(TestEntity))!.GetReplacingMergeTreeIsDeleted());
+    }
+
     private static Microsoft.EntityFrameworkCore.Metadata.IModel BuildModel(Action<ModelBuilder> configure)
     {
         var optionsBuilder = new DbContextOptionsBuilder()
@@ -784,5 +998,35 @@ public class EngineConfigurationTests
     {
         public long Id { get; set; }
         public string Name { get; set; } = string.Empty;
+        public sbyte Sign { get; set; }
+        public ulong Version { get; set; }
+        public byte IsDeleted { get; set; }
+        public ulong Ver { get; set; }
+        public decimal Amount { get; set; }
+        public long Count { get; set; }
+    }
+
+    private class VersionedEntity
+    {
+        public long Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public sbyte Sign { get; set; }
+        public ulong Version { get; set; }
+    }
+
+    // Sign is int (should be sbyte/Int8)
+    private class BadSignEntity
+    {
+        public long Id { get; set; }
+        public int Sign { get; set; }
+        public ulong Version { get; set; }
+    }
+
+    // IsDeleted is int (should be byte/UInt8)
+    private class BadIsDeletedEntity
+    {
+        public long Id { get; set; }
+        public ulong Version { get; set; }
+        public int IsDeleted { get; set; }
     }
 }

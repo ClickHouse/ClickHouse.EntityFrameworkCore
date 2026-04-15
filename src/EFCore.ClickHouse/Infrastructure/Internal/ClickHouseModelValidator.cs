@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
@@ -75,42 +76,92 @@ public class ClickHouseModelValidator : RelationalModelValidator
                 }
             }
 
-            // Validate CollapsingMergeTree sign column exists
+            // Validate CollapsingMergeTree sign column: must exist and be Int8
             if (engine is ClickHouseAnnotationNames.CollapsingMergeTree)
             {
                 var sign = entityType.GetCollapsingMergeTreeSign();
-                if (sign is not null && !HasPropertyWithColumn(entityType, sign))
-                {
-                    logger.Logger.Log(LogLevel.Warning,
-                        "Entity type '{EntityType}' uses CollapsingMergeTree with sign column '{Sign}' " +
-                        "which does not match any property.",
-                        entityType.DisplayName(), sign);
-                }
+                ValidateColumnReference(entityType, sign, "CollapsingMergeTree", "sign");
+                ValidateColumnStoreType(entityType, sign, "Int8",
+                    "CollapsingMergeTree", "sign");
             }
 
-            // Validate ReplacingMergeTree version/isDeleted columns exist
+            // Validate VersionedCollapsingMergeTree: sign must be Int8, version must exist
+            if (engine is ClickHouseAnnotationNames.VersionedCollapsingMergeTree)
+            {
+                var sign = entityType.GetVersionedCollapsingMergeTreeSign();
+                ValidateColumnReference(entityType, sign, "VersionedCollapsingMergeTree", "sign");
+                ValidateColumnStoreType(entityType, sign, "Int8",
+                    "VersionedCollapsingMergeTree", "sign");
+
+                ValidateColumnReference(entityType, entityType.GetVersionedCollapsingMergeTreeVersion(),
+                    "VersionedCollapsingMergeTree", "version");
+            }
+
+            // Validate ReplacingMergeTree: version must exist, isDeleted must be UInt8
             if (engine is ClickHouseAnnotationNames.ReplacingMergeTree)
             {
-                var version = entityType.GetReplacingMergeTreeVersion();
-                if (version is not null && !HasPropertyWithColumn(entityType, version))
-                {
-                    logger.Logger.Log(LogLevel.Warning,
-                        "Entity type '{EntityType}' uses ReplacingMergeTree with version column '{Version}' " +
-                        "which does not match any property.",
-                        entityType.DisplayName(), version);
-                }
+                ValidateColumnReference(entityType, entityType.GetReplacingMergeTreeVersion(),
+                    "ReplacingMergeTree", "version");
 
                 var isDeleted = entityType.GetReplacingMergeTreeIsDeleted();
-                if (isDeleted is not null && !HasPropertyWithColumn(entityType, isDeleted))
+                ValidateColumnReference(entityType, isDeleted, "ReplacingMergeTree", "isDeleted");
+                ValidateColumnStoreType(entityType, isDeleted, "UInt8",
+                    "ReplacingMergeTree", "isDeleted");
+            }
+
+            // Validate SummingMergeTree columns exist
+            if (engine is ClickHouseAnnotationNames.SummingMergeTree)
+            {
+                var columns = entityType.GetSummingMergeTreeColumns();
+                if (columns is not null)
                 {
-                    logger.Logger.Log(LogLevel.Warning,
-                        "Entity type '{EntityType}' uses ReplacingMergeTree with isDeleted column '{IsDeleted}' " +
-                        "which does not match any property.",
-                        entityType.DisplayName(), isDeleted);
+                    foreach (var col in columns)
+                    {
+                        ValidateColumnReference(entityType, col, "SummingMergeTree", "sum column");
+                    }
                 }
             }
         }
     }
+
+    private static void ValidateColumnReference(
+        IEntityType entityType, string? columnName, string engineName, string parameterName)
+    {
+        if (columnName is not null && !HasPropertyWithColumn(entityType, columnName))
+        {
+            throw new InvalidOperationException(
+                $"Entity type '{entityType.DisplayName()}' uses {engineName} with {parameterName} column " +
+                $"'{columnName}' which does not match any mapped property.");
+        }
+    }
+
+    private static void ValidateColumnStoreType(
+        IEntityType entityType, string? columnName, string requiredStoreType,
+        string engineName, string parameterName)
+    {
+        if (columnName is null)
+            return;
+
+        var property = FindPropertyByColumn(entityType, columnName);
+        if (property is null)
+            return; // existence check is handled by ValidateColumnReference
+
+        var storeType = (property.FindTypeMapping() as RelationalTypeMapping)?.StoreType
+            ?? property.GetColumnType();
+        if (storeType is not null
+            && !storeType.Equals(requiredStoreType, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Entity type '{entityType.DisplayName()}' uses {engineName} with {parameterName} column " +
+                $"'{columnName}' which must have store type {requiredStoreType}, " +
+                $"but the resolved type is '{storeType}'.");
+        }
+    }
+
+    private static IProperty? FindPropertyByColumn(IEntityType entityType, string columnName)
+        => entityType.GetProperties().FirstOrDefault(p =>
+            string.Equals(p.GetColumnName(), columnName, StringComparison.Ordinal)
+            || string.Equals(p.Name, columnName, StringComparison.Ordinal));
 
     private static bool HasPropertyWithColumn(IEntityType entityType, string columnName)
         => entityType.GetProperties().Any(p =>
