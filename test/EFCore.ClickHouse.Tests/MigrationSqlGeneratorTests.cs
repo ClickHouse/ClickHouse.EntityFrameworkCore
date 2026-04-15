@@ -1,0 +1,932 @@
+using ClickHouse.EntityFrameworkCore.Metadata.Internal;
+using ClickHouse.EntityFrameworkCore.Migrations.Operations;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
+using Xunit;
+
+namespace EFCore.ClickHouse.Tests;
+
+public class MigrationSqlGeneratorTests
+{
+    [Fact]
+    public void CreateTable_MergeTree_with_OrderBy()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id", "Name" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation { Name = "Name", ColumnType = "String", ClrType = typeof(string) });
+        });
+
+        Assert.Contains("ENGINE = MergeTree()", sql);
+        Assert.Contains("ORDER BY (`Id`, `Name`)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_ReplacingMergeTree_with_version()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.ReplacingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.ReplacingMergeTreeVersion, "Version");
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation { Name = "Version", ColumnType = "UInt64", ClrType = typeof(ulong) });
+        });
+
+        Assert.Contains("ENGINE = ReplacingMergeTree(`Version`)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_CollapsingMergeTree_with_sign()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.CollapsingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.CollapsingMergeTreeSign, "Sign");
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation { Name = "Sign", ColumnType = "Int8", ClrType = typeof(sbyte) });
+        });
+
+        Assert.Contains("ENGINE = CollapsingMergeTree(`Sign`)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_StripeLog_no_OrderBy()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.StripeLog);
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = StripeLog", sql);
+        Assert.DoesNotContain("StripeLog()", sql);
+        Assert.DoesNotContain("ORDER BY", sql);
+    }
+
+    [Fact]
+    public void CreateTable_Memory_no_parentheses()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.Memory);
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = Memory", sql);
+        Assert.DoesNotContain("Memory()", sql);
+        Assert.DoesNotContain("ORDER BY", sql);
+    }
+
+    [Fact]
+    public void CreateTable_nullable_column_wraps_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Value", ColumnType = "String", ClrType = typeof(string), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Value` Nullable(String)", sql);
+        Assert.DoesNotContain("NOT NULL", sql);
+    }
+
+    [Fact]
+    public void CreateTable_column_with_codec()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            var col = new AddColumnOperation { Name = "Temp", ColumnType = "Int16", ClrType = typeof(short) };
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "Delta, ZSTD");
+            op.Columns.Add(col);
+        });
+
+        Assert.Contains("`Temp` Int16 CODEC(Delta, ZSTD)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_column_with_ttl()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            var col = new AddColumnOperation { Name = "Created", ColumnType = "DateTime", ClrType = typeof(DateTime) };
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnTtl, "Created + INTERVAL 1 MONTH");
+            op.Columns.Add(col);
+        });
+
+        Assert.Contains("TTL Created + INTERVAL 1 MONTH", sql);
+    }
+
+    [Fact]
+    public void CreateTable_column_with_comment()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            var col = new AddColumnOperation { Name = "Name", ColumnType = "String", ClrType = typeof(string) };
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnComment, "User name");
+            op.Columns.Add(col);
+        });
+
+        Assert.Contains("COMMENT 'User name'", sql);
+    }
+
+    [Fact]
+    public void CreateTable_with_partitionBy_expression()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.AddAnnotation(ClickHouseAnnotationNames.PartitionBy, new[] { "toYYYYMM(CreatedAt)" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("PARTITION BY toYYYYMM(CreatedAt)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_with_settings()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.AddAnnotation(ClickHouseAnnotationNames.SettingPrefix + "index_granularity", "4096");
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("SETTINGS index_granularity = 4096", sql);
+    }
+
+    [Fact]
+    public void CreateTable_with_table_TTL()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.AddAnnotation(ClickHouseAnnotationNames.Ttl, "Created + INTERVAL 30 DAY");
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("TTL Created + INTERVAL 30 DAY", sql);
+    }
+
+    [Fact]
+    public void CreateTable_MergeTree_no_explicit_OrderBy_falls_back_to_tuple()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ORDER BY tuple()", sql);
+    }
+
+    [Fact]
+    public void AddForeignKey_throws_NotSupportedException()
+    {
+        Assert.Throws<NotSupportedException>(() =>
+        {
+            Generate(new AddForeignKeyOperation
+            {
+                Table = "t",
+                Name = "FK_Test",
+                Columns = ["Id"],
+                PrincipalTable = "other",
+                PrincipalColumns = ["Id"]
+            });
+        });
+    }
+
+    [Fact]
+    public void CreateSequence_throws_NotSupportedException()
+    {
+        Assert.Throws<NotSupportedException>(() =>
+        {
+            Generate(new CreateSequenceOperation { Name = "seq" });
+        });
+    }
+
+    [Fact]
+    public void EnsureSchema_throws_NotSupportedException()
+    {
+        Assert.Throws<NotSupportedException>(() =>
+        {
+            Generate(new EnsureSchemaOperation { Name = "dbo" });
+        });
+    }
+
+    [Fact]
+    public void RenameTable_generates_RENAME_TABLE()
+    {
+        var sql = Generate(new RenameTableOperation { Name = "old_table", NewName = "new_table" });
+        Assert.Contains("RENAME TABLE `old_table` TO `new_table`", sql);
+    }
+
+    [Fact]
+    public void RenameColumn_generates_ALTER_TABLE_RENAME_COLUMN()
+    {
+        var sql = Generate(new RenameColumnOperation { Table = "t", Name = "old_col", NewName = "new_col" });
+        Assert.Contains("ALTER TABLE `t` RENAME COLUMN `old_col` TO `new_col`", sql);
+    }
+
+    [Fact]
+    public void DropIndex_skipping_generates_ALTER_TABLE_DROP_INDEX()
+    {
+        var op = new DropIndexOperation { Table = "t", Name = "idx_name" };
+        op.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexType, "minmax");
+        var sql = Generate(op);
+        Assert.Contains("ALTER TABLE `t` DROP INDEX `idx_name`", sql);
+    }
+
+    // Finding 3: standard index create/drop symmetry
+
+    [Fact]
+    public void CreateIndex_standard_is_noop()
+    {
+        var op = new CreateIndexOperation
+        {
+            Name = "IX_Test", Table = "t", Columns = ["Col1"]
+        };
+        var sql = Generate(op);
+        Assert.DoesNotContain("INDEX", sql);
+    }
+
+    [Fact]
+    public void DropIndex_standard_is_noop()
+    {
+        var op = new DropIndexOperation { Table = "t", Name = "IX_Test" };
+        // No skipping index annotation — should be no-op, symmetric with create
+        var sql = Generate(op);
+        Assert.DoesNotContain("INDEX", sql);
+    }
+
+    // Finding 1: AlterTableOperation rejects ClickHouse metadata changes
+
+    [Fact]
+    public void AlterTable_engine_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.Engine, "ReplacingMergeTree");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_orderBy_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+        op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id", "Name" });
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_partitionBy_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+        op.AddAnnotation(ClickHouseAnnotationNames.PartitionBy, new[] { "toYYYYMM(ts)" });
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_ttl_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.Ttl, "ts + INTERVAL 30 DAY");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Ttl, "ts + INTERVAL 7 DAY");
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_primaryKey_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+        op.AddAnnotation(ClickHouseAnnotationNames.PrimaryKey, new[] { "Id", "Name" });
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.PrimaryKey, new[] { "Id" });
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_sampleBy_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.SampleBy, new[] { "Id" });
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Engine, "MergeTree");
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_settings_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.SettingPrefix + "index_granularity", "4096");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.SettingPrefix + "index_granularity", "8192");
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_engine_specific_arg_change_throws()
+    {
+        var op = new AlterTableOperation { Name = "t" };
+        op.AddAnnotation(ClickHouseAnnotationNames.Engine, "ReplacingMergeTree");
+        op.AddAnnotation(ClickHouseAnnotationNames.ReplacingMergeTreeVersion, "Ver2");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.Engine, "ReplacingMergeTree");
+        op.OldTable.AddAnnotation(ClickHouseAnnotationNames.ReplacingMergeTreeVersion, "Ver1");
+
+        Assert.Throws<NotSupportedException>(() => Generate(op));
+    }
+
+    [Fact]
+    public void AlterTable_no_clickhouse_changes_delegates_to_base()
+    {
+        // Non-ClickHouse metadata change (e.g., comment) should not throw
+        var op = new AlterTableOperation { Name = "t", Comment = "new comment" };
+        op.OldTable.Comment = "old comment";
+        var sql = Generate(op);
+        // Should not throw — base handles standard annotation changes
+        Assert.NotNull(sql);
+    }
+
+    // Finding 2: idempotent scripts throw
+
+    [Fact]
+    public void GetBeginIfNotExistsScript_throws_NotSupportedException()
+    {
+        var repo = CreateHistoryRepository();
+        Assert.Throws<NotSupportedException>(() => repo.GetBeginIfNotExistsScript("20260101000000_Init"));
+    }
+
+    [Fact]
+    public void GetBeginIfExistsScript_throws_NotSupportedException()
+    {
+        var repo = CreateHistoryRepository();
+        Assert.Throws<NotSupportedException>(() => repo.GetBeginIfExistsScript("20260101000000_Init"));
+    }
+
+    [Fact]
+    public void GetEndIfScript_throws_NotSupportedException()
+    {
+        var repo = CreateHistoryRepository();
+        Assert.Throws<NotSupportedException>(() => repo.GetEndIfScript());
+    }
+
+    [Fact]
+    public void GetCreateIfNotExistsScript_contains_IF_NOT_EXISTS()
+    {
+        var repo = CreateHistoryRepository();
+        var script = repo.GetCreateIfNotExistsScript();
+        Assert.Contains("IF NOT EXISTS", script);
+        Assert.Contains("CREATE TABLE", script);
+    }
+
+    // Corner cases from review section D
+
+    [Fact]
+    public void Column_comment_with_single_quote_is_escaped()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            var col = new AddColumnOperation { Name = "Name", ColumnType = "String", ClrType = typeof(string) };
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnComment, "it's a name");
+            op.Columns.Add(col);
+        });
+
+        Assert.Contains(@"COMMENT 'it\'s a name'", sql);
+    }
+
+    [Fact]
+    public void Column_with_codec_ttl_and_comment_together()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            var col = new AddColumnOperation { Name = "Temp", ColumnType = "Int16", ClrType = typeof(short) };
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "Delta, ZSTD");
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnTtl, "ts + INTERVAL 1 DAY");
+            col.AddAnnotation(ClickHouseAnnotationNames.ColumnComment, "temperature");
+            op.Columns.Add(col);
+        });
+
+        // Verify order per ClickHouse docs: COMMENT → CODEC → TTL
+        var tempLine = sql.Split('\n').First(l => l.Contains("`Temp`"));
+        var commentIdx = tempLine.IndexOf("COMMENT ", StringComparison.Ordinal);
+        var codecIdx = tempLine.IndexOf("CODEC(", StringComparison.Ordinal);
+        var ttlIdx = tempLine.IndexOf("TTL ", StringComparison.Ordinal);
+        Assert.True(commentIdx < codecIdx, "COMMENT should come before CODEC");
+        Assert.True(codecIdx < ttlIdx, "CODEC should come before TTL");
+    }
+
+    [Fact]
+    public void Nullable_array_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Tags", ColumnType = "Array(String)", ClrType = typeof(string[]), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Tags` Array(String)", sql);
+        Assert.DoesNotContain("Nullable(Array", sql);
+    }
+
+    [Fact]
+    public void Nullable_List_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Tags", ColumnType = "Array(String)", ClrType = typeof(List<string>), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Tags` Array(String)", sql);
+        Assert.DoesNotContain("Nullable(Array", sql);
+    }
+
+    [Fact]
+    public void Nullable_Map_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Meta", ColumnType = "Map(String, String)", ClrType = typeof(Dictionary<string, string>), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Meta` Map(String, String)", sql);
+        Assert.DoesNotContain("Nullable(Map", sql);
+    }
+
+    [Fact]
+    public void Nullable_Tuple_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Point", ColumnType = "Tuple(Float64, Float64)", ClrType = typeof(Tuple<double, double>), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Point` Tuple(Float64, Float64)", sql);
+        Assert.DoesNotContain("Nullable(Tuple", sql);
+    }
+
+    [Fact]
+    public void Nullable_Dynamic_column_is_not_wrapped_in_Nullable()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "Data", ColumnType = "Dynamic", ClrType = typeof(object), IsNullable = true
+            });
+        });
+
+        Assert.Contains("`Data` Dynamic", sql);
+        Assert.DoesNotContain("Nullable(Dynamic", sql);
+    }
+
+    [Fact]
+    public void OrderBy_mixed_expressions_and_columns()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id", "toYYYYMM(ts)" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ORDER BY (`Id`, toYYYYMM(ts))", sql);
+    }
+
+    [Fact]
+    public void VersionedCollapsingMergeTree_both_args()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.VersionedCollapsingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.VersionedCollapsingMergeTreeSign, "Sign");
+            op.AddAnnotation(ClickHouseAnnotationNames.VersionedCollapsingMergeTreeVersion, "Ver");
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = VersionedCollapsingMergeTree(`Sign`, `Ver`)", sql);
+    }
+
+    [Fact]
+    public void SummingMergeTree_multiple_columns()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.SummingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.SummingMergeTreeColumns, new[] { "Amount", "Count" });
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = SummingMergeTree(`Amount`, `Count`)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_AggregatingMergeTree()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.AggregatingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = AggregatingMergeTree()", sql);
+        Assert.Contains("ORDER BY (`Id`)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_GraphiteMergeTree()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.GraphiteMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.GraphiteMergeTreeConfigSection, "graphite_rollup");
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = GraphiteMergeTree('graphite_rollup')", sql);
+    }
+
+    [Fact]
+    public void CreateTable_with_sampleBy()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.AddAnnotation(ClickHouseAnnotationNames.SampleBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("SAMPLE BY `Id`", sql);
+    }
+
+    [Fact]
+    public void CreateTable_with_primaryKey()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id", "Name" });
+            op.AddAnnotation(ClickHouseAnnotationNames.PrimaryKey, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("PRIMARY KEY (`Id`)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_computed_column_materialized()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "NameLen",
+                ColumnType = "UInt32",
+                ClrType = typeof(uint),
+                ComputedColumnSql = "length(Name)",
+                IsStored = true
+            });
+        });
+
+        Assert.Contains("`NameLen` UInt32 MATERIALIZED length(Name)", sql);
+    }
+
+    [Fact]
+    public void CreateTable_computed_column_alias()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+            op.Columns.Add(new AddColumnOperation
+            {
+                Name = "NameLen",
+                ColumnType = "UInt32",
+                ClrType = typeof(uint),
+                ComputedColumnSql = "length(Name)",
+                IsStored = false
+            });
+        });
+
+        Assert.Contains("`NameLen` UInt32 ALIAS length(Name)", sql);
+    }
+
+    [Fact]
+    public void CreateIndex_with_skippingIndexParams()
+    {
+        var op = new CreateIndexOperation
+        {
+            Name = "idx_name", Table = "t", Columns = ["Name"]
+        };
+        op.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexType, "set");
+        op.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexGranularity, 2);
+        op.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexParams, "100");
+
+        var sql = Generate(op);
+        Assert.Contains("TYPE set(100) GRANULARITY 2", sql);
+    }
+
+    [Fact]
+    public void CreateTable_TinyLog_no_parentheses()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.TinyLog);
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = TinyLog", sql);
+        Assert.DoesNotContain("TinyLog()", sql);
+    }
+
+    [Fact]
+    public void CreateTable_Log_no_parentheses()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.Log);
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ENGINE = Log", sql);
+        Assert.DoesNotContain("Log()", sql);
+    }
+
+    [Fact]
+    public void AddColumn_generates_ALTER_TABLE()
+    {
+        var op = new AddColumnOperation
+        {
+            Table = "t", Name = "NewCol", ColumnType = "String", ClrType = typeof(string)
+        };
+        var sql = Generate(op);
+        Assert.Contains("ALTER TABLE `t` ADD COLUMN `NewCol` String", sql);
+    }
+
+    [Fact]
+    public void AlterColumn_generates_MODIFY_COLUMN()
+    {
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "Col", ColumnType = "Int64", ClrType = typeof(long)
+        };
+        var sql = Generate(op);
+        Assert.Contains("ALTER TABLE `t` MODIFY COLUMN `Col` Int64", sql);
+    }
+
+    [Fact]
+    public void DropColumn_generates_ALTER_TABLE()
+    {
+        var op = new DropColumnOperation { Table = "t", Name = "OldCol" };
+        var sql = Generate(op);
+        Assert.Contains("ALTER TABLE `t` DROP COLUMN `OldCol`", sql);
+    }
+
+    [Fact]
+    public void CreateDatabase_generates_CREATE_DATABASE()
+    {
+        var sql = Generate(new ClickHouseCreateDatabaseOperation { Name = "my_db" });
+        Assert.Contains("CREATE DATABASE `my_db`", sql);
+    }
+
+    [Fact]
+    public void DropDatabase_generates_DROP_DATABASE()
+    {
+        var sql = Generate(new ClickHouseDropDatabaseOperation { Name = "my_db" });
+        Assert.Contains("DROP DATABASE `my_db`", sql);
+    }
+
+    // Finding 2: AlterColumn must emit REMOVE statements when annotations are removed
+
+    [Fact]
+    public void AlterColumn_removing_codec_emits_REMOVE_CODEC()
+    {
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "Col", ColumnType = "String", ClrType = typeof(string)
+        };
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "ZSTD");
+
+        var sql = Generate(op);
+        Assert.Contains("MODIFY COLUMN `Col` String", sql);
+        Assert.Contains("MODIFY COLUMN `Col` REMOVE CODEC", sql);
+    }
+
+    [Fact]
+    public void AlterColumn_removing_ttl_emits_REMOVE_TTL()
+    {
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "Col", ColumnType = "DateTime", ClrType = typeof(DateTime)
+        };
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnTtl, "Col + INTERVAL 1 DAY");
+
+        var sql = Generate(op);
+        Assert.Contains("MODIFY COLUMN `Col` REMOVE TTL", sql);
+    }
+
+    [Fact]
+    public void AlterColumn_removing_comment_emits_REMOVE_COMMENT()
+    {
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "Col", ColumnType = "String", ClrType = typeof(string)
+        };
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnComment, "old comment");
+
+        var sql = Generate(op);
+        Assert.Contains("MODIFY COLUMN `Col` REMOVE COMMENT", sql);
+    }
+
+    [Fact]
+    public void AlterColumn_removing_all_annotations_emits_all_removes()
+    {
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "Col", ColumnType = "String", ClrType = typeof(string)
+        };
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "LZ4");
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnTtl, "Col + INTERVAL 7 DAY");
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnComment, "old");
+
+        var sql = Generate(op);
+        Assert.Contains("REMOVE CODEC", sql);
+        Assert.Contains("REMOVE TTL", sql);
+        Assert.Contains("REMOVE COMMENT", sql);
+    }
+
+    [Fact]
+    public void AlterColumn_changing_codec_does_not_emit_remove()
+    {
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "Col", ColumnType = "String", ClrType = typeof(string)
+        };
+        op.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "ZSTD(3)");
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "LZ4");
+
+        var sql = Generate(op);
+        Assert.Contains("CODEC(ZSTD(3))", sql);
+        Assert.DoesNotContain("REMOVE CODEC", sql);
+    }
+
+    // Finding 3: Expression quoting must handle non-function expressions
+
+    [Fact]
+    public void OrderBy_arithmetic_expression_not_quoted()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id % 8" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ORDER BY (Id % 8)", sql);
+        Assert.DoesNotContain("`Id % 8`", sql);
+    }
+
+    [Fact]
+    public void OrderBy_addition_expression_not_quoted()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "a + b" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ORDER BY (a + b)", sql);
+        Assert.DoesNotContain("`a + b`", sql);
+    }
+
+    [Fact]
+    public void PartitionBy_cast_expression_not_quoted()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.AddAnnotation(ClickHouseAnnotationNames.PartitionBy, new[] { "Id % 8" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("PARTITION BY Id % 8", sql);
+        Assert.DoesNotContain("`Id % 8`", sql);
+    }
+
+    [Fact]
+    public void OrderBy_simple_identifier_is_quoted()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "MyColumn" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        Assert.Contains("ORDER BY (`MyColumn`)", sql);
+    }
+
+    private string GenerateCreateTable(Action<CreateTableOperation> configure)
+    {
+        var operation = new CreateTableOperation { Name = "test_table" };
+        configure(operation);
+        return Generate(operation);
+    }
+
+    private string Generate(params MigrationOperation[] operations)
+    {
+        var optionsBuilder = new DbContextOptionsBuilder()
+            .UseClickHouse("Host=localhost;Database=test");
+
+        using var context = new DbContext(optionsBuilder.Options);
+        var generator = context.GetService<IMigrationsSqlGenerator>();
+        var commands = generator.Generate(operations);
+        return string.Join("\n", commands.Select(c => c.CommandText));
+    }
+
+    private static IHistoryRepository CreateHistoryRepository()
+    {
+        var optionsBuilder = new DbContextOptionsBuilder()
+            .UseClickHouse("Host=localhost;Database=test");
+
+        using var context = new DbContext(optionsBuilder.Options);
+        return context.GetService<IHistoryRepository>();
+    }
+}

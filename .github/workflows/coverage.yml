@@ -31,6 +31,9 @@ jobs:
         with:
           dotnet-version: 10.x
 
+      - name: Install dotnet-ef
+        run: dotnet tool install --global dotnet-ef --version 10.0.5
+
       - name: Test with Coverage
         run: dotnet test test/EFCore.ClickHouse.Tests/EFCore.ClickHouse.Tests.csproj --configuration Release --verbosity normal --logger GitHubActions /clp:ErrorsOnly /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:SkipAutoProps=true
 

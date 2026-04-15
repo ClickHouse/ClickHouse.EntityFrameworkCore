@@ -11,8 +11,8 @@ public class ListToArrayConverter<T> : ValueConverter<List<T>, T[]>
 {
     public ListToArrayConverter()
         : base(
-            list => list.ToArray(),
-            array => new List<T>(array))
+            list => list == null ? Array.Empty<T>() : list.ToArray(),
+            array => array == null ? new List<T>() : new List<T>(array))
     {
     }
 }

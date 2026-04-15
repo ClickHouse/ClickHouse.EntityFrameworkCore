@@ -80,7 +80,7 @@ public class PageView
 
 ## Current Status
 
-This provider is in early development. It supports **read-only queries** and **inserts** — you can map entities to existing ClickHouse tables, query them with LINQ, and write data via `SaveChanges`.
+This provider is in active development. It supports **LINQ queries**, **inserts**, **table engine configuration**, and **migrations** — you can define ClickHouse tables with engine-specific settings, create them via `dotnet ef migrations` or `EnsureCreated`, query with LINQ, and write data via `SaveChanges`.
 
 ### LINQ Queries
 
@@ -188,11 +188,69 @@ entity.Property(e => e.Payload).HasColumnType("Json");
 - **NULL semantics** — ClickHouse's JSON type returns `{}` (empty object) for NULL values rather than SQL NULL. A row inserted with `Data = null` will read back as an empty `JsonNode`, not `null`.
 - **Integer precision** — ClickHouse JSON stores all integers as `Int64` unless the path is typed otherwise. When reading via `JsonNode`, use `GetValue<long>()` rather than `GetValue<int>()`.
 
+### Table Engine Configuration
+
+Configure ClickHouse table engines, ordering, partitioning, and more via EF Core's fluent API:
+
+```csharp
+modelBuilder.Entity<SensorReading>(b =>
+{
+    b.HasKey(e => e.Id);
+    b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
+    b.Property(e => e.Location).HasColumnComment("Installation site");
+    b.HasIndex(e => e.Timestamp)
+        .HasSkippingIndexType("minmax")
+        .HasGranularity(4);
+    b.ToTable("sensor_readings", t => t
+        .HasReplacingMergeTreeEngine("Version")
+        .WithOrderBy("Id", "Timestamp")
+        .WithPartitionBy("toYYYYMM(Timestamp)")
+        .WithPrimaryKey("Id")
+        .WithTtl("Timestamp + INTERVAL 1 YEAR")
+        .WithSetting("index_granularity", "4096"));
+});
+```
+
+**Supported engines:** `MergeTree`, `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CollapsingMergeTree`, `VersionedCollapsingMergeTree`, `GraphiteMergeTree`, `Log`, `TinyLog`, `StripeLog`, `Memory`
+
+**Column-level DDL:** `.HasCodec("Delta, ZSTD")`, `.HasColumnTtl("expr")`, `.HasColumnComment("text")`
+
+**Data-skipping indices:** `.HasSkippingIndexType("minmax")`, `.HasGranularity(4)`, `.HasSkippingIndexParams("100")`
+
+**Engine settings:** `.WithSetting("index_granularity", "4096")` — any ClickHouse setting as a key-value pair
+
+**Default behavior:** If no engine is configured, the provider defaults to `MergeTree` with the EF primary key as `ORDER BY`.
+
+### Migrations
+
+The provider supports `dotnet ef migrations` for creating and applying migrations:
+
+```bash
+dotnet ef migrations add InitialCreate
+dotnet ef database update
+```
+
+`EnsureCreated()` / `EnsureDeleted()` also work for quick setup without migrations.
+
+**Supported migration operations:**
+- CREATE TABLE with full ENGINE clause (all engine types, ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS, codecs, comments, data-skipping indices)
+- ADD COLUMN, DROP COLUMN, MODIFY COLUMN, RENAME COLUMN, RENAME TABLE
+- DROP TABLE, CREATE/DROP INDEX (data-skipping)
+- Custom `ClickHouseCreateDatabaseOperation` / `ClickHouseDropDatabaseOperation`
+
+**ClickHouse limitations reflected in migrations:**
+- ALTER TABLE cannot change engine, ORDER BY, PARTITION BY, or other structural metadata — the provider throws `NotSupportedException` with a clear message
+- Foreign keys, unique constraints, and sequences throw `NotSupportedException`
+- Primary key add/drop is a no-op (ClickHouse PK is structural, not a constraint)
+- Idempotent scripts (`--idempotent`) are not supported (ClickHouse has no conditional SQL blocks)
+- Transactions are suppressed (ClickHouse does not support them)
+
 ### Not Yet Implemented
 
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
-- Migrations
 - JOINs, subqueries, set operations
+- Reverse engineering / scaffolding (`dotnet ef dbcontext scaffold`)
+- JSON path query translation
 
 ## Building
 
