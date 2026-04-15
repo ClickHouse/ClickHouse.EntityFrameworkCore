@@ -5,7 +5,6 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
-using System.Text.RegularExpressions;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
@@ -23,7 +22,8 @@ public class MigrationIntegrationTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         _connectionString = await SharedContainer.GetConnectionStringAsync();
-        _databaseName = Regex.Match(_connectionString, @"Database=([^;]+)").Groups[1].Value;
+        _databaseName = System.Text.RegularExpressions.Regex.Match(
+            _connectionString, @"Database=([^;]+)").Groups[1].Value;
     }
 
     public Task DisposeAsync() => Task.CompletedTask;

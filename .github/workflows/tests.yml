@@ -22,7 +22,7 @@ jobs:
         dotnet-version: 10.0.x
 
     - name: Install dotnet-ef
-      run: dotnet tool install --global dotnet-ef
+      run: dotnet tool install --global dotnet-ef --version 10.0.5
 
     - name: Restore
       run: dotnet restore

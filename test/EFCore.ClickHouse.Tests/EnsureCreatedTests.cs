@@ -34,7 +34,7 @@ public class EnsureCreatedTests : IAsyncLifetime
         await context.Database.EnsureCreatedAsync();
 
         // Verify table exists and has correct engine via system.tables
-        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE name = 'mt_test'");
+        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'mt_test'");
         Assert.Equal("MergeTree", engine);
     }
 
@@ -55,7 +55,7 @@ public class EnsureCreatedTests : IAsyncLifetime
         await context.Database.EnsureDeletedAsync();
         await context.Database.EnsureCreatedAsync();
 
-        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE name = 'rmt_test'");
+        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'rmt_test'");
         Assert.Equal("ReplacingMergeTree", engine);
     }
 
@@ -74,7 +74,7 @@ public class EnsureCreatedTests : IAsyncLifetime
         await context.Database.EnsureDeletedAsync();
         await context.Database.EnsureCreatedAsync();
 
-        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE name = 'default_engine_test'");
+        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'default_engine_test'");
         Assert.Equal("MergeTree", engine);
     }
 
@@ -97,7 +97,7 @@ public class EnsureCreatedTests : IAsyncLifetime
         await context.Database.EnsureDeletedAsync();
         await context.Database.EnsureCreatedAsync();
 
-        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE name = 'partition_test'");
+        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'partition_test'");
         Assert.Equal("MergeTree", engine);
     }
 
@@ -155,7 +155,7 @@ public class EnsureCreatedTests : IAsyncLifetime
         await context.Database.EnsureCreatedAsync();
 
         // Table creation succeeds means codec was accepted
-        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE name = 'codec_test'");
+        var engine = await QueryScalar(context, "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'codec_test'");
         Assert.Equal("MergeTree", engine);
     }
 

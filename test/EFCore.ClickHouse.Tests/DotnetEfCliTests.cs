@@ -69,33 +69,33 @@ public class DotnetEfCliTests : IAsyncLifetime
 
         // sensor_readings created with ReplacingMergeTree
         var sensorEngine = await QueryScalar<string>(connection,
-            "SELECT engine FROM system.tables WHERE name = 'sensor_readings'");
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'sensor_readings'");
         Assert.Equal("ReplacingMergeTree", sensorEngine);
 
         // audit_logs created with Memory
         var auditEngine = await QueryScalar<string>(connection,
-            "SELECT engine FROM system.tables WHERE name = 'audit_logs'");
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'audit_logs'");
         Assert.Equal("Memory", auditEngine);
 
         // ORDER BY / sorting key
         var sortingKey = await QueryScalar<string>(connection,
-            "SELECT sorting_key FROM system.tables WHERE name = 'sensor_readings'");
+            "SELECT sorting_key FROM system.tables WHERE database = currentDatabase() AND name = 'sensor_readings'");
         Assert.Contains("Id", sortingKey);
         Assert.Contains("Timestamp", sortingKey);
 
         // PARTITION BY
         var partitionKey = await QueryScalar<string>(connection,
-            "SELECT partition_key FROM system.tables WHERE name = 'sensor_readings'");
+            "SELECT partition_key FROM system.tables WHERE database = currentDatabase() AND name = 'sensor_readings'");
         Assert.Contains("toYYYYMM(Timestamp)", partitionKey);
 
         // PRIMARY KEY
         var primaryKey = await QueryScalar<string>(connection,
-            "SELECT primary_key FROM system.tables WHERE name = 'sensor_readings'");
+            "SELECT primary_key FROM system.tables WHERE database = currentDatabase() AND name = 'sensor_readings'");
         Assert.Contains("Id", primaryKey);
 
         // Data skipping index exists
         var indexCount = await QueryScalar<ulong>(connection,
-            "SELECT count() FROM system.data_skipping_indices WHERE table = 'sensor_readings'");
+            "SELECT count() FROM system.data_skipping_indices WHERE database = currentDatabase() AND table = 'sensor_readings'");
         Assert.True(indexCount > 0, "Expected at least one data skipping index");
     }
 
