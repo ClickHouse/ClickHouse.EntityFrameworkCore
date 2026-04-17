@@ -372,6 +372,35 @@ public class JoinTests : IClassFixture<JoinFixture>
     }
 
     [Fact]
+    public void Count_AlwaysCastToInt64()
+    {
+        // Regression for PR review finding 6: COUNT always returns UInt64 from ClickHouse.
+        // We CAST the server-side result to Int64 (never Int32) — Int64 is wide enough to
+        // hold any realistic COUNT, is a common supertype for any signed-integer set-op
+        // branch, and when EF expects Int32 the client-side ClickHouseInt32TypeMapping
+        // narrows via Convert.ToInt32(Int64) which still raises OverflowException above
+        // Int32.MaxValue. A server-side CAST AS Int32 would silently truncate instead.
+        using var ctx = new JoinDbContext(_fixture.ConnectionString);
+
+        var sql = ctx.Customers.Select(c => ctx.Orders.Count(o => o.CustomerId == c.Id))
+            .ToQueryString();
+
+        Assert.Matches(@"CAST\([^)]*COUNT[^)]*\)\s+AS\s+Int64\)", sql);
+        Assert.DoesNotMatch(@"AS\s+Int32\)", sql);
+    }
+
+    [Fact]
+    public async Task Count_TopLevel_ReturnsCorrectValue()
+    {
+        // Sanity: CAST to Int64 at the server still materializes correctly when EF expects Int32.
+        await using var ctx = new JoinDbContext(_fixture.ConnectionString);
+
+        var counts = await ctx.Customers.Select(c => ctx.Orders.Count(o => o.CustomerId == c.Id))
+            .ToListAsync();
+        Assert.Equal(5, counts.Count);
+    }
+
+    [Fact]
     public void ScalarSubquery_Count_IsWrappedWithIfNull()
     {
         // ClickHouse returns NULL for no-match scalar subqueries even for COUNT, unlike

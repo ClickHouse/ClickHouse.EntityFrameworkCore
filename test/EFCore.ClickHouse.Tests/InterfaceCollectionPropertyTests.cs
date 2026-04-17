@@ -58,6 +58,43 @@ public class InterfaceCollectionPropertyTests : IClassFixture<InterfaceCollectio
 
         Assert.Equal(new[] { 9, 10 }, row.IEnumerableTags);
     }
+
+    // Regression for review finding 5: materializing T[] cast to IList<T>/ICollection<T>
+    // is read-only. Users declaring mutable-interface properties expect to be able to
+    // mutate them (Add/Remove) without a NotSupportedException.
+
+    [Fact]
+    public async Task IList_Property_AllowsMutation()
+    {
+        await using var ctx = new InterfaceCollectionContext(_fixture.ConnectionString);
+        var row = await ctx.Entities.AsNoTracking().FirstAsync(e => e.Id == 1);
+
+        // Must not throw — mutable interfaces should materialize to a real List<T>.
+        row.IListTags.Add(99);
+        Assert.Equal(4, row.IListTags.Count);
+        Assert.Contains(99, row.IListTags);
+    }
+
+    [Fact]
+    public async Task ICollection_Property_AllowsMutation()
+    {
+        await using var ctx = new InterfaceCollectionContext(_fixture.ConnectionString);
+        var row = await ctx.Entities.FirstAsync(e => e.Id == 1);
+
+        row.ICollectionTags.Add(99);
+        Assert.Equal(4, row.ICollectionTags.Count);
+    }
+
+    [Fact]
+    public async Task IReadOnlyList_Property_MaterializesAsArray()
+    {
+        // Read-only interfaces can stay backed by T[] — the interface contract permits
+        // fixed-size, and wrapping in List<T> would be an unnecessary allocation.
+        await using var ctx = new InterfaceCollectionContext(_fixture.ConnectionString);
+        var row = await ctx.Entities.FirstAsync(e => e.Id == 1);
+
+        Assert.IsAssignableFrom<IReadOnlyList<int>>(row.IReadOnlyListTags);
+    }
 }
 
 public class InterfaceCollectionEntity

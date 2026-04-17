@@ -142,5 +142,23 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         => new(
             (a, b) => (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b)),
             o => o == null ? 0 : o.Aggregate(0, (hash, el) => HashCode.Combine(hash, el)),
-            source => source == null ? null : (TCollection)(object)source.ToArray());
+            source => SnapshotTyped<TCollection, T>(source));
+
+    // Snapshot mirrors EnumerableToArrayConverter.FromArray: fresh List<T> for the mutable
+    // interfaces (so change-tracking comparison against a user-mutated collection doesn't
+    // spuriously report equal), plain array cast for the read-only ones.
+    private static TCollection? SnapshotTyped<TCollection, T>(TCollection? source)
+        where TCollection : class, IEnumerable<T>
+    {
+        if (source is null)
+            return null;
+
+        if (typeof(TCollection) == typeof(IList<T>)
+            || typeof(TCollection) == typeof(ICollection<T>))
+        {
+            return (TCollection)(object)new List<T>(source);
+        }
+
+        return (TCollection)(object)source.ToArray();
+    }
 }

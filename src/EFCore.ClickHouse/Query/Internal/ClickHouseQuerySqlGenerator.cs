@@ -143,18 +143,23 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
     }
 
     /// <summary>
-    /// ClickHouse <c>COUNT()</c> returns <c>UInt64</c>, but EF Core expects <c>Int32</c> or <c>Int64</c>.
-    /// Emit an explicit <c>CAST</c> so that set operations (UNION/INTERSECT/EXCEPT) can find
-    /// a common supertype between COUNT results and other integer columns.
+    /// ClickHouse <c>COUNT()</c> returns <c>UInt64</c>, which (a) is not a common supertype
+    /// with <c>Int32</c> / <c>Int64</c> branches in set operations and (b) needs a signed
+    /// type on the client side. Emit <c>CAST(COUNT(...) AS Int64)</c> — always Int64, even
+    /// when EF expects <c>Int32</c>. Reasons:
+    /// <list type="bullet">
+    ///   <item><description>Int64 is wide enough to hold any realistic <c>COUNT</c>, so the server-side cast is lossless.</description></item>
+    ///   <item><description>Int64 is a common supertype with any signed integer branch in a set operation.</description></item>
+    ///   <item><description>When EF expects <c>Int32</c>, <see cref="ClickHouseInt32TypeMapping"/> materializes via <c>GetValue() + Convert.ToInt32</c>, which throws <see cref="OverflowException"/> above <see cref="int.MaxValue"/> — the overflow safety the old <c>Convert.ToInt32(UInt64)</c> path gave us is preserved. (A server-side <c>CAST(... AS Int32)</c> would instead silently truncate.)</description></item>
+    /// </list>
     /// </summary>
     protected override Expression VisitSqlFunction(SqlFunctionExpression sqlFunctionExpression)
     {
         if (string.Equals(sqlFunctionExpression.Name, "COUNT", StringComparison.OrdinalIgnoreCase))
         {
-            var targetType = sqlFunctionExpression.Type == typeof(long) ? "Int64" : "Int32";
             Sql.Append("CAST(");
             base.VisitSqlFunction(sqlFunctionExpression);
-            Sql.Append($" AS {targetType})");
+            Sql.Append(" AS Int64)");
             return sqlFunctionExpression;
         }
 
