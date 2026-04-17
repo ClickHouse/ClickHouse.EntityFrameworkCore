@@ -15,17 +15,22 @@ public class ClickHouseDataSourceManager : IDisposable, IAsyncDisposable
         {
             { DataSource: { } dataSource } => dataSource,
             { Connection: not null } => null,
-            { ConnectionString: { } connectionString } => GetOrCreateDataSource(connectionString),
+            { ConnectionString: { } connectionString }
+                => GetOrCreateDataSource(connectionString, extension.JoinNullSemanticsDisabled),
             _ => null
         };
 
-    private ClickHouseDataSource GetOrCreateDataSource(string connectionString)
+    private ClickHouseDataSource GetOrCreateDataSource(string connectionString, bool joinNullSemanticsDisabled)
     {
-        if (_dataSources.TryGetValue(connectionString, out var existing))
+        var effectiveConnectionString = joinNullSemanticsDisabled
+            ? connectionString
+            : EnsureDefaultSettings(connectionString);
+
+        if (_dataSources.TryGetValue(effectiveConnectionString, out var existing))
             return existing;
 
-        var newDataSource = new ClickHouseDataSource(connectionString);
-        var added = _dataSources.GetOrAdd(connectionString, newDataSource);
+        var newDataSource = new ClickHouseDataSource(effectiveConnectionString);
+        var added = _dataSources.GetOrAdd(effectiveConnectionString, newDataSource);
 
         if (!ReferenceEquals(added, newDataSource))
             newDataSource.Dispose();
@@ -36,6 +41,25 @@ public class ClickHouseDataSourceManager : IDisposable, IAsyncDisposable
         }
 
         return added;
+    }
+
+    /// <summary>
+    /// Ensures that required ClickHouse session settings are present in the connection string.
+    /// Uses the <c>set_</c> prefix convention supported by ClickHouse.Driver.
+    /// Does not overwrite settings the user has explicitly configured.
+    /// </summary>
+    internal static string EnsureDefaultSettings(string connectionString)
+    {
+        // join_use_nulls=1: LEFT/RIGHT/FULL JOINs produce NULL for non-matching rows
+        // (ClickHouse default is 0 → default values, which breaks EF Core's null-based
+        // navigation detection and LEFT JOIN semantics).
+        const string key = "set_join_use_nulls";
+        if (!connectionString.Contains(key, StringComparison.OrdinalIgnoreCase))
+        {
+            connectionString += (connectionString.EndsWith(';') ? "" : ";") + key + "=1";
+        }
+
+        return connectionString;
     }
 
     public void Dispose()

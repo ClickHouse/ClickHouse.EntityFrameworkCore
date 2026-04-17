@@ -11,6 +11,15 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
 
     public DbDataSource? DataSource { get; private set; }
 
+    /// <summary>
+    /// When true, the provider will NOT inject <c>set_join_use_nulls=1</c> into connection
+    /// strings. Use this when the ClickHouse server/profile forbids changing that setting
+    /// (e.g. <c>readonly=1</c> profiles that reject any SET). Disabling means LEFT JOIN
+    /// returns column defaults (0, "") for non-matching rows instead of NULL; EF Core's
+    /// null-based navigation detection will not work correctly in that mode.
+    /// </summary>
+    public bool JoinNullSemanticsDisabled { get; private set; }
+
     public ClickHouseOptionsExtension()
     {
     }
@@ -19,6 +28,7 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
         : base(copyFrom)
     {
         DataSource = copyFrom.DataSource;
+        JoinNullSemanticsDisabled = copyFrom.JoinNullSemanticsDisabled;
     }
 
     protected override RelationalOptionsExtension Clone()
@@ -28,6 +38,13 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     {
         var clone = (ClickHouseOptionsExtension)Clone();
         clone.DataSource = dataSource;
+        return clone;
+    }
+
+    public ClickHouseOptionsExtension WithJoinNullSemanticsDisabled(bool disabled)
+    {
+        var clone = (ClickHouseOptionsExtension)Clone();
+        clone.JoinNullSemanticsDisabled = disabled;
         return clone;
     }
 

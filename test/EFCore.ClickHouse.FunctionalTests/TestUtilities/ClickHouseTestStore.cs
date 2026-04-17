@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using ClickHouse.Driver.ADO;
-using Microsoft.EntityFrameworkCore;
 
 namespace Microsoft.EntityFrameworkCore.TestUtilities;
 
@@ -22,6 +21,8 @@ public class ClickHouseTestStore : RelationalTestStore
     {
         _shared = shared;
         _additionalSql = additionalSql;
+
+        UseConnectionString = true;
         _scriptPath = scriptPath is null
             ? null
             : Path.Combine(Path.GetDirectoryName(typeof(ClickHouseTestStore).Assembly.Location)!, scriptPath);

@@ -26,6 +26,6 @@ public class NorthwindCompiledQueryClickHouseTest : IClassFixture<NorthwindQuery
 
         var result = compiled(context, "UK").ToList();
 
-        Assert.Equal(["AROUT", "BSBEV"], result);
+        Assert.Equal(["AROUT", "BSBEV", "CONSH", "EASTC", "ISLAT", "NORTS", "SEVES"], result);
     }
 }
