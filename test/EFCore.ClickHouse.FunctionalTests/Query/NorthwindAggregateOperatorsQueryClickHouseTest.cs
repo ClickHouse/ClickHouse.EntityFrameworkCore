@@ -18,7 +18,7 @@ public class NorthwindAggregateOperatorsQueryClickHouseTest : IClassFixture<Nort
     {
         await using var context = _fixture.CreateContext();
         var count = await context.Set<Order>().CountAsync();
-        Assert.Equal(6, count);
+        Assert.Equal(830, count);
     }
 
     [Fact]
@@ -29,6 +29,6 @@ public class NorthwindAggregateOperatorsQueryClickHouseTest : IClassFixture<Nort
             .Where(o => o.CustomerID == "AROUT")
             .SumAsync(o => o.Freight);
 
-        Assert.Equal(107.17m, sum);
+        Assert.Equal(471.95m, sum);
     }
 }

@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -18,8 +19,35 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
         => extensionExpression switch
         {
             ClickHouseRowValueExpression e => VisitRowValue(e),
+            ScalarSubqueryExpression e when IsNonNullableValueType(e.Type) => VisitNonNullableScalarSubquery(e),
             _ => base.VisitExtension(extensionExpression)
         };
+
+    private static bool IsNonNullableValueType(Type type)
+        => type.IsValueType && Nullable.GetUnderlyingType(type) == null;
+
+    /// <summary>
+    /// ClickHouse requires explicit ALL or DISTINCT for UNION
+    /// (<c>union_default_mode</c> is empty by default, rejecting bare <c>UNION</c>).
+    /// Always emit an explicit modifier for all set operations.
+    /// </summary>
+    protected override void GenerateSetOperation(SetOperationBase setOperation)
+    {
+        GenerateSetOperationOperand(setOperation, setOperation.Source1);
+        Sql.AppendLine();
+
+        var keyword = setOperation switch
+        {
+            ExceptExpression => "EXCEPT",
+            IntersectExpression => "INTERSECT",
+            UnionExpression => "UNION",
+            _ => throw new InvalidOperationException(
+                $"Unknown set operation type: {setOperation.GetType().Name}")
+        };
+
+        Sql.AppendLine(keyword + (setOperation.IsDistinct ? " DISTINCT" : " ALL"));
+        GenerateSetOperationOperand(setOperation, setOperation.Source2);
+    }
 
     protected override void GenerateLimitOffset(SelectExpression selectExpression)
     {
@@ -69,6 +97,53 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
         return sqlParameterExpression;
     }
 
+    /// <summary>
+    /// ClickHouse <c>COUNT()</c> returns <c>UInt64</c>, but EF Core expects <c>Int32</c> or <c>Int64</c>.
+    /// Emit an explicit <c>CAST</c> so that set operations (UNION/INTERSECT/EXCEPT) can find
+    /// a common supertype between COUNT results and other integer columns.
+    /// </summary>
+    protected override Expression VisitSqlFunction(SqlFunctionExpression sqlFunctionExpression)
+    {
+        if (string.Equals(sqlFunctionExpression.Name, "COUNT", StringComparison.OrdinalIgnoreCase))
+        {
+            var targetType = sqlFunctionExpression.Type == typeof(long) ? "Int64" : "Int32";
+            Sql.Append("CAST(");
+            base.VisitSqlFunction(sqlFunctionExpression);
+            Sql.Append($" AS {targetType})");
+            return sqlFunctionExpression;
+        }
+
+        return base.VisitSqlFunction(sqlFunctionExpression);
+    }
+
+    /// <summary>
+    /// ClickHouse sorts NULLs last in ascending order and first in descending order,
+    /// which is the opposite of .NET/SQL Server semantics (null &lt; non-null).
+    /// Emit explicit <c>NULLS FIRST</c> / <c>NULLS LAST</c> for nullable expressions only.
+    ///
+    /// Skip non-nullable value types: ClickHouse treats <c>NaN</c> in float columns the
+    /// same as <c>NULL</c> for ordering purposes, so adding <c>NULLS FIRST</c> on a
+    /// non-nullable <c>double</c> column would move <c>NaN</c> to the front — a semantic
+    /// change unrelated to the null-handling fix we're making for nullable columns.
+    /// </summary>
+    protected override Expression VisitOrdering(OrderingExpression orderingExpression)
+    {
+        var result = base.VisitOrdering(orderingExpression);
+
+        if (IsNullable(orderingExpression.Expression))
+            Sql.Append(orderingExpression.IsAscending ? " NULLS FIRST" : " NULLS LAST");
+
+        return result;
+    }
+
+    private static bool IsNullable(SqlExpression expression)
+    {
+        var type = expression.Type;
+        if (!type.IsValueType)
+            return true;
+        return Nullable.GetUnderlyingType(type) is not null;
+    }
+
     protected override Expression VisitSqlBinary(SqlBinaryExpression sqlBinaryExpression)
     {
         if (sqlBinaryExpression.OperatorType == ExpressionType.Add
@@ -83,6 +158,55 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
         }
 
         return base.VisitSqlBinary(sqlBinaryExpression);
+    }
+
+    /// <summary>
+    /// ClickHouse returns NULL for scalar subqueries whose inner query produces no rows,
+    /// even for aggregates like COUNT that always return a value in standard SQL.
+    /// Wrap non-nullable scalar subqueries with <c>ifNull(subquery, 0)</c>.
+    /// </summary>
+    protected virtual Expression VisitNonNullableScalarSubquery(ScalarSubqueryExpression expression)
+    {
+        Sql.Append("ifNull(");
+        base.VisitExtension(expression);
+        Sql.Append(", 0)");
+        return expression;
+    }
+
+    /// <summary>
+    /// ClickHouse does not accept SQL standard <c>VALUES (...)</c> as a subquery source.
+    /// Emit each row as a separate <c>SELECT ... UNION ALL SELECT ...</c> instead.
+    /// </summary>
+    protected override void GenerateValues(ValuesExpression valuesExpression)
+    {
+        if (valuesExpression.RowValues is null)
+            throw new InvalidOperationException(
+                "ValuesExpression.RowValues is null; parameter-based VALUES expansion should run before SQL generation.");
+
+        if (valuesExpression.RowValues.Count == 0)
+            throw new InvalidOperationException(RelationalStrings.EmptyCollectionNotSupportedAsInlineQueryRoot);
+
+        var rowValues = valuesExpression.RowValues;
+        var columnNames = valuesExpression.ColumnNames;
+
+        for (var i = 0; i < rowValues.Count; i++)
+        {
+            if (i > 0)
+                Sql.AppendLine().Append("UNION ALL ");
+
+            Sql.Append("SELECT ");
+            var values = rowValues[i].Values;
+            for (var j = 0; j < values.Count; j++)
+            {
+                if (j > 0)
+                    Sql.Append(", ");
+                Visit(values[j]);
+                // Emit column aliases on every row; ClickHouse permits this and
+                // it keeps the UNION ALL branches structurally identical.
+                Sql.Append(AliasSeparator)
+                   .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(columnNames[j]));
+            }
+        }
     }
 
     protected virtual Expression VisitRowValue(ClickHouseRowValueExpression rowValueExpression)

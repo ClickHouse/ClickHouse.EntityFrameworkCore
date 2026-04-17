@@ -22,6 +22,10 @@ public class ClickHouseTestStore : RelationalTestStore
     {
         _shared = shared;
         _additionalSql = additionalSql;
+
+        // Use connection string path so EF contexts go through ClickHouseDataSourceManager,
+        // which injects required session settings like set_join_use_nulls=1.
+        UseConnectionString = true;
         _scriptPath = scriptPath is null
             ? null
             : Path.Combine(Path.GetDirectoryName(typeof(ClickHouseTestStore).Assembly.Location)!, scriptPath);
@@ -42,10 +46,21 @@ public class ClickHouseTestStore : RelationalTestStore
         => new(name, scriptPath, additionalSql, shared: false);
 
     public static string CreateConnectionString(string databaseName)
-        => new ClickHouseConnectionStringBuilder(TestEnvironment.DefaultConnection)
+    {
+        var connectionString = new ClickHouseConnectionStringBuilder(TestEnvironment.DefaultConnection)
         {
             Database = databaseName
         }.ToString();
+
+        // Ensure join_use_nulls=1 is set so LEFT JOIN returns NULL (not defaults).
+        // The provider's ClickHouseDataSourceManager.EnsureDefaultSettings handles this
+        // for the connection string path, but tests may use raw connections that bypass it.
+        const string key = "set_join_use_nulls";
+        if (!connectionString.Contains(key, StringComparison.OrdinalIgnoreCase))
+            connectionString += (connectionString.EndsWith(';') ? "" : ";") + key + "=1";
+
+        return connectionString;
+    }
 
     public override DbContextOptionsBuilder AddProviderOptions(DbContextOptionsBuilder builder)
         => UseConnectionString

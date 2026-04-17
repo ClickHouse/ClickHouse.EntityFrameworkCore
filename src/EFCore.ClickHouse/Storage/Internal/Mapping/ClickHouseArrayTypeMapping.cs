@@ -24,7 +24,8 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
             new RelationalTypeMappingParameters(
                 new CoreTypeMappingParameters(
                     elementMapping.ClrType.MakeArrayType(),
-                    comparer: CreateArrayComparer(elementMapping.ClrType)),
+                    comparer: CreateArrayComparer(elementMapping.ClrType),
+                    elementMapping: ExposableElementMapping(elementMapping)),
                 $"Array({elementMapping.StoreType})",
                 dbType: System.Data.DbType.Object))
     {
@@ -40,12 +41,25 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
                 new CoreTypeMappingParameters(
                     converter.ModelClrType,
                     converter: converter,
-                    comparer: comparer),
+                    comparer: comparer,
+                    elementMapping: ExposableElementMapping(elementMapping)),
                 $"Array({elementMapping.StoreType})",
                 dbType: System.Data.DbType.Object))
     {
         ElementMapping = elementMapping;
     }
+
+    /// <summary>
+    /// Exposes the element mapping to EF Core only when the element is scalar.
+    /// EF Core's <c>RelationalModelValidator</c> rejects properties whose mapping chain
+    /// reports a "primitive collection of a primitive collection" — i.e. where both the
+    /// outer mapping and its element mapping have a non-null <c>ElementTypeMapping</c>.
+    /// ClickHouse composite types (arrays of arrays for Polygon/MultiPolygon, Tuple, Map,
+    /// Variant, Dynamic) intentionally compose via nested mappings, so hiding the element
+    /// mapping in those cases keeps the validator happy without affecting SQL generation.
+    /// </summary>
+    private static RelationalTypeMapping? ExposableElementMapping(RelationalTypeMapping elementMapping)
+        => elementMapping.ElementTypeMapping is null ? elementMapping : null;
 
     protected ClickHouseArrayTypeMapping(RelationalTypeMappingParameters parameters, RelationalTypeMapping elementMapping)
         : base(parameters)

@@ -33,7 +33,7 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
     protected override DbConnection CreateDbConnection()
         => _dataSource?.CreateConnection()
-           ?? new ClickHouseConnection(ConnectionString!);
+           ?? new ClickHouseConnection(ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!));
 
     protected override bool SupportsAmbientTransactions => false;
 

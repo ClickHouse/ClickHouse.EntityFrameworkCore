@@ -35,6 +35,6 @@ public class NorthwindFunctionsQueryClickHouseTest : IClassFixture<NorthwindQuer
             .Where(c => c.City.StartsWith("Br"))
             .CountAsync();
 
-        Assert.Equal(1, count); // Bräcke
+        Assert.Equal(3, count); // Bräcke, Brandenburg, Bruxelles
     }
 }

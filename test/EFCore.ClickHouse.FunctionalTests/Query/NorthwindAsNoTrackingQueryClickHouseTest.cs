@@ -24,7 +24,7 @@ public class NorthwindAsNoTrackingQueryClickHouseTest : IClassFixture<NorthwindQ
             .OrderBy(c => c.CustomerID)
             .ToListAsync();
 
-        Assert.Equal(2, customers.Count);
+        Assert.Equal(7, customers.Count);
         Assert.Empty(context.ChangeTracker.Entries());
     }
 }

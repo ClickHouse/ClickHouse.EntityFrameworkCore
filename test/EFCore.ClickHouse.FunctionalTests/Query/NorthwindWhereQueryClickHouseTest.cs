@@ -24,21 +24,22 @@ public class NorthwindWhereQueryClickHouseTest : IClassFixture<NorthwindQueryCli
             .Select(c => c.CustomerID)
             .ToListAsync();
 
-        Assert.Equal(["AROUT", "BSBEV"], customerIds);
+        Assert.Equal(["AROUT", "BSBEV", "CONSH", "EASTC", "NORTS", "SEVES"], customerIds);
     }
 
     [Fact]
     public async Task Where_order_date_after_cutoff()
     {
         await using var context = _fixture.CreateContext();
-        var cutoff = new DateTime(1996, 7, 8);
+        var cutoff = new DateTime(1998, 5, 1);
 
         var orderIds = await context.Set<Order>()
             .Where(o => o.OrderDate >= cutoff)
             .OrderBy(o => o.OrderID)
             .Select(o => o.OrderID)
+            .Take(4)
             .ToListAsync();
 
-        Assert.Equal([10250, 10251, 10252, 10253], orderIds);
+        Assert.Equal([11064, 11065, 11066, 11067], orderIds);
     }
 }

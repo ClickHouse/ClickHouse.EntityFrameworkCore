@@ -19,7 +19,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     private static readonly RelationalTypeMapping SByteMapping = new ClickHouseIntegerTypeMapping("Int8", typeof(sbyte), DbType.SByte);
     private static readonly RelationalTypeMapping Int16Mapping = new ClickHouseIntegerTypeMapping("Int16", typeof(short), DbType.Int16);
     private static readonly RelationalTypeMapping UInt16Mapping = new ClickHouseIntegerTypeMapping("UInt16", typeof(ushort), DbType.UInt16);
-    private static readonly RelationalTypeMapping Int32Mapping = new ClickHouseIntegerTypeMapping("Int32", typeof(int), DbType.Int32);
+    private static readonly RelationalTypeMapping Int32Mapping = new ClickHouseInt32TypeMapping();
     private static readonly RelationalTypeMapping UInt32Mapping = new ClickHouseIntegerTypeMapping("UInt32", typeof(uint), DbType.UInt32);
     private static readonly RelationalTypeMapping Int64Mapping = new ClickHouseIntegerTypeMapping("Int64", typeof(long), DbType.Int64);
     private static readonly RelationalTypeMapping UInt64Mapping = new ClickHouseIntegerTypeMapping("UInt64", typeof(ulong), DbType.UInt64);
@@ -258,8 +258,30 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     }
 
     protected override RelationalTypeMapping? FindMapping(in RelationalTypeMappingInfo mappingInfo)
-        // Call base first so plugin/extension type mappings can intercept before our defaults.
-        => base.FindMapping(in mappingInfo)
+    {
+        var clrType = mappingInfo.ClrType;
+
+        // When EF Core's ValuesExpression postprocessing looks up the collection mapping for
+        // an inline-values parameter (e.g. uint[] from a local collection join), it passes the
+        // element type mapping on the info and requires a collection mapping with ElementTypeMapping
+        // set. Resolve through FindArrayMapping directly in that case so we return a
+        // ClickHouseArrayTypeMapping (which has ElementTypeMapping wired up) rather than whatever
+        // the base may produce via value converters.
+        //
+        // Only do this when ElementTypeMapping is supplied — otherwise we'd shadow registered
+        // store-type aliases like "Polygon" that map Tuple<double,double>[][] to a specific
+        // geo composite mapping rather than a plain nested-array mapping.
+        if (mappingInfo.ElementTypeMapping is not null
+            && (IsCollectionClrType(clrType)
+                || string.Equals(mappingInfo.StoreTypeNameBase, "Array", StringComparison.OrdinalIgnoreCase)))
+        {
+            var arrayMapping = FindArrayMapping(mappingInfo);
+            if (arrayMapping is not null)
+                return arrayMapping;
+        }
+
+        // Call base so plugin/extension type mappings can intercept before our defaults.
+        return base.FindMapping(in mappingInfo)
            ?? FindDateTime64Mapping(mappingInfo)
            ?? FindDateTimeMapping(mappingInfo)
            ?? FindFixedStringMapping(mappingInfo)
@@ -273,6 +295,24 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
            ?? FindEnumMapping(mappingInfo)
            ?? FindExistingMapping(mappingInfo)
            ?? FindDecimalMapping(mappingInfo);
+    }
+
+    private static bool IsCollectionClrType(Type? clrType)
+    {
+        if (clrType is null || clrType == typeof(string) || clrType == typeof(byte[]))
+            return false;
+        if (clrType.IsArray && clrType.GetArrayRank() == 1)
+            return true;
+        if (!clrType.IsGenericType)
+            return false;
+        var def = clrType.GetGenericTypeDefinition();
+        return def == typeof(List<>)
+            || def == typeof(IEnumerable<>)
+            || def == typeof(ICollection<>)
+            || def == typeof(IList<>)
+            || def == typeof(IReadOnlyList<>)
+            || def == typeof(IReadOnlyCollection<>);
+    }
 
     private RelationalTypeMapping? FindDateTime64Mapping(in RelationalTypeMappingInfo mappingInfo)
     {
@@ -324,10 +364,13 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
     private RelationalTypeMapping? FindArrayMapping(in RelationalTypeMappingInfo mappingInfo)
     {
-        RelationalTypeMapping? elementMapping = null;
+        // Prefer the pre-resolved element type mapping from EF Core (used by ValuesExpression
+        // postprocessing for primitive collection parameters).
+        var elementMapping = mappingInfo.ElementTypeMapping as RelationalTypeMapping;
 
         // Resolve element mapping from store type: Array(X)
-        if (string.Equals(mappingInfo.StoreTypeNameBase, "Array", StringComparison.OrdinalIgnoreCase))
+        if (elementMapping is null
+            && string.Equals(mappingInfo.StoreTypeNameBase, "Array", StringComparison.OrdinalIgnoreCase))
         {
             var storeTypeName = mappingInfo.StoreTypeName;
             if (storeTypeName is null)
@@ -341,15 +384,11 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         }
 
         var clrType = mappingInfo.ClrType;
+        var elementClrType = GetCollectionElementType(clrType);
 
-        // Resolve element mapping from CLR type if not already resolved from store type
-        if (elementMapping is null)
-        {
-            if (clrType is not null && clrType.IsArray && clrType.GetArrayRank() == 1)
-                elementMapping = FindMapping(clrType.GetElementType()!);
-            else if (clrType is not null && clrType.IsGenericType && clrType.GetGenericTypeDefinition() == typeof(List<>))
-                elementMapping = FindMapping(clrType.GetGenericArguments()[0]);
-        }
+        // Resolve element mapping from CLR type if not already resolved
+        if (elementMapping is null && elementClrType is not null)
+            elementMapping = FindMapping(elementClrType);
 
         if (elementMapping is null)
             return null;
@@ -365,6 +404,27 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         }
 
         return new ClickHouseArrayTypeMapping(elementMapping);
+    }
+
+    private static Type? GetCollectionElementType(Type? clrType)
+    {
+        if (clrType is null)
+            return null;
+        if (clrType.IsArray && clrType.GetArrayRank() == 1)
+            return clrType.GetElementType();
+        if (!clrType.IsGenericType)
+            return null;
+        var def = clrType.GetGenericTypeDefinition();
+        if (def == typeof(List<>)
+            || def == typeof(IEnumerable<>)
+            || def == typeof(ICollection<>)
+            || def == typeof(IList<>)
+            || def == typeof(IReadOnlyList<>)
+            || def == typeof(IReadOnlyCollection<>))
+        {
+            return clrType.GetGenericArguments()[0];
+        }
+        return null;
     }
 
     private RelationalTypeMapping? FindMapMapping(in RelationalTypeMappingInfo mappingInfo)
