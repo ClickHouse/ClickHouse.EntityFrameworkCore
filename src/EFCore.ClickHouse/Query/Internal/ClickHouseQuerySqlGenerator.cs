@@ -19,12 +19,57 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
         => extensionExpression switch
         {
             ClickHouseRowValueExpression e => VisitRowValue(e),
-            ScalarSubqueryExpression e when IsNonNullableValueType(e.Type) => VisitNonNullableScalarSubquery(e),
+            ScalarSubqueryExpression e when IsNonNullableZeroDefaultAggregateSubquery(e) => VisitNonNullableScalarSubquery(e),
             _ => base.VisitExtension(extensionExpression)
         };
 
     private static bool IsNonNullableValueType(Type type)
         => type.IsValueType && Nullable.GetUnderlyingType(type) == null;
+
+    /// <summary>
+    /// Returns true when a scalar subquery projects an aggregate whose LINQ semantic for an
+    /// empty input is "0" — specifically <c>Count</c>/<c>LongCount</c>/<c>Sum</c>, possibly
+    /// wrapped in EF Core's <c>COALESCE(aggregate, 0)</c> pattern. Only these cases are safe
+    /// to wrap with <c>ifNull(..., 0)</c>; other aggregates (Min/Max/Average) and non-aggregate
+    /// projections (FirstOrDefault on DateTime, Guid, tuples, …) must NOT be wrapped,
+    /// because (a) 0 is type-incorrect for non-numeric types and (b) "no row" ≠ "zero" for
+    /// Min/Max/Average semantics.
+    /// </summary>
+    private static bool IsNonNullableZeroDefaultAggregateSubquery(ScalarSubqueryExpression expression)
+    {
+        if (!IsNonNullableValueType(expression.Type))
+            return false;
+
+        var projections = expression.Subquery.Projection;
+        if (projections.Count != 1)
+            return false;
+
+        return IsZeroDefaultAggregate(projections[0].Expression);
+    }
+
+    private static bool IsZeroDefaultAggregate(SqlExpression expression)
+    {
+        if (expression is not SqlFunctionExpression fn)
+            return false;
+
+        if (IsCountOrSumName(fn.Name))
+            return true;
+
+        // EF Core wraps non-nullable numeric aggregates as COALESCE(aggregate, 0). ClickHouse's
+        // scalar subquery still returns NULL for empty input despite the inner COALESCE, so we
+        // still need the outer ifNull wrap.
+        if (string.Equals(fn.Name, "COALESCE", StringComparison.OrdinalIgnoreCase)
+            && fn.Arguments is { Count: > 0 } args)
+        {
+            return IsZeroDefaultAggregate(args[0]);
+        }
+
+        return false;
+    }
+
+    private static bool IsCountOrSumName(string name)
+        => string.Equals(name, "COUNT", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(name, "SUM", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// ClickHouse requires explicit ALL or DISTINCT for UNION
@@ -162,8 +207,12 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
 
     /// <summary>
     /// ClickHouse returns NULL for scalar subqueries whose inner query produces no rows,
-    /// even for aggregates like COUNT that always return a value in standard SQL.
-    /// Wrap non-nullable scalar subqueries with <c>ifNull(subquery, 0)</c>.
+    /// even for aggregates like <c>COUNT</c> / <c>SUM</c> that return 0 in standard SQL.
+    /// Wraps the non-nullable zero-default aggregate scalar-subquery shape with
+    /// <c>ifNull(subquery, 0)</c>. The fallback literal 0 is only valid because the caller
+    /// guarantees the inner projection is a COUNT or SUM (possibly inside an EF-emitted
+    /// <c>COALESCE(..., 0)</c>) with a non-nullable numeric return type — see
+    /// <see cref="IsNonNullableZeroDefaultAggregateSubquery"/>.
     /// </summary>
     protected virtual Expression VisitNonNullableScalarSubquery(ScalarSubqueryExpression expression)
     {

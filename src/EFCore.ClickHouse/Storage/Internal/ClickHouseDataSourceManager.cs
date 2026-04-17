@@ -15,13 +15,16 @@ public class ClickHouseDataSourceManager : IDisposable, IAsyncDisposable
         {
             { DataSource: { } dataSource } => dataSource,
             { Connection: not null } => null,
-            { ConnectionString: { } connectionString } => GetOrCreateDataSource(connectionString),
+            { ConnectionString: { } connectionString }
+                => GetOrCreateDataSource(connectionString, extension.JoinNullSemanticsDisabled),
             _ => null
         };
 
-    private ClickHouseDataSource GetOrCreateDataSource(string connectionString)
+    private ClickHouseDataSource GetOrCreateDataSource(string connectionString, bool joinNullSemanticsDisabled)
     {
-        var effectiveConnectionString = EnsureDefaultSettings(connectionString);
+        var effectiveConnectionString = joinNullSemanticsDisabled
+            ? connectionString
+            : EnsureDefaultSettings(connectionString);
 
         if (_dataSources.TryGetValue(effectiveConnectionString, out var existing))
             return existing;

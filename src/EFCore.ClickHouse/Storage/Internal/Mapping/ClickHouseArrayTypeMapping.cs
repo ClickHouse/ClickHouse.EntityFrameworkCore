@@ -111,6 +111,20 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         return (ValueComparer)method.Invoke(null, null)!;
     }
 
+    /// <summary>
+    /// Creates a <see cref="ValueComparer"/> for a collection-interface model type
+    /// (<c>IEnumerable&lt;T&gt;</c>, <c>IList&lt;T&gt;</c>, <c>IReadOnlyList&lt;T&gt;</c>, etc.).
+    /// The snapshot direction returns a fresh <c>T[]</c> cast to the interface — safe because
+    /// <c>T[]</c> implements all the standard collection interfaces in .NET.
+    /// </summary>
+    internal static ValueComparer CreateEnumerableComparer(Type collectionType, Type elementType)
+    {
+        var method = typeof(ClickHouseArrayTypeMapping)
+            .GetMethod(nameof(CreateTypedEnumerableComparer), BindingFlags.Static | BindingFlags.NonPublic)!
+            .MakeGenericMethod(collectionType, elementType);
+        return (ValueComparer)method.Invoke(null, null)!;
+    }
+
     private static ValueComparer<T[]?> CreateTypedArrayComparer<T>()
         => new(
             (a, b) => StructuralComparisons.StructuralEqualityComparer.Equals(a, b),
@@ -122,4 +136,11 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
             (a, b) => (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b)),
             o => o == null ? 0 : o.Aggregate(0, (hash, el) => HashCode.Combine(hash, el)),
             source => source == null ? null : new List<T>(source));
+
+    private static ValueComparer<TCollection?> CreateTypedEnumerableComparer<TCollection, T>()
+        where TCollection : class, IEnumerable<T>
+        => new(
+            (a, b) => (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b)),
+            o => o == null ? 0 : o.Aggregate(0, (hash, el) => HashCode.Combine(hash, el)),
+            source => source == null ? null : (TCollection)(object)source.ToArray());
 }

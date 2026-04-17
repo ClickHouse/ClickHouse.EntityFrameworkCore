@@ -370,6 +370,167 @@ public class JoinTests : IClassFixture<JoinFixture>
         Assert.Equal("Eve", results[4].Name);
         Assert.Equal(0, results[4].OrderCount);
     }
+
+    [Fact]
+    public void ScalarSubquery_Count_IsWrappedWithIfNull()
+    {
+        // ClickHouse returns NULL for no-match scalar subqueries even for COUNT, unlike
+        // standard SQL. Wrapping with ifNull(..., 0) is the right fix for COUNT specifically.
+        using var ctx = new JoinDbContext(_fixture.ConnectionString);
+
+        var sql = ctx.Customers
+            .Select(c => new
+            {
+                c.Name,
+                Cnt = ctx.Orders.Count(o => o.CustomerId == c.Id)
+            })
+            .ToQueryString();
+
+        Assert.Contains("ifNull(", sql);
+    }
+
+    [Fact]
+    public void ScalarSubquery_Sum_IsWrappedWithIfNull()
+    {
+        // LINQ Sum() on an empty set returns 0. EF emits COALESCE(SUM(...), 0), but ClickHouse's
+        // scalar subquery wraps the whole thing with NULL on empty input — so the outer
+        // ifNull is still needed to match LINQ semantics.
+        using var ctx = new JoinDbContext(_fixture.ConnectionString);
+
+        var sql = ctx.Customers
+            .Select(c => new
+            {
+                c.Name,
+                Total = ctx.Orders.Where(o => o.CustomerId == c.Id).Sum(o => o.Amount)
+            })
+            .ToQueryString();
+
+        Assert.Contains("ifNull(", sql);
+    }
+
+    [Fact]
+    public void ScalarSubquery_FirstOrDefault_IsNotWrappedWithIfNullZero()
+    {
+        // A non-COUNT scalar subquery (like FirstOrDefault on a non-nullable value type)
+        // must NOT be wrapped with ifNull(..., 0). The fallback value 0 is semantically
+        // wrong for aggregates like Min/Max where "no row" is not "zero", and it is
+        // type-incorrect for projections like DateTime / Guid.
+        using var ctx = new JoinDbContext(_fixture.ConnectionString);
+
+        var sql = ctx.Customers
+            .Select(c => new
+            {
+                c.Name,
+                FirstAmount = ctx.Orders
+                    .Where(o => o.CustomerId == c.Id)
+                    .Select(o => o.Amount)
+                    .FirstOrDefault()
+            })
+            .ToQueryString();
+
+        // The only ifNull the provider emits is for COUNT. A non-COUNT subquery has
+        // no reason to be wrapped.
+        Assert.DoesNotContain("ifNull(", sql);
+    }
+
+    // Regression for PR #10 review finding 3: interface collection CLR types claimed
+    // support but only List<T> and T[] actually worked. These tests pin the behavior
+    // for each interface shape.
+
+    [Fact]
+    public async Task Join_Local_ArrayCollection_Works()
+    {
+        await using var ctx = new JoinDbContext(_fixture.ConnectionString);
+        var ids = new long[] { 1, 2, 3 };
+
+        var results = await ctx.Customers
+            .Where(c => ids.Contains(c.Id))
+            .OrderBy(c => c.Id)
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, results.Count);
+    }
+
+    [Fact]
+    public async Task Join_Local_ListCollection_Works()
+    {
+        await using var ctx = new JoinDbContext(_fixture.ConnectionString);
+        var ids = new List<long> { 1, 2, 3 };
+
+        var results = await ctx.Customers
+            .Where(c => ids.Contains(c.Id))
+            .OrderBy(c => c.Id)
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, results.Count);
+    }
+
+    [Fact]
+    public async Task Join_Local_IEnumerableCollection_Works()
+    {
+        await using var ctx = new JoinDbContext(_fixture.ConnectionString);
+        IEnumerable<long> ids = new List<long> { 1, 2, 3 };
+
+        var results = await ctx.Customers
+            .Where(c => ids.Contains(c.Id))
+            .OrderBy(c => c.Id)
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, results.Count);
+    }
+
+    [Fact]
+    public async Task Join_Local_IReadOnlyListCollection_Works()
+    {
+        await using var ctx = new JoinDbContext(_fixture.ConnectionString);
+        IReadOnlyList<long> ids = new List<long> { 1, 2, 3 };
+
+        var results = await ctx.Customers
+            .Where(c => ids.Contains(c.Id))
+            .OrderBy(c => c.Id)
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, results.Count);
+    }
+
+    [Fact]
+    public async Task Join_Local_IListCollection_Works()
+    {
+        await using var ctx = new JoinDbContext(_fixture.ConnectionString);
+        IList<long> ids = new List<long> { 1, 2, 3 };
+
+        var results = await ctx.Customers
+            .Where(c => ids.Contains(c.Id))
+            .OrderBy(c => c.Id)
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, results.Count);
+    }
+
+    [Fact]
+    public void ScalarSubquery_Max_IsNotWrappedWithIfNullZero()
+    {
+        // Max on an empty set should return NULL in ClickHouse, matching LINQ/EF semantics
+        // for nullable aggregates. Wrapping with ifNull(..., 0) would produce 0 instead.
+        using var ctx = new JoinDbContext(_fixture.ConnectionString);
+
+        var sql = ctx.Customers
+            .Select(c => new
+            {
+                c.Name,
+                MaxAmount = ctx.Orders
+                    .Where(o => o.CustomerId == c.Id)
+                    .Max(o => (decimal?)o.Amount)
+            })
+            .ToQueryString();
+
+        Assert.DoesNotContain("ifNull(", sql);
+    }
 }
 
 public class SetOperationTests : IClassFixture<JoinFixture>

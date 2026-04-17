@@ -393,13 +393,28 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         if (elementMapping is null)
             return null;
 
-        // If CLR type is List<T>, use a ValueConverter to bridge List<T> ↔ T[]
-        if (clrType is not null && clrType.IsGenericType && clrType.GetGenericTypeDefinition() == typeof(List<>))
+        // T[] is the native storage type — no converter needed.
+        if (clrType is null || (clrType.IsArray && clrType.GetArrayRank() == 1))
+            return new ClickHouseArrayTypeMapping(elementMapping);
+
+        // List<T> has a dedicated converter and comparer.
+        if (clrType.IsGenericType && clrType.GetGenericTypeDefinition() == typeof(List<>))
         {
             var listElementType = clrType.GetGenericArguments()[0];
             var converterType = typeof(ListToArrayConverter<>).MakeGenericType(listElementType);
             var converter = (ValueConverter)Activator.CreateInstance(converterType)!;
             var comparer = ClickHouseArrayTypeMapping.CreateListComparer(listElementType);
+            return new ClickHouseArrayTypeMapping(elementMapping, converter, comparer);
+        }
+
+        // Interface collection types (IEnumerable<T>, IList<T>, IReadOnlyList<T>, …) use a
+        // generic converter that casts T[] up to the interface and materializes via ToArray()
+        // on the way back to the provider.
+        if (elementClrType is not null)
+        {
+            var converterType = typeof(EnumerableToArrayConverter<,>).MakeGenericType(clrType, elementClrType);
+            var converter = (ValueConverter)Activator.CreateInstance(converterType)!;
+            var comparer = ClickHouseArrayTypeMapping.CreateEnumerableComparer(clrType, elementClrType);
             return new ClickHouseArrayTypeMapping(elementMapping, converter, comparer);
         }
 
