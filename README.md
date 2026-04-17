@@ -24,6 +24,8 @@
 
 The official Entity Framework Core provider for [ClickHouse](https://clickhouse.com/), built on top of [ClickHouse.Driver](https://github.com/ClickHouse/clickhouse-cs).
 
+Detailed documentation is available on the [ClickHouse website](https://clickhouse.com/docs/integrations/csharp#orm-support-ef-core).
+
 ## Getting Started
 
 ```csharp
