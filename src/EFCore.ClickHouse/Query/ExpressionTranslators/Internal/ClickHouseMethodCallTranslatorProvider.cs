@@ -1,3 +1,4 @@
+using ClickHouse.EntityFrameworkCore.Query.Internal;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
 
@@ -17,6 +18,7 @@ public class ClickHouseMethodCallTranslatorProvider : RelationalMethodCallTransl
             new ClickHouseStringMethodTranslator(sqlExpressionFactory),
             new ClickHouseLikeTranslator(sqlExpressionFactory),
             new ClickHouseMathMethodTranslator(sqlExpressionFactory, typeMappingSource),
+            new ClickHouseJsonDbFunctionsTranslator(sqlExpressionFactory),
         ]);
     }
 }
