@@ -8,6 +8,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Parses a JSON string and extracts a value as a boolean.
     /// Maps to ClickHouse: simpleJSONExtractBool(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
@@ -19,6 +23,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Parses a JSON string and extracts a value as a double-precision float.
     /// Maps to ClickHouse: simpleJSONExtractFloat(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
@@ -30,6 +38,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Parses a JSON string and extracts a value as an integer.
     /// Maps to ClickHouse: simpleJSONExtractInt(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
@@ -41,6 +53,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Extracts a part of a JSON string without unescaping, returning the raw JSON fragment.
     /// Maps to ClickHouse: simpleJSONExtractRaw(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
@@ -53,6 +69,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Fast implementation for simple, non-nested JSON objects.
     /// Maps to ClickHouse: simpleJSONExtractString(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
@@ -64,6 +84,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Parses a JSON string and extracts a value as an unsigned integer.
     /// Maps to ClickHouse: simpleJSONExtractUInt(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
@@ -75,6 +99,10 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// Checks whether a field named <paramref name="name"/> exists in the JSON string.
     /// Maps to ClickHouse: simpleJSONHas(json, name)
     /// </summary>
+    /// <remarks>
+    /// This function works only with <c>String</c> columns. 
+    /// Native ClickHouse <c>JSON</c> type is not supported by this specific method.
+    /// </remarks>
     /// <param name="_">DbFunctions instance</param>
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to check for existence.</param>
