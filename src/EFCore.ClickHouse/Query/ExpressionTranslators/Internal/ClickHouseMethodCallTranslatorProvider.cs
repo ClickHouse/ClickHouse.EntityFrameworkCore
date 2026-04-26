@@ -1,4 +1,3 @@
-using ClickHouse.EntityFrameworkCore.Query.Internal;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
 

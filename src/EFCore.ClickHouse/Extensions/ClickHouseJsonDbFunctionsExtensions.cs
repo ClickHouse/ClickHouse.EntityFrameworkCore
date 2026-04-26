@@ -16,7 +16,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
     [DbFunction("simpleJSONExtractBool")]
-    public static bool SimpleJsonExtractBool<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static bool? SimpleJsonExtractBool<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonExtractBool)));
 
     /// <summary>
@@ -31,7 +31,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
     [DbFunction("simpleJSONExtractFloat")]
-    public static double SimpleJsonExtractFloat<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static double? SimpleJsonExtractFloat<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonExtractFloat)));
     
     /// <summary>
@@ -46,7 +46,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
     [DbFunction("simpleJSONExtractInt")]
-    public static long SimpleJsonExtractInt<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static long? SimpleJsonExtractInt<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonExtractInt)));
     
     /// <summary>
@@ -61,7 +61,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
     [DbFunction("simpleJSONExtractRaw")]
-    public static string SimpleJsonExtractRaw<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static string? SimpleJsonExtractRaw<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonExtractRaw)));
     
     /// <summary>
@@ -77,7 +77,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
     [DbFunction("simpleJSONExtractString")]
-    public static string SimpleJsonExtractString<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static string? SimpleJsonExtractString<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonExtractString)));
 
     /// <summary>
@@ -92,7 +92,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to extract.</param>
     [DbFunction("simpleJSONExtractUInt")]
-    public static ulong SimpleJsonExtractUInt<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static ulong? SimpleJsonExtractUInt<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonExtractUInt)));
 
     /// <summary>
@@ -107,9 +107,6 @@ public static class ClickHouseJsonDbFunctionsExtensions
     /// <param name="matchExpression">The property of entity that is to be matched.</param>
     /// <param name="name">The name of the field to check for existence.</param>
     [DbFunction("simpleJSONHas")]
-    public static bool SimpleJsonHas<T>(this DbFunctions _, T matchExpression, string name) =>
+    public static bool? SimpleJsonHas<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonHas)));
-    
-    internal static bool UnsupportedMethodForTesting<T>(this DbFunctions _, T matchExpression) =>
-        throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(UnsupportedMethodForTesting)));
 }

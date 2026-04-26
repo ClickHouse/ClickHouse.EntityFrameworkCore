@@ -16,16 +16,37 @@ public class ClickHouseJsonDbFunctionsTranslator : IMethodCallTranslator
         _sqlExpressionFactory = sqlExpressionFactory;
     }
 
-    private static readonly Dictionary<string, string> SupportedMethods = new()
+    private static readonly Dictionary<MethodInfo, string> SupportedMethods;
+
+    static ClickHouseJsonDbFunctionsTranslator()
     {
-        { nameof(JsonDbFunctions.SimpleJsonExtractBool), "simpleJSONExtractBool" },
-        { nameof(JsonDbFunctions.SimpleJsonExtractFloat), "simpleJSONExtractFloat" },
-        { nameof(JsonDbFunctions.SimpleJsonExtractInt), "simpleJSONExtractInt" },
-        { nameof(JsonDbFunctions.SimpleJsonExtractRaw), "simpleJSONExtractRaw" },
-        { nameof(JsonDbFunctions.SimpleJsonExtractString), "simpleJSONExtractString" },
-        { nameof(JsonDbFunctions.SimpleJsonExtractUInt), "simpleJSONExtractUInt" },
-        { nameof(JsonDbFunctions.SimpleJsonHas), "simpleJSONHas" },
-    };
+        var type = typeof(JsonDbFunctions);
+        SupportedMethods = new Dictionary<MethodInfo, string>();
+
+        void RegisterSimpleJson(string methodName, string sqlFunction)
+        {
+            var method = type.GetMethods().FirstOrDefault(m =>
+            {
+                if (m.Name != methodName || !m.IsGenericMethod) return false;
+
+                var parameters = m.GetParameters();
+                return parameters.Length == 3
+                       && parameters[0].ParameterType == typeof(DbFunctions)
+                       && parameters[1].ParameterType.IsGenericParameter
+                       && parameters[2].ParameterType == typeof(string);
+            }) ?? throw new InvalidOperationException($"Method {methodName} with strict signature not found.");
+
+            SupportedMethods.Add(method, sqlFunction);
+        }
+
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonExtractBool), "simpleJSONExtractBool");
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonExtractFloat), "simpleJSONExtractFloat");
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonExtractInt), "simpleJSONExtractInt");
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonExtractRaw), "simpleJSONExtractRaw");
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonExtractString), "simpleJSONExtractString");
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonExtractUInt), "simpleJSONExtractUInt");
+        RegisterSimpleJson(nameof(JsonDbFunctions.SimpleJsonHas), "simpleJSONHas");
+    }
 
     public SqlExpression? Translate(
         SqlExpression? instance,
@@ -33,15 +54,12 @@ public class ClickHouseJsonDbFunctionsTranslator : IMethodCallTranslator
         IReadOnlyList<SqlExpression> arguments,
         IDiagnosticsLogger<DbLoggerCategory.Query> logger)
     {
-        if (method.DeclaringType != typeof(JsonDbFunctions))
-        {
-            return null;
-        }
-        
-        if (SupportedMethods.TryGetValue(method.Name, out var function))
+        var genericMethod = method.IsGenericMethod ? method.GetGenericMethodDefinition() : method;
+
+        if (SupportedMethods.TryGetValue(genericMethod, out var function))
         {
             var sqlArguments = arguments.Skip(1).ToList();
-            
+
             return _sqlExpressionFactory.Function(
                 name: function,
                 arguments: sqlArguments,

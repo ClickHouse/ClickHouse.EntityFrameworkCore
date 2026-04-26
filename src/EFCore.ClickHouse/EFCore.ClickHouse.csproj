@@ -39,9 +39,5 @@
       <PackageReleaseNotes>$([System.IO.File]::ReadAllText("$(MSBuildProjectDirectory)/../../RELEASENOTES.md"))</PackageReleaseNotes>
     </PropertyGroup>
   </Target>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="EFCore.ClickHouse.Tests" />
-  </ItemGroup>
   
 </Project>
