@@ -34,10 +34,14 @@
     <None Include="README.nuget.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
-    <Target Name="SetPackageReleaseNotes" BeforeTargets="GenerateNuspec">
+  <Target Name="SetPackageReleaseNotes" BeforeTargets="GenerateNuspec">
     <PropertyGroup>
       <PackageReleaseNotes>$([System.IO.File]::ReadAllText("$(MSBuildProjectDirectory)/../../RELEASENOTES.md"))</PackageReleaseNotes>
     </PropertyGroup>
   </Target>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="EFCore.ClickHouse.Tests" />
+  </ItemGroup>
+  
 </Project>

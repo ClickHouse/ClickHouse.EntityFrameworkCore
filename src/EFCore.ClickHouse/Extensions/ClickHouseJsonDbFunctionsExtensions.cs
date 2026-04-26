@@ -109,4 +109,7 @@ public static class ClickHouseJsonDbFunctionsExtensions
     [DbFunction("simpleJSONHas")]
     public static bool SimpleJsonHas<T>(this DbFunctions _, T matchExpression, string name) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(SimpleJsonHas)));
+    
+    internal static bool UnsupportedMethodForTesting<T>(this DbFunctions _, T matchExpression) =>
+        throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(UnsupportedMethodForTesting)));
 }
