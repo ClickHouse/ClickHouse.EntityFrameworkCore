@@ -927,6 +927,24 @@ public class ArrayTests
         Assert.Equal([42, -1, 0, 100], rows[2].IntArray);
         Assert.Equal(["hello", "world"], rows[2].StringArray);
     }
+
+    [Fact]
+    public async Task Array_Contains_Translates_To_Has()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // 1. Static Enumerable.Contains
+        var query1 = ctx.Entities.Where(e => e.IntArray.Contains(42));
+        var result1 = await query1.ToListAsync();
+        Assert.Single(result1);
+        Assert.Equal(3, result1[0].Id);
+
+        // 2. Queryable.Contains (via AsQueryable)
+        var query2 = ctx.Entities.Where(e => e.StringArray.AsQueryable().Contains("hello"));
+        var result2 = await query2.ToListAsync();
+        Assert.Single(result2);
+        Assert.Equal(3, result2[0].Id);
+    }
 }
 
 [Collection("ExtendedTypes")]
@@ -951,6 +969,24 @@ public class ListArrayTests
 
         Assert.Equal([42, -1, 0, 100], rows[2].IntArray);
         Assert.Equal(["hello", "world"], rows[2].StringArray);
+    }
+
+    [Fact]
+    public async Task ListArray_Contains_Translates_To_Has()
+    {
+        await using var ctx = new ListArrayDbContext(_fixture.ConnectionString);
+
+        // 1. Instance List.Contains
+        var query1 = ctx.Entities.Where(e => e.IntArray.Contains(42));
+        var result1 = await query1.ToListAsync();
+        Assert.Single(result1);
+        Assert.Equal(3, result1[0].Id);
+
+        // 2. Queryable.Contains (via AsQueryable)
+        var query2 = ctx.Entities.Where(e => e.StringArray.AsQueryable().Contains("hello"));
+        var result2 = await query2.ToListAsync();
+        Assert.Single(result2);
+        Assert.Equal(3, result2[0].Id);
     }
 }
 
