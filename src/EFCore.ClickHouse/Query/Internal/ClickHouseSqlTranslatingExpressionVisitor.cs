@@ -8,6 +8,18 @@ namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 
 public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpressionVisitor
 {
+    private static readonly MethodInfo EnumerableContainsMethod = typeof(Enumerable).GetRuntimeMethods()
+        .Single(m => m.Name == nameof(Enumerable.Contains) && m.GetParameters().Length == 2);
+
+    private static readonly MethodInfo QueryableContainsMethod = typeof(Queryable).GetRuntimeMethods()
+        .Single(m => m.Name == nameof(Queryable.Contains) && m.GetParameters().Length == 2);
+
+    private static readonly MethodInfo QueryableAsQueryableMethod = typeof(Queryable).GetRuntimeMethods()
+        .Single(m => m.Name == nameof(Queryable.AsQueryable) && m.IsGenericMethod);
+
+    private static readonly MethodInfo EnumerableAsEnumerableMethod = typeof(Enumerable).GetRuntimeMethods()
+        .Single(m => m.Name == nameof(Enumerable.AsEnumerable) && m.IsGenericMethod);
+
     public ClickHouseSqlTranslatingExpressionVisitor(
         RelationalSqlTranslatingExpressionVisitorDependencies dependencies,
         QueryCompilationContext queryCompilationContext,
@@ -35,31 +47,56 @@ public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatin
     protected override Expression VisitMethodCall(MethodCallExpression methodCallExpression)
     {
         var method = methodCallExpression.Method;
-        if (method.Name == nameof(Queryable.AsQueryable)
-            || (method.DeclaringType == typeof(Enumerable) && method.Name == nameof(Enumerable.AsEnumerable)))
-        {
-            return Visit(methodCallExpression.Arguments[0]);
-        }
 
-        if (method.IsGenericMethod && method.Name == nameof(Enumerable.Contains))
+        if (method.IsGenericMethod)
         {
             var genericMethodDefinition = method.GetGenericMethodDefinition();
-            if (genericMethodDefinition == typeof(Enumerable).GetRuntimeMethods().First(m => m.Name == nameof(Enumerable.Contains) && m.GetParameters().Length == 2)
-                || genericMethodDefinition == typeof(Queryable).GetRuntimeMethods().First(m => m.Name == nameof(Queryable.Contains) && m.GetParameters().Length == 2))
+            if (genericMethodDefinition == QueryableAsQueryableMethod
+                || genericMethodDefinition == EnumerableAsEnumerableMethod)
             {
-                var source = Visit(methodCallExpression.Arguments[0]) as SqlExpression;
-                var item = Visit(methodCallExpression.Arguments[1]) as SqlExpression;
+                return Visit(methodCallExpression.Arguments[0]);
+            }
+        }
 
-                if (source != null && item != null && source.TypeMapping is ClickHouseArrayTypeMapping)
+        SqlExpression? source = null;
+        SqlExpression? item = null;
+
+        if (method.IsGenericMethod)
+        {
+            var genericMethodDefinition = method.GetGenericMethodDefinition();
+            if (genericMethodDefinition == EnumerableContainsMethod
+                || genericMethodDefinition == QueryableContainsMethod)
+            {
+                source = Visit(methodCallExpression.Arguments[0]) as SqlExpression;
+                item = Visit(methodCallExpression.Arguments[1]) as SqlExpression;
+            }
+        }
+        else if (methodCallExpression.Object != null
+                 && method.Name == nameof(Enumerable.Contains)
+                 && methodCallExpression.Arguments.Count == 1)
+        {
+            var declaringType = method.DeclaringType;
+            if (declaringType?.IsGenericType == true)
+            {
+                var genericTypeDefinition = declaringType.GetGenericTypeDefinition();
+                if (genericTypeDefinition == typeof(List<>)
+                    || genericTypeDefinition == typeof(ICollection<>)
+                    || genericTypeDefinition == typeof(IList<>))
                 {
-                    return Dependencies.SqlExpressionFactory.Function(
-                        "has",
-                        [source, item],
-                        nullable: true,
-                        argumentsPropagateNullability: [true, true],
-                        typeof(bool));
+                    source = Visit(methodCallExpression.Object) as SqlExpression;
+                    item = Visit(methodCallExpression.Arguments[0]) as SqlExpression;
                 }
             }
+        }
+
+        if (source != null && item != null && source.TypeMapping is ClickHouseArrayTypeMapping)
+        {
+            return Dependencies.SqlExpressionFactory.Function(
+                "has",
+                [source, item],
+                nullable: true,
+                argumentsPropagateNullability: [true, true],
+                typeof(bool));
         }
 
         return base.VisitMethodCall(methodCallExpression);
