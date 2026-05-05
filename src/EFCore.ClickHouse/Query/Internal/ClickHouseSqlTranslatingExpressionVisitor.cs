@@ -54,19 +54,6 @@ public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatin
         if (method.IsGenericMethod)
         {
             var genericMethodDefinition = method.GetGenericMethodDefinition();
-            if (genericMethodDefinition == QueryableAsQueryableMethod
-                || genericMethodDefinition == EnumerableAsEnumerableMethod)
-            {
-                return Visit(methodCallExpression.Arguments[0]);
-            }
-        }
-
-        SqlExpression? source = null;
-        SqlExpression? item = null;
-
-        if (method.IsGenericMethod)
-        {
-            var genericMethodDefinition = method.GetGenericMethodDefinition();
             if (genericMethodDefinition == EnumerableContainsMethod
                 || genericMethodDefinition == QueryableContainsMethod)
             {
@@ -77,42 +64,16 @@ public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatin
                 if (caseInsensitiveResult != null)
                     return caseInsensitiveResult;
 
-                source = Visit(methodCallExpression.Arguments[0]) as SqlExpression;
-                item = Visit(methodCallExpression.Arguments[1]) as SqlExpression;
+                var wrappedMappedArrayResult = TryTranslateWrappedMappedArrayContains(methodCallExpression);
+                if (wrappedMappedArrayResult != null)
+                    return wrappedMappedArrayResult;
             }
-        }
-        else if (methodCallExpression.Object != null
-                 && method.Name == nameof(Enumerable.Contains)
-                 && methodCallExpression.Arguments.Count == 1)
-        {
-            var declaringType = method.DeclaringType;
-            if (declaringType?.IsGenericType == true)
-            {
-                var genericTypeDefinition = declaringType.GetGenericTypeDefinition();
-                if (genericTypeDefinition == typeof(List<>)
-                    || genericTypeDefinition == typeof(ICollection<>)
-                    || genericTypeDefinition == typeof(IList<>))
-                {
-                    source = Visit(methodCallExpression.Object) as SqlExpression;
-                    item = Visit(methodCallExpression.Arguments[0]) as SqlExpression;
-                }
-            }
-        }
-
-        if (source != null && item != null && source.TypeMapping is ClickHouseArrayTypeMapping)
-        {
-            return Dependencies.SqlExpressionFactory.Function(
-                "has",
-                [source, item],
-                nullable: true,
-                argumentsPropagateNullability: [true, true],
-                typeof(bool));
         }
 
         return base.VisitMethodCall(methodCallExpression);
     }
 
-    private Expression? TryTranslateCaseInsensitiveArrayContains(MethodCallExpression containsCall)
+    private SqlExpression? TryTranslateCaseInsensitiveArrayContains(MethodCallExpression containsCall)
     {
         var selectExpr = StripAsQueryable(containsCall.Arguments[0]);
 
@@ -150,7 +111,42 @@ public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatin
             typeof(bool));
     }
 
-    private Expression StripAsQueryable(Expression expr)
+    private SqlExpression? TryTranslateWrappedMappedArrayContains(MethodCallExpression containsCall)
+    {
+        if (!IsQueryableWrapper(containsCall.Arguments[0]))
+            return null;
+
+        var arraySource = StripAsQueryable(containsCall.Arguments[0]);
+        var arraySql = Visit(arraySource) as SqlExpression;
+        var valueSql = Visit(containsCall.Arguments[1]) as SqlExpression;
+
+        if (arraySql is null || valueSql is null || !IsMappedArraySource(arraySql))
+            return null;
+
+        return Dependencies.SqlExpressionFactory.Function(
+            "has",
+            [arraySql, valueSql],
+            nullable: true,
+            argumentsPropagateNullability: [true, true],
+            typeof(bool));
+    }
+
+    private static bool IsQueryableWrapper(Expression expression)
+        => expression is MethodCallExpression call
+            && call.Method.IsGenericMethod
+            && (call.Method.GetGenericMethodDefinition() == QueryableAsQueryableMethod
+                || call.Method.GetGenericMethodDefinition() == EnumerableAsEnumerableMethod);
+
+    private static bool IsMappedArraySource(SqlExpression source)
+        => source.TypeMapping is ClickHouseArrayTypeMapping
+            && source switch
+            {
+                ColumnExpression => true,
+                SqlUnaryExpression { Operand: var operand } => IsMappedArraySource(operand),
+                _ => false
+            };
+
+    private static Expression StripAsQueryable(Expression expr)
     {
         while (expr is MethodCallExpression call && call.Method.IsGenericMethod
                && (call.Method.GetGenericMethodDefinition() == QueryableAsQueryableMethod

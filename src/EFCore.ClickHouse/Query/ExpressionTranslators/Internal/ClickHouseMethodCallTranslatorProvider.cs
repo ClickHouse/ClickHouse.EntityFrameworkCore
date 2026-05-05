@@ -14,6 +14,7 @@ public class ClickHouseMethodCallTranslatorProvider : RelationalMethodCallTransl
 
         AddTranslators(
         [
+            new ClickHouseArrayTranslator(sqlExpressionFactory),
             new ClickHouseStringMethodTranslator(sqlExpressionFactory),
             new ClickHouseLikeTranslator(sqlExpressionFactory),
             new ClickHouseMathMethodTranslator(sqlExpressionFactory, typeMappingSource),

@@ -12,6 +12,7 @@ public class ClickHouseMemberTranslatorProvider : RelationalMemberTranslatorProv
 
         AddTranslators(
         [
+            new ClickHouseArrayTranslator(sqlExpressionFactory),
             new ClickHouseStringMethodTranslator(sqlExpressionFactory),
         ]);
     }
