@@ -1,3 +1,8 @@
+v0.3.0 (Unreleased)
+---
+### Advanced queries
+* **SimpleJSON functions**: support for `simpleJSONExtract*` and `simpleJSONHas` via `EF.Functions`.
+
 v0.2.0
 ---
 ### Table engine and DDL
