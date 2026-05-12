@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Linq.Expressions;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
+using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
@@ -18,10 +20,35 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
     protected override Expression VisitExtension(Expression extensionExpression)
         => extensionExpression switch
         {
+            ClickHouseJsonPathExpression e => VisitJsonPath(e),
+            ClickHouseJsonArrayIndexExpression e => VisitJsonArrayIndex(e),
             ClickHouseRowValueExpression e => VisitRowValue(e),
             ScalarSubqueryExpression e when IsNonNullableZeroDefaultAggregateSubquery(e) => VisitNonNullableScalarSubquery(e),
             _ => base.VisitExtension(extensionExpression)
         };
+
+    protected override Expression VisitSqlUnary(SqlUnaryExpression sqlUnaryExpression)
+    {
+        if (sqlUnaryExpression is
+            {
+                OperatorType: ExpressionType.Convert,
+                Operand: ClickHouseJsonPathExpression or ClickHouseJsonArrayIndexExpression
+            })
+        {
+            Sql.Append("CAST(");
+            Visit(sqlUnaryExpression.Operand);
+            Sql.Append(" AS ");
+
+            var storeType = sqlUnaryExpression.TypeMapping?.StoreType ?? "String";
+            Sql.Append(storeType);
+
+            Sql.Append(")");
+
+            return sqlUnaryExpression;
+        }
+
+        return base.VisitSqlUnary(sqlUnaryExpression);
+    }
 
     private static bool IsNonNullableValueType(Type type)
         => type.IsValueType && Nullable.GetUnderlyingType(type) == null;
@@ -261,6 +288,26 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
                    .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(columnNames[j]));
             }
         }
+    }
+
+    protected virtual Expression VisitJsonPath(ClickHouseJsonPathExpression expression)
+    {
+        Visit(expression.Instance);
+
+        Sql.Append(".");
+        Sql.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(expression.PropertyName));
+
+        return expression;
+    }
+
+    protected virtual Expression VisitJsonArrayIndex(ClickHouseJsonArrayIndexExpression expression)
+    {
+        Visit(expression.Instance);
+        Sql.Append("[");
+        Sql.Append(expression.Index.ToString(CultureInfo.InvariantCulture));
+        Sql.Append("]");
+
+        return expression;
     }
 
     protected virtual Expression VisitRowValue(ClickHouseRowValueExpression rowValueExpression)

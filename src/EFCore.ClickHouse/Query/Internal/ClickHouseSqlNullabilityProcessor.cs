@@ -157,10 +157,33 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         out bool nullable)
         => sqlExpression switch
         {
+            ClickHouseJsonPathExpression e => VisitJsonPathExpression(e, allowOptimizedExpansion, out nullable),
+            ClickHouseJsonArrayIndexExpression e => VisitJsonArrayIndexExpression(e, allowOptimizedExpansion, out nullable),
             ClickHouseRowValueExpression e => VisitRowValueExpression(e, out nullable),
             _ => base.VisitCustomSqlExpression(sqlExpression, allowOptimizedExpansion, out nullable)
         };
+    
+    private SqlExpression VisitJsonPathExpression(
+        ClickHouseJsonPathExpression expression, 
+        bool allowOptimizedExpansion, 
+        out bool nullable)
+    {
 
+        var newInstance = Visit(expression.Instance, allowOptimizedExpansion, out var instanceNullable);
+        nullable = true; 
+        return expression.Update(newInstance);
+    }
+    
+    private SqlExpression VisitJsonArrayIndexExpression(
+        ClickHouseJsonArrayIndexExpression expression, 
+        bool allowOptimizedExpansion, 
+        out bool nullable)
+    {
+        var newInstance = Visit(expression.Instance, allowOptimizedExpansion, out _);
+        nullable = true;
+        return expression.Update(newInstance);
+    }
+    
     private SqlExpression VisitRowValueExpression(ClickHouseRowValueExpression rowValueExpression, out bool nullable)
     {
         SqlExpression[]? newValues = null;
