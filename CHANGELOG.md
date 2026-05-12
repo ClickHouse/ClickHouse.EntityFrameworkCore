@@ -1,3 +1,9 @@
+v0.3.0 (Unreleased)
+---
+### Advanced queries
+* **Native JSON navigation**: support for `JsonNode` indexing (`Data["key"]`, `Data[index]`) and member access.
+  The provider handles ClickHouse 1-based indexing for arrays automatically and supports deep nesting and explicit casting/`.GetValue<T>()`.
+
 v0.2.0
 ---
 ### Table engine and DDL
