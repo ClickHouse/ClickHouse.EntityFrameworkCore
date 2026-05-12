@@ -242,6 +242,26 @@ public class JsonDbFunctionsTranslationTest : IClassFixture<JsonFixture>
 
         Assert.Single(users);
     }
+        
+    [Fact]
+    public void SimpleJsonFunctions_with_constants_translate_to_sql()
+    {
+        using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var query = context.JsonEntities
+            .Select(e => new
+            {
+                String = EF.Functions.SimpleJsonExtractString("{\"name\":\"Alice\"}", "name"),
+                Int = EF.Functions.SimpleJsonExtractInt("{\"age\":30}", "age"),
+                Has = EF.Functions.SimpleJsonHas("{\"active\":true}", "active")
+            });
+
+        var sql = query.ToQueryString();
+        
+        Assert.Contains("simpleJSONExtractString", sql);
+        Assert.Contains("simpleJSONExtractInt", sql);
+        Assert.Contains("simpleJSONHas", sql);
+    }
 
     [Fact]
     public void DbFunctions_SimpleJson_Throw_On_Client_Evaluation()
