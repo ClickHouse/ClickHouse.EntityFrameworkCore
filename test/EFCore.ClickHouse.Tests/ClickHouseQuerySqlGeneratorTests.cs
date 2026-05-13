@@ -51,6 +51,20 @@ public class ClickHouseQuerySqlGeneratorTests : IClassFixture<ClickHouseFixture>
     }
 
     [Fact]
+    public void InlineCollection_Contains_DoesNotTranslateToHas()
+    {
+        using var ctx = new TestDbContext(_fixture.ConnectionString);
+
+        var ids = new long[] { 2, 4, 6 };
+
+        var sql = ctx.TestEntities
+            .Where(e => ids.Contains(e.Id))
+            .ToQueryString();
+
+        Assert.DoesNotContain("has(", sql);
+    }
+
+    [Fact]
     public async Task InlineCollection_Contains_SingleElement_RoundTrips()
     {
         await using var ctx = new TestDbContext(_fixture.ConnectionString);
