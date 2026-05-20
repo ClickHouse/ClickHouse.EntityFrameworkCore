@@ -1,4 +1,5 @@
 using System.Text;
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
@@ -23,10 +24,21 @@ public class ClickHouseSqlGenerationHelper : RelationalSqlGenerationHelper
     }
 
     public override string DelimitIdentifier(string name, string? schema)
-        => DelimitIdentifier(name);
+        => ClickHouseIdentifierHelper.BuildQualifiedTableName(name, schema);
 
     public override void DelimitIdentifier(StringBuilder builder, string name, string? schema)
-        => DelimitIdentifier(builder, name);
+    {
+        // If no Schema is provided, assume default, if schema is provided, add it to the identifier
+        if (string.IsNullOrWhiteSpace(schema))
+        {
+            DelimitIdentifier(builder, name);
+            return;
+        }
+
+        DelimitIdentifier(builder, schema);
+        builder.Append('.');
+        DelimitIdentifier(builder, name);
+    }
 
     public override string EscapeIdentifier(string identifier)
         => identifier.Replace("`", "``");

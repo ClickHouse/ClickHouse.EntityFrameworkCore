@@ -1,3 +1,4 @@
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -27,7 +28,11 @@ public static class ClickHouseBulkInsertExtensions
         var tableName = entityType.GetTableName()
             ?? throw new InvalidOperationException(
                 $"The entity type '{typeof(TEntity).Name}' is not mapped to a table.");
-
+        
+        // Schemas represent Databases in Clickhouse EF Core provider, as Clickhouse does not support Schemas
+        var database = entityType.GetSchema(); 
+        var qualifiedTableName = ClickHouseIdentifierHelper.BuildQualifiedTableName(tableName, database);
+        
         // Build column list and property accessors
         var properties = entityType.GetProperties()
             .Where(p => p.GetTableColumnMappings().Any())
@@ -53,6 +58,6 @@ public static class ClickHouseBulkInsertExtensions
             return row;
         });
 
-        return await client.InsertBinaryAsync(tableName, columns, rows, cancellationToken: cancellationToken);
+        return await client.InsertBinaryAsync(qualifiedTableName, columns, rows, cancellationToken: cancellationToken);
     }
 }
