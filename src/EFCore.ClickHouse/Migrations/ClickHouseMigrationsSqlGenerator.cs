@@ -277,11 +277,13 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         IModel? model,
         MigrationCommandListBuilder builder)
     {
+        var targetSchema = operation.NewSchema ?? operation.Schema;
+
         builder
             .Append("RENAME TABLE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name, operation.Schema))
             .Append(" TO ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName!, operation.NewSchema));
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName!, targetSchema));
 
         EndStatement(builder);
     }
@@ -427,7 +429,13 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         => throw new NotSupportedException("ClickHouse does not support sequences.");
 
     protected override void Generate(EnsureSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("ClickHouse does not support schemas. Use databases instead.");
+    {
+        // To respect EFCore syntax, we treat schemas as databases
+        if (string.IsNullOrWhiteSpace(operation.Name))
+            return;
+
+        Generate(new ClickHouseCreateDatabaseOperation { Name = operation.Name }, builder);
+    }
 
     // ENGINE clause generation
 
