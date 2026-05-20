@@ -231,12 +231,17 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
-    public void EnsureSchema_throws_NotSupportedException()
+    public void EnsureSchema_generates_CREATE_DATABASE()
     {
-        Assert.Throws<NotSupportedException>(() =>
-        {
-            Generate(new EnsureSchemaOperation { Name = "dbo" });
-        });
+        var sql = Generate(new EnsureSchemaOperation { Name = "dbo" });
+        Assert.Contains("CREATE DATABASE `dbo`", sql);
+    }
+
+    [Fact]
+    public void EnsureSchema_empty_name_is_noop()
+    {
+        var sql = Generate(new EnsureSchemaOperation { Name = "" });
+        Assert.Equal(string.Empty, sql);
     }
 
     [Fact]
@@ -244,6 +249,31 @@ public class MigrationSqlGeneratorTests
     {
         var sql = Generate(new RenameTableOperation { Name = "old_table", NewName = "new_table" });
         Assert.Contains("RENAME TABLE `old_table` TO `new_table`", sql);
+    }
+
+    [Fact]
+    public void RenameTable_with_schema_qualifies_database_and_table()
+    {
+        var sql = Generate(new RenameTableOperation
+        {
+            Name = "old_table",
+            Schema = "db1",
+            NewName = "new_table",
+            NewSchema = "db2"
+        });
+        Assert.Contains("RENAME TABLE `db1`.`old_table` TO `db2`.`new_table`", sql);
+    }
+
+    [Fact]
+    public void RenameTable_without_new_schema_keeps_existing_schema()
+    {
+        var sql = Generate(new RenameTableOperation
+        {
+            Name = "old_table",
+            Schema = "db1",
+            NewName = "new_table"
+        });
+        Assert.Contains("RENAME TABLE `db1`.`old_table` TO `db1`.`new_table`", sql);
     }
 
     [Fact]
@@ -738,6 +768,17 @@ public class MigrationSqlGeneratorTests
         };
         var sql = Generate(op);
         Assert.Contains("ALTER TABLE `t` ADD COLUMN `NewCol` String", sql);
+    }
+
+    [Fact]
+    public void AddColumn_with_schema_qualifies_database_and_table()
+    {
+        var op = new AddColumnOperation
+        {
+            Schema = "analytics", Table = "t", Name = "NewCol", ColumnType = "String", ClrType = typeof(string)
+        };
+        var sql = Generate(op);
+        Assert.Contains("ALTER TABLE `analytics`.`t` ADD COLUMN `NewCol` String", sql);
     }
 
     [Fact]
