@@ -29,7 +29,7 @@ public static class ClickHouseBulkInsertExtensions
             ?? throw new InvalidOperationException(
                 $"The entity type '{typeof(TEntity).Name}' is not mapped to a table.");
         
-        // Schemas represent Databases in Clickhouse EF Core provider, as Clickhouse does not support Schemas
+        // Schemas represent Databases in ClickHouse EF Core provider, as ClickHouse does not support Schemas
         var database = entityType.GetSchema(); 
         var qualifiedTableName = ClickHouseIdentifierHelper.BuildQualifiedTableName(tableName, database);
         
