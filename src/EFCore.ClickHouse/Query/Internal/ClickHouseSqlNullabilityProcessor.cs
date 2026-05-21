@@ -158,8 +158,38 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         => sqlExpression switch
         {
             ClickHouseRowValueExpression e => VisitRowValueExpression(e, out nullable),
+            ClickHouseArrayLambdaReferenceExpression e => VisitArrayLambdaReference(e, out nullable),
+            ClickHouseArrayLambdaExpression e => VisitArrayLambda(e, allowOptimizedExpansion, out nullable),
             _ => base.VisitCustomSqlExpression(sqlExpression, allowOptimizedExpansion, out nullable)
         };
+
+    /// <summary>
+    /// The lambda parameter inside an array lambda iterates over array elements; it has no
+    /// distinct "row null" of its own. Element nullability is captured by the enclosing array
+    /// column's type mapping, not at the parameter reference site.
+    /// </summary>
+    private static SqlExpression VisitArrayLambdaReference(
+        ClickHouseArrayLambdaReferenceExpression referenceExpression,
+        out bool nullable)
+    {
+        nullable = false;
+        return referenceExpression;
+    }
+
+    /// <summary>
+    /// A lambda is not itself a value — it's an argument to higher-order array functions.
+    /// Visit the body so any nested null-handling rewrites apply, but report
+    /// <paramref name="nullable"/> against the lambda as non-nullable.
+    /// </summary>
+    private SqlExpression VisitArrayLambda(
+        ClickHouseArrayLambdaExpression lambdaExpression,
+        bool allowOptimizedExpansion,
+        out bool nullable)
+    {
+        var visitedBody = Visit(lambdaExpression.Body, allowOptimizedExpansion, out _);
+        nullable = false;
+        return lambdaExpression.Update(lambdaExpression.Parameter, visitedBody);
+    }
 
     private SqlExpression VisitRowValueExpression(ClickHouseRowValueExpression rowValueExpression, out bool nullable)
     {
