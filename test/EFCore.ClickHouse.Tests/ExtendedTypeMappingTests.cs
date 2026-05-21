@@ -1767,6 +1767,24 @@ public class TypeMappingSourceStoreTypeTests
         Assert.Equal("Nullable(Decimal(18, 4))", mapping.StoreType);
     }
 
+    // The store-type parser must respect single-quoted string literals when
+    // counting parens/commas. Without quote-awareness, a parenthesis or comma
+    // inside an enum value name (e.g. Enum8(',' = 1) or 'a)b') would corrupt
+    // FindMatchingCloseParen and the inner-types split, causing the surrounding
+    // parameterized type to fail to resolve.
+    [Theory]
+    [InlineData("Array(Enum8('a)b' = 1, 'c' = 2))")]
+    [InlineData("Array(Enum8('x(' = 1, 'y' = 2))")]
+    [InlineData("Array(Enum8(',' = 1, ';' = 2))")]
+    [InlineData("Map(String, Enum8(',' = 1, ';' = 2))")]
+    [InlineData("Tuple(Enum8('a)b' = 1, 'c' = 2), Int32)")]
+    public void FindMapping_NestedEnumWithSpecialChars_ResolvesWithoutCorruption(string storeType)
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(typeof(object), storeType);
+        Assert.NotNull(mapping);
+    }
+
     [Theory]
     [InlineData("Enum8")]
     [InlineData("Enum16")]
