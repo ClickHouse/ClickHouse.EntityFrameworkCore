@@ -31,6 +31,18 @@ public class MultiPolygonEntity
     public Tuple<double, double>[][][] Val { get; set; } = [];
 }
 
+public class LineStringEntity
+{
+    public long Id { get; set; }
+    public Tuple<double, double>[] Val { get; set; } = [];
+}
+
+public class MultiLineStringEntity
+{
+    public long Id { get; set; }
+    public Tuple<double, double>[][] Val { get; set; } = [];
+}
+
 public class GeometryEntity
 {
     public long Id { get; set; }
@@ -127,6 +139,42 @@ public class GeometryDbContext : DbContext
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id");
             e.Property(x => x.Val).HasColumnName("val").HasColumnType("Geometry");
+        });
+    }
+}
+
+public class LineStringDbContext : DbContext
+{
+    public DbSet<LineStringEntity> Entities => Set<LineStringEntity>();
+    private readonly string _connectionString;
+    public LineStringDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<LineStringEntity>(e =>
+        {
+            e.ToTable("geo_linestring_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Val).HasColumnName("val").HasColumnType("LineString");
+        });
+    }
+}
+
+public class MultiLineStringDbContext : DbContext
+{
+    public DbSet<MultiLineStringEntity> Entities => Set<MultiLineStringEntity>();
+    private readonly string _connectionString;
+    public MultiLineStringDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<MultiLineStringEntity>(e =>
+        {
+            e.ToTable("geo_multilinestring_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Val).HasColumnName("val").HasColumnType("MultiLineString");
         });
     }
 }
@@ -230,6 +278,30 @@ public class GeoTypesFixture : IAsyncLifetime
             cmd.CommandText = """
                 INSERT INTO geo_multipolygon_test VALUES
                 (1, [[[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]]])
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // LineString table
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE geo_linestring_test (
+                    id Int64,
+                    val LineString
+                ) ENGINE = MergeTree() ORDER BY id
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // MultiLineString table
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE geo_multilinestring_test (
+                    id Int64,
+                    val MultiLineString
+                ) ENGINE = MergeTree() ORDER BY id
                 """;
             await cmd.ExecuteNonQueryAsync();
         }
@@ -576,6 +648,102 @@ public class GeoMultiPolygonTests
         Assert.Single(rows[0].Val);
         Assert.Single(rows[0].Val[0]);
         Assert.Equal(5, rows[0].Val[0][0].Length);
+    }
+
+    [Fact]
+    public async Task Insert_MultiPolygon_RoundTrip()
+    {
+        // Exercises the write path with {p:MultiPolygon} as the parameter type —
+        // confirms the driver resolves the alias to ArrayType<ArrayType<ArrayType<PointType>>>.
+        await using var ctx = new MultiPolygonDbContext(_fixture.ConnectionString);
+        var multipoly = new[]
+        {
+            new[]
+            {
+                new[]
+                {
+                    Tuple.Create(0.0, 0.0),
+                    Tuple.Create(2.0, 0.0),
+                    Tuple.Create(2.0, 2.0),
+                    Tuple.Create(0.0, 0.0),
+                }
+            },
+            new[]
+            {
+                new[]
+                {
+                    Tuple.Create(10.0, 10.0),
+                    Tuple.Create(12.0, 10.0),
+                    Tuple.Create(12.0, 12.0),
+                    Tuple.Create(10.0, 10.0),
+                }
+            },
+        };
+        ctx.Entities.Add(new MultiPolygonEntity { Id = 100, Val = multipoly });
+        await ctx.SaveChangesAsync();
+
+        await using var ctx2 = new MultiPolygonDbContext(_fixture.ConnectionString);
+        var row = await ctx2.Entities.Where(e => e.Id == 100).AsNoTracking().SingleAsync();
+        Assert.Equal(2, row.Val.Length);
+        Assert.Equal(2.0, row.Val[0][0][1].Item1);
+        Assert.Equal(12.0, row.Val[1][0][2].Item1);
+    }
+}
+
+[Collection("GeoTypes")]
+public class GeoLineStringTests
+{
+    private readonly GeoTypesFixture _fixture;
+    public GeoLineStringTests(GeoTypesFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task Insert_LineString_RoundTrip()
+    {
+        // {p:LineString} resolves to ArrayType<PointType> in the driver —
+        // structurally identical to Ring but a distinct alias.
+        await using var ctx = new LineStringDbContext(_fixture.ConnectionString);
+        var line = new[]
+        {
+            Tuple.Create(0.0, 0.0),
+            Tuple.Create(1.0, 2.0),
+            Tuple.Create(3.0, 4.0),
+        };
+        ctx.Entities.Add(new LineStringEntity { Id = 100, Val = line });
+        await ctx.SaveChangesAsync();
+
+        await using var ctx2 = new LineStringDbContext(_fixture.ConnectionString);
+        var row = await ctx2.Entities.Where(e => e.Id == 100).AsNoTracking().SingleAsync();
+        Assert.Equal(3, row.Val.Length);
+        Assert.Equal(3.0, row.Val[2].Item1);
+        Assert.Equal(4.0, row.Val[2].Item2);
+    }
+}
+
+[Collection("GeoTypes")]
+public class GeoMultiLineStringTests
+{
+    private readonly GeoTypesFixture _fixture;
+    public GeoMultiLineStringTests(GeoTypesFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task Insert_MultiLineString_RoundTrip()
+    {
+        // {p:MultiLineString} resolves to ArrayType<ArrayType<PointType>>.
+        await using var ctx = new MultiLineStringDbContext(_fixture.ConnectionString);
+        var lines = new[]
+        {
+            new[] { Tuple.Create(0.0, 0.0), Tuple.Create(1.0, 1.0) },
+            new[] { Tuple.Create(5.0, 5.0), Tuple.Create(6.0, 6.0), Tuple.Create(7.0, 7.0) },
+        };
+        ctx.Entities.Add(new MultiLineStringEntity { Id = 100, Val = lines });
+        await ctx.SaveChangesAsync();
+
+        await using var ctx2 = new MultiLineStringDbContext(_fixture.ConnectionString);
+        var row = await ctx2.Entities.Where(e => e.Id == 100).AsNoTracking().SingleAsync();
+        Assert.Equal(2, row.Val.Length);
+        Assert.Equal(2, row.Val[0].Length);
+        Assert.Equal(3, row.Val[1].Length);
+        Assert.Equal(7.0, row.Val[1][2].Item1);
     }
 }
 
