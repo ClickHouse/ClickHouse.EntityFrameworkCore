@@ -927,6 +927,25 @@ public class MigrationSqlGeneratorTests
     public void HasColumnType_AggregateFunction_preserved_in_CreateTable_DDL()
         => AssertColumnTypePreserved<AggregateFunctionContext>("AggregateFunction(uniq, UInt64)");
 
+    // Matrix coverage: any store type whose canonical mapping diverges from the
+    // user's HasColumnType text. Each context below would have silently emitted
+    // the resolver's canonical form (typically "String") in DDL before PR #25.
+    [Fact]
+    public void HasColumnType_Enum16_with_values_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<Enum16Context>("Enum16('x'=100,'y'=200)");
+
+    [Fact]
+    public void HasColumnType_FixedString_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<FixedStringContext>("FixedString(16)");
+
+    [Fact]
+    public void HasColumnType_SimpleAggregateFunction_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<SimpleAggregateFunctionContext>("SimpleAggregateFunction(sum, UInt64)");
+
+    [Fact]
+    public void HasColumnType_Nested_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<NestedContext>("Nested(k String, v UInt64)");
+
     // Nullable CLR property + LowCardinality(...) store type must not auto-wrap to
     // Nullable(LowCardinality(...)) — ClickHouse rejects that wrapper order. The user
     // is responsible for writing LowCardinality(Nullable(...)) when they want both.
@@ -1015,6 +1034,26 @@ public class MigrationSqlGeneratorTests
     private sealed class AggregateFunctionContext : LowCardinalityContextBase
     {
         protected override string ColumnType => "AggregateFunction(uniq, UInt64)";
+    }
+
+    private sealed class Enum16Context : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "Enum16('x'=100,'y'=200)";
+    }
+
+    private sealed class FixedStringContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "FixedString(16)";
+    }
+
+    private sealed class SimpleAggregateFunctionContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "SimpleAggregateFunction(sum, UInt64)";
+    }
+
+    private sealed class NestedContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "Nested(k String, v UInt64)";
     }
 
     private sealed class NullablePropertyLowCardinalityContext : DbContext
