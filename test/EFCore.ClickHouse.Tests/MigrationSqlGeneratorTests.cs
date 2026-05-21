@@ -1,7 +1,9 @@
+using ClickHouse.EntityFrameworkCore.Extensions;
 using ClickHouse.EntityFrameworkCore.Metadata.Internal;
 using ClickHouse.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using Xunit;
@@ -901,6 +903,141 @@ public class MigrationSqlGeneratorTests
         });
 
         Assert.Contains("ORDER BY (`MyColumn`)", sql);
+    }
+
+    // Issue #18: HasColumnType("LowCardinality(...)") must be preserved through the model
+    // differ and into generated CREATE TABLE DDL, not unwrapped to the inner store type.
+    [Fact]
+    public void HasColumnType_LowCardinality_String_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<LowCardinalityStringContext>("LowCardinality(String)");
+
+    [Fact]
+    public void HasColumnType_LowCardinality_NullableString_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<LowCardinalityNullableContext>("LowCardinality(Nullable(String))");
+
+    [Fact]
+    public void HasColumnType_Nullable_String_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<NullableStringContext>("Nullable(String)");
+
+    [Fact]
+    public void HasColumnType_Array_LowCardinality_element_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<ArrayLowCardinalityContext>("Array(LowCardinality(String))");
+
+    // Nullable CLR property + LowCardinality(...) store type must not auto-wrap to
+    // Nullable(LowCardinality(...)) — ClickHouse rejects that wrapper order. The user
+    // is responsible for writing LowCardinality(Nullable(...)) when they want both.
+    [Fact]
+    public void HasColumnType_LowCardinality_on_nullable_property_does_not_wrap_in_Nullable()
+    {
+        using var ctx = new NullablePropertyLowCardinalityContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+        var sql = string.Join("\n", generator.Generate(operations).Select(c => c.CommandText));
+        Assert.Contains("`Path` LowCardinality(String)", sql);
+        Assert.DoesNotContain("Nullable(LowCardinality", sql);
+    }
+
+    private static void AssertColumnTypePreserved<TContext>(string expectedColumnType)
+        where TContext : DbContext, new()
+    {
+        using var ctx = new TContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var pathColumn = createTable.Columns.Single(c => c.Name == "Path");
+        Assert.Equal(expectedColumnType, pathColumn.ColumnType);
+
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+        var sql = string.Join("\n", generator.Generate(operations).Select(c => c.CommandText));
+        Assert.Contains($"`Path` {expectedColumnType}", sql);
+    }
+
+    private class PageView
+    {
+        public int Id { get; set; }
+        public string Path { get; set; } = "";
+    }
+
+    private class NullablePageView
+    {
+        public int Id { get; set; }
+        public string? Path { get; set; }
+    }
+
+    private class TagsEntity
+    {
+        public int Id { get; set; }
+        public string[] Path { get; set; } = [];
+    }
+
+    private abstract class LowCardinalityContextBase : DbContext
+    {
+        protected abstract string ColumnType { get; }
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Database=test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<PageView>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType(ColumnType);
+                e.ToTable("page_views", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
+    }
+
+    private sealed class LowCardinalityStringContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "LowCardinality(String)";
+    }
+
+    private sealed class LowCardinalityNullableContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "LowCardinality(Nullable(String))";
+    }
+
+    private sealed class NullableStringContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "Nullable(String)";
+    }
+
+    private sealed class NullablePropertyLowCardinalityContext : DbContext
+    {
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Database=test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullablePageView>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType("LowCardinality(String)");
+                e.ToTable("page_views", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
+    }
+
+    private sealed class ArrayLowCardinalityContext : DbContext
+    {
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Database=test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<TagsEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType("Array(LowCardinality(String))");
+                e.ToTable("tags", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
     }
 
     private string GenerateCreateTable(Action<CreateTableOperation> configure)

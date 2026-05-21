@@ -75,6 +75,16 @@ public class ClickHouseArrayLinqTranslator
             return false;
         }
 
+        // Every shape we dispatch (AsQueryable strip, Select-then-Contains,
+        // Contains/Any/Count/LongCount + predicate overloads) reads `Arguments[0]` as the
+        // array source. Zero-argument generic methods (e.g. EF.Functions JSON helpers) can
+        // reach us through the SQL translator chain; bail out before the array-source
+        // dispatch tries to index an empty argument list.
+        if (methodCallExpression.Arguments.Count == 0)
+        {
+            return false;
+        }
+
         var genericMethodDefinition = method.GetGenericMethodDefinition();
 
         // Strip AsQueryable/AsEnumerable on mapped arrays; let downstream callers see the

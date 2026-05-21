@@ -626,8 +626,11 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         if (clrType is { IsGenericType: true } && clrType.GetGenericTypeDefinition() == typeof(List<>))
             return true;
 
-        // Store-type check covers Array, Map, Tuple, Variant, Dynamic, Json, and already-wrapped Nullable
+        // Store-type check covers Array, Map, Tuple, Variant, Dynamic, Json, and already-wrapped Nullable.
+        // LowCardinality is included because ClickHouse rejects Nullable(LowCardinality(...)) — the user
+        // must explicitly write LowCardinality(Nullable(...)) when nullable semantics are needed.
         return columnType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase)
+            || columnType.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase)
             || columnType.StartsWith("Array(", StringComparison.OrdinalIgnoreCase)
             || columnType.StartsWith("Map(", StringComparison.OrdinalIgnoreCase)
             || columnType.StartsWith("Tuple(", StringComparison.OrdinalIgnoreCase)

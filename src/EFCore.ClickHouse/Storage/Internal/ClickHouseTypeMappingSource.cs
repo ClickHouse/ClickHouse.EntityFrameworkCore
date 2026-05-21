@@ -281,7 +281,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         }
 
         // Call base so plugin/extension type mappings can intercept before our defaults.
-        return base.FindMapping(in mappingInfo)
+        var mapping = base.FindMapping(in mappingInfo)
            ?? FindDateTime64Mapping(mappingInfo)
            ?? FindDateTimeMapping(mappingInfo)
            ?? FindFixedStringMapping(mappingInfo)
@@ -295,6 +295,39 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
            ?? FindEnumMapping(mappingInfo)
            ?? FindExistingMapping(mappingInfo)
            ?? FindDecimalMapping(mappingInfo);
+
+        return mapping is null ? null : PreserveStoreTypeWrappers(mapping, mappingInfo);
+    }
+
+    // ParseStoreTypeName strips LowCardinality(...) and Nullable(...) wrappers so the inner
+    // CLR mapping can be resolved. EF Core's Property.GetColumnType() prefers
+    // RelationalTypeMapping.StoreType over the user's annotation, so without re-wrapping
+    // here the wrapper would be lost from generated migrations DDL and SQL parameter types.
+    private static RelationalTypeMapping PreserveStoreTypeWrappers(
+        RelationalTypeMapping mapping,
+        in RelationalTypeMappingInfo mappingInfo)
+    {
+        var storeTypeName = mappingInfo.StoreTypeName;
+        if (string.IsNullOrEmpty(storeTypeName)
+            || !HasWrapper(storeTypeName)
+            || string.Equals(storeTypeName, mapping.StoreType, StringComparison.Ordinal))
+        {
+            return mapping;
+        }
+
+        // Force StoreTypePostfix.None so the constructor does not rebuild the type name
+        // from the inner facets (e.g. Decimal's PrecisionAndScale postfix would produce
+        // "LowCardinality(Decimal32(4))(9,4)" otherwise). The local exists because
+        // Clone's overload signature takes `in RelationalTypeMappingInfo?`.
+        RelationalTypeMappingInfo? cloneInfo = mappingInfo;
+        return mapping.Clone(in cloneInfo, storeTypePostfix: StoreTypePostfix.None);
+    }
+
+    private static bool HasWrapper(string storeTypeName)
+    {
+        var s = storeTypeName.AsSpan().TrimStart();
+        return s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase)
+            || s.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsCollectionClrType(Type? clrType)
@@ -364,24 +397,26 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
     private RelationalTypeMapping? FindArrayMapping(in RelationalTypeMappingInfo mappingInfo)
     {
-        // Prefer the pre-resolved element type mapping from EF Core (used by ValuesExpression
-        // postprocessing for primitive collection parameters).
-        var elementMapping = mappingInfo.ElementTypeMapping as RelationalTypeMapping;
+        RelationalTypeMapping? elementMapping = null;
 
-        // Resolve element mapping from store type: Array(X)
-        if (elementMapping is null
-            && string.Equals(mappingInfo.StoreTypeNameBase, "Array", StringComparison.OrdinalIgnoreCase))
+        // Resolve element mapping from store type: Array(X). When the user wrote
+        // HasColumnType("Array(...)"), prefer parsing the inner type from the store
+        // type over EF Core's pre-resolved element mapping — the pre-resolved one
+        // only reflects the CLR element type and misses LowCardinality/Nullable wrappers
+        // that the user explicitly specified.
+        if (string.Equals(mappingInfo.StoreTypeNameBase, "Array", StringComparison.OrdinalIgnoreCase)
+            && mappingInfo.StoreTypeName is { } storeTypeName)
         {
-            var storeTypeName = mappingInfo.StoreTypeName;
-            if (storeTypeName is null)
-                return null;
-
             var innerType = ExtractInnerType(storeTypeName, "Array");
             if (innerType is null)
                 return null;
 
             elementMapping = FindMapping(innerType);
         }
+
+        // Fall back to the pre-resolved element type mapping from EF Core (used by
+        // ValuesExpression postprocessing for primitive collection parameters).
+        elementMapping ??= mappingInfo.ElementTypeMapping as RelationalTypeMapping;
 
         var clrType = mappingInfo.ClrType;
         var elementClrType = GetCollectionElementType(clrType);

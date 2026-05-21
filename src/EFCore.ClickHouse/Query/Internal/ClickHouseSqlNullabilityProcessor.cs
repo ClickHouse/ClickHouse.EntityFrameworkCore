@@ -157,11 +157,33 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         out bool nullable)
         => sqlExpression switch
         {
+            ClickHouseJsonPathExpression e => VisitJsonPathExpression(e, allowOptimizedExpansion, out nullable),
+            ClickHouseJsonArrayIndexExpression e => VisitJsonArrayIndexExpression(e, allowOptimizedExpansion, out nullable),
             ClickHouseRowValueExpression e => VisitRowValueExpression(e, out nullable),
             ClickHouseArrayLambdaReferenceExpression e => VisitArrayLambdaReference(e, out nullable),
             ClickHouseArrayLambdaExpression e => VisitArrayLambda(e, allowOptimizedExpansion, out nullable),
             _ => base.VisitCustomSqlExpression(sqlExpression, allowOptimizedExpansion, out nullable)
         };
+    
+    private SqlExpression VisitJsonPathExpression(
+        ClickHouseJsonPathExpression expression,
+        bool allowOptimizedExpansion,
+        out bool nullable)
+    {
+        var newInstance = Visit(expression.Instance, allowOptimizedExpansion, out _);
+        nullable = true;
+        return expression.Update(newInstance);
+    }
+
+    private SqlExpression VisitJsonArrayIndexExpression(
+        ClickHouseJsonArrayIndexExpression expression,
+        bool allowOptimizedExpansion,
+        out bool nullable)
+    {
+        var newInstance = Visit(expression.Instance, allowOptimizedExpansion, out _);
+        nullable = true;
+        return expression.Update(newInstance);
+    }
 
     /// <summary>
     /// The lambda parameter inside an array lambda iterates over array elements; it has no
@@ -190,6 +212,7 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         nullable = false;
         return lambdaExpression.Update(lambdaExpression.Parameter, visitedBody);
     }
+
 
     private SqlExpression VisitRowValueExpression(ClickHouseRowValueExpression rowValueExpression, out bool nullable)
     {

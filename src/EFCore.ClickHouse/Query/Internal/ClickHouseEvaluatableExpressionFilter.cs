@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Query;
 
@@ -14,11 +15,11 @@ public class ClickHouseEvaluatableExpressionFilter : RelationalEvaluatableExpres
     {
     }
 
-    public override bool IsEvaluatableExpression(Expression expression, IModel model)
+    public override bool IsEvaluatableExpression(Expression expression, IModel model) => expression switch
     {
-        if (expression is NewExpression newExpression)
-            return !newExpression.Type.IsAssignableTo(typeof(ITuple));
-
-        return base.IsEvaluatableExpression(expression, model);
-    }
+        MethodCallExpression methodCallExpression when methodCallExpression.Method.DeclaringType ==
+                                                       typeof(ClickHouseJsonDbFunctionsExtensions) => false,
+        NewExpression newExpression => !newExpression.Type.IsAssignableTo(typeof(ITuple)),
+        _ => base.IsEvaluatableExpression(expression, model)
+    };
 }

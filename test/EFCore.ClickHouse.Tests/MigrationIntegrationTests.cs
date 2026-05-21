@@ -478,6 +478,28 @@ public class MigrationIntegrationTests : IAsyncLifetime
         Assert.Equal(["a", "b"], e2.Tags);
     }
 
+    // ── Issue #18: LowCardinality wrapper preservation ──────────────────────
+
+    [Fact]
+    public async Task LowCardinalityColumn_CreatesLowCardinalityInDatabase()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<IdValueEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Value).HasColumnType("LowCardinality(String)");
+                e.ToTable("lowcard_migration_test", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var colType = await QueryScalar(ctx,
+            $"SELECT type FROM system.columns WHERE database = '{_databaseName}' AND table = 'lowcard_migration_test' AND name = 'Value'");
+        Assert.Equal("LowCardinality(String)", colType);
+    }
+
     // ── ReplacingMergeTree isDeleted ─────────────────────────────────────────
 
     [Fact]

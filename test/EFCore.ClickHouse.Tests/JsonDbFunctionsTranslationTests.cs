@@ -1,0 +1,284 @@
+﻿using Microsoft.EntityFrameworkCore;
+using Xunit;
+
+namespace EFCore.ClickHouse.Tests;
+
+public class JsonEntity
+{
+    public long Id { get; set; }
+    public string? Data { get; set; }
+}
+
+public class JsonDbContext : DbContext
+{
+    public DbSet<JsonEntity> JsonEntities => Set<JsonEntity>();
+
+    private readonly string _connectionString;
+
+    public JsonDbContext(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        optionsBuilder.UseClickHouse(_connectionString);
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<JsonEntity>(entity =>
+        {
+            entity.ToTable("json_dbfunctions_test");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.Data).HasColumnName("data");
+        });
+    }
+}
+
+public class JsonFixture : IAsyncLifetime
+{
+    public string ConnectionString { get; private set; } = string.Empty;
+
+    public async Task InitializeAsync()
+    {
+        ConnectionString = await SharedContainer.GetConnectionStringAsync();
+
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(ConnectionString);
+        await connection.OpenAsync();
+
+        using var createCmd = connection.CreateCommand();
+        createCmd.CommandText = """
+                                CREATE TABLE json_dbfunctions_test (
+                                    id Int64,
+                                    data Nullable(String)
+                                ) ENGINE = MergeTree()
+                                ORDER BY id
+                                """;
+        await createCmd.ExecuteNonQueryAsync();
+
+        using var insertCmd = connection.CreateCommand();
+        insertCmd.CommandText = """
+                                INSERT INTO json_dbfunctions_test (id, data) VALUES
+                                (1, '{"name":"Alice","age":30,"is_admin":true,"height":1.75,"extra":{"active":true}}'),
+                                (2, '{"name":"Bob","age":25,"is_admin":false,"height":1.80}'),
+                                (3, '{"note":"quote\"inside"}'),
+                                (4, NULL)
+                                """;
+        await insertCmd.ExecuteNonQueryAsync();
+    }
+
+    public Task DisposeAsync() => Task.CompletedTask;
+}
+
+public class JsonDbFunctionsTranslationTest : IClassFixture<JsonFixture>
+{
+    private readonly JsonFixture _fixture;
+
+    public JsonDbFunctionsTranslationTest(JsonFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractBool_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var isAdmin = await context.JsonEntities
+            .Where(e => e.Id == 2)
+            .Select(e => EF.Functions.SimpleJsonExtractBool(e.Data, "is_admin"))
+            .SingleAsync();
+
+        Assert.NotNull(isAdmin);
+        Assert.False(isAdmin);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractFloat_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var height = await context.JsonEntities
+            .Where(e => e.Id == 1)
+            .Select(e => EF.Functions.SimpleJsonExtractFloat(e.Data, "height"))
+            .SingleAsync();
+
+        Assert.NotNull(height);
+        Assert.Equal(1.75, height.Value, 2);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractInt_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var age = await context.JsonEntities
+            .Where(e => e.Id == 1)
+            .Select(e => EF.Functions.SimpleJsonExtractInt(e.Data, "age"))
+            .SingleAsync();
+
+        Assert.NotNull(age);
+        Assert.Equal(30, age);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractRaw_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var result = await context.JsonEntities
+            .Where(x => x.Id == 1)
+            .Select(e => new { Extra = EF.Functions.SimpleJsonExtractRaw(e.Data, "extra") })
+            .FirstOrDefaultAsync();
+
+        Assert.NotNull(result);
+        Assert.Equal("{\"active\":true}", result.Extra);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractString_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var result = await context.JsonEntities
+            .Select(e => new { Name = EF.Functions.SimpleJsonExtractString(e.Data, "name") })
+            .Where(x => x.Name == "Alice")
+            .FirstOrDefaultAsync();
+
+        Assert.NotNull(result);
+        Assert.Equal("Alice", result.Name);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractUInt_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var age = await context.JsonEntities
+            .Where(e => e.Id == 1)
+            .Select(e => EF.Functions.SimpleJsonExtractUInt(e.Data, "age"))
+            .SingleAsync();
+
+        Assert.NotNull(age);
+        Assert.Equal(30u, age);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonHas_TranslatesCorrectly()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var hasAdminField = await context.JsonEntities
+            .Where(e => e.Id == 1)
+            .Select(e => EF.Functions.SimpleJsonHas(e.Data, "is_admin"))
+            .SingleAsync();
+        
+        Assert.True(hasAdminField);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtract_HandlesNullColumn()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var result = await context.JsonEntities
+            .Where(e => e.Id == 4)
+            .Select(e => new
+            {
+                ExtractedString = EF.Functions.SimpleJsonExtractString(e.Data, "any_key"),
+                ExtractedInt = EF.Functions.SimpleJsonExtractInt(e.Data, "any_key"),
+                HasKey = EF.Functions.SimpleJsonHas(e.Data, "any_key")
+            })
+            .SingleAsync();
+        
+        Assert.Null(result.ExtractedString);
+        Assert.Null(result.ExtractedInt);
+        
+        Assert.True(result.HasKey is null or false);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtract_ReturnsDefault_WhenKeyNotFound()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var result = await context.JsonEntities
+            .Where(e => e.Id == 1)
+            .Select(e => new
+            {
+                NonExistentString = EF.Functions.SimpleJsonExtractString(e.Data, "unknown_key"),
+                NonExistentInt = EF.Functions.SimpleJsonExtractInt(e.Data, "unknown_key")
+            })
+            .SingleAsync();
+
+        Assert.Equal(string.Empty, result.NonExistentString);
+        Assert.Equal(0, result.NonExistentInt);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJsonExtractRaw_CanBeChained()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var result = await context.JsonEntities
+            .Where(e => e.Id == 1)
+            .Select(e => EF.Functions.SimpleJsonExtractRaw(e.Data, "extra"))
+            .Select(raw => EF.Functions.SimpleJsonExtractBool(raw, "active"))
+            .SingleAsync();
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public async Task DbFunctions_SimpleJson_WorksInWhereClause()
+    {
+        await using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var users = await context.JsonEntities
+            .Where(e => EF.Functions.SimpleJsonExtractInt(e.Data, "age") > 28)
+            .ToListAsync();
+
+        Assert.Single(users);
+    }
+        
+    [Fact]
+    public void SimpleJsonFunctions_with_constants_translate_to_sql()
+    {
+        using var context = new JsonDbContext(_fixture.ConnectionString);
+
+        var query = context.JsonEntities
+            .Select(e => new
+            {
+                String = EF.Functions.SimpleJsonExtractString("{\"name\":\"Alice\"}", "name"),
+                Int = EF.Functions.SimpleJsonExtractInt("{\"age\":30}", "age"),
+                Has = EF.Functions.SimpleJsonHas("{\"active\":true}", "active")
+            });
+
+        var sql = query.ToQueryString();
+        
+        Assert.Contains("simpleJSONExtractString", sql);
+        Assert.Contains("simpleJSONExtractInt", sql);
+        Assert.Contains("simpleJSONHas", sql);
+    }
+
+    [Fact]
+    public void DbFunctions_SimpleJson_Throw_On_Client_Evaluation()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonExtractBool<object>(null!, "test"));
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonExtractFloat<object>(null!, "test"));
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonExtractInt<object>(null!, "test"));
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonExtractRaw<object>(null!, "test"));
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonExtractString<object>(null!, "test"));
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonExtractUInt<object>(null!, "test"));
+        Assert.Throws<InvalidOperationException>(() =>
+            EF.Functions.SimpleJsonHas<object>(null!, "test"));
+    }
+}
