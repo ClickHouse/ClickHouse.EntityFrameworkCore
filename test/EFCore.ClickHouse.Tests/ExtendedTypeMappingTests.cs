@@ -1061,6 +1061,26 @@ public class ArrayTests
     }
 
     [Fact]
+    public async Task Array_AsQueryableSelectContains_RoundTrips()
+    {
+        // Regression: confirms `arr.AsQueryable().Select(...).Contains(...)` survives the
+        // dispatch — the inner AsQueryable marker is the source of selectCall.Arguments[0],
+        // which means LooksLikeArrayColumnAccess has to strip the wrapper to see the column.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        var query = ctx.Entities.Where(e => e.StringArray.AsQueryable().Select(x => x.ToLower()).Contains("hello"));
+
+        var sql = query.ToQueryString();
+        Assert.Contains("has(arrayMap(", sql);
+        Assert.Contains("lowerUTF8(", sql);
+        Assert.Contains("`a`.`string_array`", sql);
+
+        var results = await query.ToListAsync();
+        Assert.Single(results);
+        Assert.Equal(3, results[0].Id);
+    }
+
+    [Fact]
     public async Task Array_Contains_NullElement_DoesNotMatchNullValuesInArray()
     {
         // Documents ClickHouse's `has()` null semantics: `has(arr, NULL)` returns 0 even

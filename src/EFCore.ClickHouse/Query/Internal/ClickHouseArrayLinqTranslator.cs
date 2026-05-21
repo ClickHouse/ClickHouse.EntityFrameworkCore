@@ -16,11 +16,32 @@ namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 /// that never gets normalized to <c>Enumerable.Contains</c>, or
 /// <c>Select(...).Contains(...)</c> shapes that need a higher-order lambda).
 ///
+/// <para>
+/// Dispatch is driven by a static <see cref="Dictionary{TKey, TValue}"/> keyed on the
+/// generic method definition. The dictionary keys double as the whitelist of recognized
+/// methods, so unknown method calls (including zero-argument generic methods like
+/// <c>JsonNode.GetValue&lt;T&gt;()</c>) miss the lookup and fall through to base
+/// translation. New translations register a single entry in <see cref="Dispatch"/>.
+/// </para>
+///
+/// <para>
+/// <b>Scope:</b> this translator handles <i>generic</i> static extension methods on
+/// <see cref="Enumerable"/> and <see cref="Queryable"/>. Non-generic instance methods on
+/// concrete collection types (e.g. an indexer or a future <c>List&lt;T&gt;.IndexOf</c>
+/// translation) can't be reached by the <c>IsGenericMethod</c>-gated dispatch and must go
+/// through <see cref="ClickHouseArrayMethodTranslator"/>'s <c>IMethodCallTranslator</c>
+/// path instead. EF Core normalizes the common shapes (e.g. <c>List&lt;T&gt;.Contains</c>
+/// becomes <c>Enumerable.Contains</c>) before our visitor runs, so most patterns light up
+/// here regardless of where the user-side instance method lived.
+/// </para>
+///
+/// <para>
 /// Owned by <see cref="ClickHouseSqlTranslatingExpressionVisitor"/>; calls back into the
 /// visitor's <c>Visit</c> for recursive scalar translation. Static (LINQ-tree) decisions
 /// are made via <see cref="LooksLikeArrayColumnAccess"/> to keep the eager
-/// <c>Visit(arguments[0])</c> calls off paths the base queryable pipeline owns
-/// (DbSet roots, subqueries, …).
+/// <c>Visit(...)</c> calls off paths the base queryable pipeline owns (DbSet roots,
+/// subqueries, …).
+/// </para>
 /// </summary>
 public class ClickHouseArrayLinqTranslator
 {
@@ -41,6 +62,51 @@ public class ClickHouseArrayLinqTranslator
     private static readonly MethodInfo QueryableLongCountMethod = GetQueryableMethod(nameof(Queryable.LongCount));
     private static readonly MethodInfo QueryableLongCountPredicateMethod = GetQueryableMethod(nameof(Queryable.LongCount), parameterCount: 2);
     private static readonly MethodInfo QueryableAsQueryableMethod = GetQueryableMethod(nameof(Queryable.AsQueryable));
+
+    /// <summary>
+    /// Generic method definitions whose result is an <c>Array(T)</c> SqlExpression with a
+    /// <see cref="ClickHouseArrayTypeMapping"/>. Chained patterns whose outer call is one
+    /// of these (e.g. <c>a.Concat(b).Distinct().Contains(x)</c>) pass
+    /// <see cref="LooksLikeArrayColumnAccess"/> as legitimate sources. Empty in PR #15 — to
+    /// be populated when Tier 3+ array-producing translations (<c>arrayConcat</c>,
+    /// <c>arrayDistinct</c>, …) land.
+    /// </summary>
+    private static readonly HashSet<MethodInfo> ArrayProducingMethods = [];
+
+    private delegate bool DispatchFn(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated);
+
+    /// <summary>
+    /// Static dispatch table built once for the process. Handlers are static methods that
+    /// receive the translator instance via the <see cref="DispatchFn"/> delegate's
+    /// <c>self</c> parameter — avoids per-query dictionary construction and delegate
+    /// allocation (EF Core creates a fresh visitor on every query compile).
+    /// </summary>
+    private static readonly Dictionary<MethodInfo, DispatchFn> Dispatch = new()
+    {
+        [EnumerableAsEnumerableMethod] = TranslateAsMarker,
+        [QueryableAsQueryableMethod] = TranslateAsMarker,
+
+        [EnumerableContainsMethod] = TranslateContains,
+        [QueryableContainsMethod] = TranslateContains,
+
+        [EnumerableAnyMethod] = TranslateAny,
+        [QueryableAnyMethod] = TranslateAny,
+
+        [EnumerableCountMethod] = TranslateCountInt32,
+        [QueryableCountMethod] = TranslateCountInt32,
+
+        [EnumerableLongCountMethod] = TranslateCountInt64,
+        [QueryableLongCountMethod] = TranslateCountInt64,
+
+        [EnumerableAnyPredicateMethod] = TranslateAnyPredicate,
+        [QueryableAnyPredicateMethod] = TranslateAnyPredicate,
+
+        [EnumerableCountPredicateMethod] = TranslateCountPredicateInt32,
+        [QueryableCountPredicateMethod] = TranslateCountPredicateInt32,
+
+        [EnumerableLongCountPredicateMethod] = TranslateCountPredicateInt64,
+        [QueryableLongCountPredicateMethod] = TranslateCountPredicateInt64,
+    };
 
     private readonly ISqlExpressionFactory _sqlExpressionFactory;
     private readonly IRelationalTypeMappingSource _typeMappingSource;
@@ -70,135 +136,119 @@ public class ClickHouseArrayLinqTranslator
     {
         translated = null!;
         var method = methodCallExpression.Method;
-        if (!method.IsGenericMethod)
+
+        // Fast-reject anything that isn't a generic Enumerable/Queryable extension. Saves
+        // the GetGenericMethodDefinition reflection + dictionary lookup for the vast
+        // majority of method calls the visitor sees (string methods, math methods, EF
+        // functions, JsonNode access, instance methods, …).
+        if (!method.IsGenericMethod
+            || (method.DeclaringType != typeof(Enumerable) && method.DeclaringType != typeof(Queryable)))
         {
             return false;
         }
 
-        // Every shape we dispatch (AsQueryable strip, Select-then-Contains,
-        // Contains/Any/Count/LongCount + predicate overloads) reads `Arguments[0]` as the
-        // array source. Zero-argument generic methods (e.g. EF.Functions JSON helpers) can
-        // reach us through the SQL translator chain; bail out before the array-source
-        // dispatch tries to index an empty argument list.
-        if (methodCallExpression.Arguments.Count == 0)
+        // Dictionary lookup IS the gate. Methods we don't recognize fall through.
+        return Dispatch.TryGetValue(method.GetGenericMethodDefinition(), out var handler)
+            && handler(this, methodCallExpression, out translated);
+    }
+
+    // ─── Dispatch handlers ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Strip <c>AsQueryable()</c>/<c>AsEnumerable()</c> on a mapped array; downstream
+    /// callers see the underlying SqlExpression so subsequent method dispatch (Contains,
+    /// Any, …) works as if the wrapper were never there.
+    /// </summary>
+    private static bool TranslateAsMarker(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+    {
+        translated = null!;
+        if (GetArraySourceCandidate(call) is not { } source
+            || !LooksLikeArrayColumnAccess(source))
         {
             return false;
         }
 
-        var genericMethodDefinition = method.GetGenericMethodDefinition();
-
-        // Strip AsQueryable/AsEnumerable on mapped arrays; let downstream callers see the
-        // underlying SqlExpression so subsequent method dispatch (Contains, Any, …) works
-        // as if the wrapper were never there.
-        if ((genericMethodDefinition == QueryableAsQueryableMethod
-                || genericMethodDefinition == EnumerableAsEnumerableMethod)
-            && _visit(methodCallExpression.Arguments[0]) is SqlExpression { TypeMapping: ClickHouseArrayTypeMapping } arraySource)
+        if (self._visit(source) is SqlExpression { TypeMapping: ClickHouseArrayTypeMapping } arraySource)
         {
             translated = arraySource;
             return true;
         }
+        return false;
+    }
 
-        // Select(arr, lambda).Contains(value) — array-lambda translation. Apply the same
-        // structural pre-filter as TryTranslateMappedArrayCall so we never eagerly visit
-        // a queryable-root source (and trip the EnumerableExpression assertion).
-        if ((genericMethodDefinition == EnumerableContainsMethod
-                || genericMethodDefinition == QueryableContainsMethod)
-            && methodCallExpression.Arguments[0] is MethodCallExpression selectCall
+    /// <summary>
+    /// <c>arr.Contains(value)</c> — also catches the <c>arr.Select(x =&gt; f(x)).Contains(value)</c>
+    /// shape and routes it to <see cref="TryTranslateSelectThenContains"/>.
+    /// </summary>
+    private static bool TranslateContains(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+    {
+        translated = null!;
+        if (GetArraySourceCandidate(call) is not { } sourceExpr)
+            return false;
+
+        // Select(arr, lambda).Contains(value) — array-lambda translation.
+        if (sourceExpr is MethodCallExpression selectCall
             && IsLinqSelect(selectCall.Method)
             && selectCall.Arguments.Count == 2
             && LooksLikeArrayColumnAccess(selectCall.Arguments[0])
-            && TryTranslateSelectThenContains(selectCall, methodCallExpression.Arguments[1]) is { } selectContainsResult)
+            && self.TryTranslateSelectThenContains(selectCall, call.Arguments[1]) is { } selectContainsResult)
         {
             translated = selectContainsResult;
             return true;
         }
 
-        return TryTranslateMappedArrayCall(methodCallExpression, genericMethodDefinition, out translated);
-    }
-
-    /// <summary>
-    /// Dispatches the non-Select-wrap LINQ shapes: <c>Contains</c>/<c>Any</c>/
-    /// <c>Count</c>/<c>LongCount</c> and their predicate overloads. Bypasses EF Core's
-    /// default inline-collection lowering for mapped <c>Array(T)</c> columns.
-    /// </summary>
-    private bool TryTranslateMappedArrayCall(
-        MethodCallExpression methodCallExpression,
-        MethodInfo genericMethodDefinition,
-        out SqlExpression translated)
-    {
-        translated = null!;
-
-        // Pre-filter on the static expression shape: only attempt array-column translation
-        // when arguments[0] is a property access (or such an access wrapped in
-        // AsQueryable/AsEnumerable). Eagerly visiting an EF Core query root expression
-        // (e.g. ctx.Set<T>()) trips an EnumerableExpression assertion inside the base
-        // queryable visitor, so we must avoid that path for true subqueries.
-        if (!LooksLikeArrayColumnAccess(methodCallExpression.Arguments[0]))
+        if (!LooksLikeArrayColumnAccess(sourceExpr)
+            || self._visit(sourceExpr) is not SqlExpression arraySql
+            || !ClickHouseArrayMethodTranslator.IsClickHouseArray(arraySql)
+            || self._visit(call.Arguments[1]) is not SqlExpression itemSql)
         {
             return false;
         }
 
-        if ((genericMethodDefinition == EnumerableContainsMethod
-                || genericMethodDefinition == QueryableContainsMethod)
-            && _visit(methodCallExpression.Arguments[0]) is SqlExpression containsSource
-            && ClickHouseArrayMethodTranslator.IsClickHouseArray(containsSource)
-            && _visit(methodCallExpression.Arguments[1]) is SqlExpression containsItem)
+        translated = self._arrayTranslator.TranslateContains(arraySql, itemSql);
+        return true;
+    }
+
+    private static bool TranslateAny(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(call, self._arrayTranslator.TranslateNotEmpty, out translated);
+
+    private static bool TranslateCountInt32(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(call, src => self._arrayTranslator.TranslateLength(src, typeof(int)), out translated);
+
+    private static bool TranslateCountInt64(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(call, src => self._arrayTranslator.TranslateLength(src, typeof(long)), out translated);
+
+    private static bool TranslateAnyPredicate(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateArrayHigherOrderPredicate(call, "arrayExists", typeof(bool), out translated);
+
+    private static bool TranslateCountPredicateInt32(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateArrayHigherOrderPredicate(call, "arrayCount", typeof(int), out translated);
+
+    private static bool TranslateCountPredicateInt64(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateArrayHigherOrderPredicate(call, "arrayCount", typeof(long), out translated);
+
+    // ─── Shared dispatch helpers ──────────────────────────────────────────
+
+    /// <summary>
+    /// Common shape for one-argument <c>Enumerable</c>-style helpers: get the array source,
+    /// pre-filter on shape, visit, type-check, then build the result SqlExpression.
+    /// </summary>
+    private bool TryTranslateUnaryArrayCall(
+        MethodCallExpression call,
+        Func<SqlExpression, SqlExpression> build,
+        out SqlExpression translated)
+    {
+        translated = null!;
+        if (GetArraySourceCandidate(call) is not { } sourceExpr
+            || !LooksLikeArrayColumnAccess(sourceExpr)
+            || _visit(sourceExpr) is not SqlExpression arraySql
+            || !ClickHouseArrayMethodTranslator.IsClickHouseArray(arraySql))
         {
-            translated = _arrayTranslator.TranslateContains(containsSource, containsItem);
-            return true;
+            return false;
         }
 
-        if ((genericMethodDefinition == EnumerableAnyMethod
-                || genericMethodDefinition == QueryableAnyMethod)
-            && _visit(methodCallExpression.Arguments[0]) is SqlExpression anySource
-            && ClickHouseArrayMethodTranslator.IsClickHouseArray(anySource))
-        {
-            translated = _arrayTranslator.TranslateNotEmpty(anySource);
-            return true;
-        }
-
-        if ((genericMethodDefinition == EnumerableCountMethod
-                || genericMethodDefinition == QueryableCountMethod)
-            && _visit(methodCallExpression.Arguments[0]) is SqlExpression countSource
-            && ClickHouseArrayMethodTranslator.IsClickHouseArray(countSource))
-        {
-            translated = _arrayTranslator.TranslateLength(countSource, typeof(int));
-            return true;
-        }
-
-        if ((genericMethodDefinition == EnumerableLongCountMethod
-                || genericMethodDefinition == QueryableLongCountMethod)
-            && _visit(methodCallExpression.Arguments[0]) is SqlExpression longCountSource
-            && ClickHouseArrayMethodTranslator.IsClickHouseArray(longCountSource))
-        {
-            translated = _arrayTranslator.TranslateLength(longCountSource, typeof(long));
-            return true;
-        }
-
-        // Predicate overloads: Any(arr, lambda) / Count(arr, lambda) / LongCount(arr, lambda).
-        // Routed to ClickHouse's higher-order array functions arrayExists / arrayCount.
-        if (genericMethodDefinition == EnumerableAnyPredicateMethod
-            || genericMethodDefinition == QueryableAnyPredicateMethod)
-        {
-            return TryTranslateArrayHigherOrderPredicate(
-                methodCallExpression, "arrayExists", typeof(bool), out translated);
-        }
-
-        if (genericMethodDefinition == EnumerableCountPredicateMethod
-            || genericMethodDefinition == QueryableCountPredicateMethod)
-        {
-            return TryTranslateArrayHigherOrderPredicate(
-                methodCallExpression, "arrayCount", typeof(int), out translated);
-        }
-
-        if (genericMethodDefinition == EnumerableLongCountPredicateMethod
-            || genericMethodDefinition == QueryableLongCountPredicateMethod)
-        {
-            return TryTranslateArrayHigherOrderPredicate(
-                methodCallExpression, "arrayCount", typeof(long), out translated);
-        }
-
-        return false;
+        translated = build(arraySql);
+        return true;
     }
 
     private bool TryTranslateArrayHigherOrderPredicate(
@@ -208,8 +258,9 @@ public class ClickHouseArrayLinqTranslator
         out SqlExpression translated)
     {
         translated = null!;
-
-        if (_visit(methodCallExpression.Arguments[0]) is not SqlExpression arraySql
+        if (GetArraySourceCandidate(methodCallExpression) is not { } sourceExpr
+            || !LooksLikeArrayColumnAccess(sourceExpr)
+            || _visit(sourceExpr) is not SqlExpression arraySql
             || arraySql.TypeMapping is not ClickHouseArrayTypeMapping arrayMapping)
         {
             return false;
@@ -310,6 +361,32 @@ public class ClickHouseArrayLinqTranslator
         return new ClickHouseArrayLambdaExpression(parameterRef, bodyWithMapping);
     }
 
+    // ─── Source-shape utilities ───────────────────────────────────────────
+
+    /// <summary>
+    /// Returns the LINQ expression that represents the array source for
+    /// <paramref name="call"/>, or <c>null</c> if the call shape doesn't expose one.
+    /// Static <c>Enumerable</c>/<c>Queryable</c> extensions carry the source as
+    /// <c>Arguments[0]</c>; instance methods (today out of scope for this translator, but
+    /// planned for Tier 3 — indexer, <c>IndexOf</c>) would carry it as <c>Object</c>.
+    /// Precedence is <c>Object</c>-first to make instance dispatch correct as soon as it
+    /// becomes reachable — invariant: a given method call cannot meaningfully expose both
+    /// (instance methods have null arguments[0] for the receiver, statics have null Object).
+    /// </summary>
+    private static Expression? GetArraySourceCandidate(MethodCallExpression call)
+        => call.Object ?? (call.Arguments.Count > 0 ? call.Arguments[0] : null);
+
+    /// <summary>
+    /// Structural pre-filter: only attempt array-column translation when the source is a
+    /// shape we can safely visit. Eagerly visiting an EF Core query root expression
+    /// (e.g. <c>ctx.Set&lt;T&gt;()</c>) trips an <c>EnumerableExpression</c> assertion
+    /// inside the base queryable visitor, so we restrict to:
+    /// <list type="bullet">
+    ///   <item>Direct member access (<c>e.IntArray</c>) with a collection-shaped CLR type.</item>
+    ///   <item><c>EF.Property&lt;T&gt;(entity, "Name")</c> — EF Core's preprocessor rewrite of property reads.</item>
+    ///   <item>Calls to known array-producing helpers in <see cref="ArrayProducingMethods"/>.</item>
+    /// </list>
+    /// </summary>
     private static bool LooksLikeArrayColumnAccess(Expression source)
     {
         // Strip AsQueryable/AsEnumerable wrappers structurally before deciding.
@@ -320,14 +397,40 @@ public class ClickHouseArrayLinqTranslator
             source = call.Arguments[0];
         }
 
-        // A direct member access (e.IntArray) is the obvious column-access shape, but EF
-        // Core's preprocessor rewrites entity property reads as `EF.Property<T>(entity,
-        // "Name")` before the visitor runs, so we recognize that shape too. Anything else
-        // (DbSet/IQueryable roots, subqueries, navigation expansions…) is left to EF Core's
-        // standard handling.
-        return source is MemberExpression
-            || (source is MethodCallExpression { Method: { IsStatic: true, Name: "Property", DeclaringType.Name: "EF" } } propertyCall
-                && propertyCall.Method.IsGenericMethod);
+        return source switch
+        {
+            MemberExpression member when IsCollectionShape(member.Type) => true,
+            MethodCallExpression { Method: { IsStatic: true, Name: "Property", DeclaringType.Name: "EF" } } efProp
+                when efProp.Method.IsGenericMethod => true,
+            MethodCallExpression { Method.IsGenericMethod: true } chained
+                when ArrayProducingMethods.Contains(chained.Method.GetGenericMethodDefinition()) => true,
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// Recognizes the CLR-side surfaces that <c>ClickHouseArrayTypeMapping</c> covers
+    /// via <c>EnumerableToArrayConverter&lt;TCollection, T&gt;</c>: arrays, <c>List&lt;T&gt;</c>,
+    /// and the interfaces that ClickHouseTypeMappingSource maps to <c>Array(T)</c>
+    /// (<c>IEnumerable&lt;T&gt;</c>, <c>IList&lt;T&gt;</c>, <c>ICollection&lt;T&gt;</c>,
+    /// <c>IReadOnlyList&lt;T&gt;</c>, <c>IReadOnlyCollection&lt;T&gt;</c>). Used as a fast,
+    /// type-mapping-free narrowing before we eagerly visit the source.
+    /// </summary>
+    private static bool IsCollectionShape(Type type)
+    {
+        if (type.IsArray)
+            return true;
+
+        if (!type.IsGenericType)
+            return false;
+
+        var def = type.GetGenericTypeDefinition();
+        return def == typeof(List<>)
+            || def == typeof(IEnumerable<>)
+            || def == typeof(IList<>)
+            || def == typeof(ICollection<>)
+            || def == typeof(IReadOnlyList<>)
+            || def == typeof(IReadOnlyCollection<>);
     }
 
     private static LambdaExpression? UnwrapLambda(Expression expression)
