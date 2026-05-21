@@ -23,6 +23,8 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
             ClickHouseJsonPathExpression e => VisitJsonPath(e),
             ClickHouseJsonArrayIndexExpression e => VisitJsonArrayIndex(e),
             ClickHouseRowValueExpression e => VisitRowValue(e),
+            ClickHouseArrayLambdaExpression e => VisitArrayLambda(e),
+            ClickHouseArrayLambdaReferenceExpression e => VisitArrayLambdaReference(e),
             ScalarSubqueryExpression e when IsNonNullableZeroDefaultAggregateSubquery(e) => VisitNonNullableScalarSubquery(e),
             _ => base.VisitExtension(extensionExpression)
         };
@@ -322,5 +324,19 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
         }
         Sql.Append(")");
         return rowValueExpression;
+    }
+
+    protected virtual Expression VisitArrayLambda(ClickHouseArrayLambdaExpression lambdaExpression)
+    {
+        Visit(lambdaExpression.Parameter);
+        Sql.Append(" -> ");
+        Visit(lambdaExpression.Body);
+        return lambdaExpression;
+    }
+
+    protected virtual Expression VisitArrayLambdaReference(ClickHouseArrayLambdaReferenceExpression referenceExpression)
+    {
+        Sql.Append(referenceExpression.Name);
+        return referenceExpression;
     }
 }

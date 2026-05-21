@@ -4,6 +4,12 @@ v0.3.0 (Unreleased)
 * **Native JSON navigation**: support for `JsonNode` indexing (`Data["key"]`, `Data[index]`) and member access.
   The provider handles ClickHouse 1-based indexing for arrays automatically and supports deep nesting and explicit casting/`.GetValue<T>()`.
 * **SimpleJSON functions**: support for `simpleJSONExtract*` and `simpleJSONHas` via `EF.Functions`.
+* **Array-column helpers on mapped `Array(T)` columns** translate to native ClickHouse array functions via the new `ClickHouseArrayMethodTranslator`. Search items are aligned to the column's element type mapping (Int64 vs Int32, FixedString(N) vs String, Enum8 vs String, …) so parameters serialize with the correct ClickHouse store type. Only mapped array columns are routed through these translations; LINQ over local in-memory collections continues to flow through the inline-`SELECT … UNION ALL …` path.
+  * `Enumerable.Contains` / `Queryable.Contains` / instance `List<T>.Contains` (plus the `ICollection<>`/`IList<>`/`IReadOnlyList<>`/`IReadOnlyCollection<>` interfaces) → `has(array, value)`.
+  * `Array.Length` / `List<T>.Count` member access / `Enumerable.Count()` / `Queryable.Count()` → `length(array)` (`int`); `LongCount()` → `length(array)` (`long`).
+  * `Enumerable.Any()` / `Queryable.Any()` → `notEmpty(array)`. Note that EF Core normalizes `arr.Count > 0` / `arr.Count() > 0` (and similar) into `Any()` *before* the provider sees them, so those expressions emit `notEmpty(...)` rather than `length(...) > 0`. Use `Count == N` (with `N > 0`) when you want `length(...)` for a row-shape assertion.
+  * `Any(x => f(x))` / `Count(x => f(x))` / `LongCount(x => f(x))` predicate overloads → `arrayExists(x -> f(x), array)` / `arrayCount(x -> f(x), array)`. The predicate body is translated through the existing scalar translator chain, just like `Select(...).Contains(...)`.
+  * `arr.Select(x => f(x)).Contains(value)` → `has(arrayMap(x -> f(x), array), value)`. The inner lambda body is translated through the existing scalar translator chain, so e.g. `x => x.ToLower()` becomes `lowerUTF8(x)` (the shape Gridify's `CaseInsensitiveFiltering` produces for string-array properties).
 
 v0.2.0
 ---

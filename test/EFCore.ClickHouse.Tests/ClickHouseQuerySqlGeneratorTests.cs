@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Reflection;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
 using ClickHouse.EntityFrameworkCore.Query.Internal;
@@ -48,6 +49,20 @@ public class ClickHouseQuerySqlGeneratorTests : IClassFixture<ClickHouseFixture>
         Assert.Equal(2, results[0].Id);
         Assert.Equal(4, results[1].Id);
         Assert.Equal(6, results[2].Id);
+    }
+
+    [Fact]
+    public void InlineCollection_Contains_DoesNotTranslateToHas()
+    {
+        using var ctx = new TestDbContext(_fixture.ConnectionString);
+
+        var ids = new long[] { 2, 4, 6 };
+
+        var sql = ctx.TestEntities
+            .Where(e => ids.Contains(e.Id))
+            .ToQueryString();
+
+        Assert.DoesNotContain("has(", sql);
     }
 
     [Fact]
@@ -232,6 +247,47 @@ public class ClickHouseQuerySqlGeneratorTests : IClassFixture<ClickHouseFixture>
 
         Assert.Equal("SELECT 42 AS `Value`", sql);
         Assert.DoesNotContain("UNION ALL", sql);
+    }
+
+    // ─── Quote() structure (unit) ─────────────────────────────
+    // EF Core's compiled-query / precompiled cache calls Quote() to reconstruct expressions
+    // on cache hit. Quote() uses cached reflection over the public constructor; if the
+    // constructor signature drifts the cache path silently NREs at materialization time.
+    // The Quote'd expression isn't standalone-compilable (it references EF Core's compile-
+    // time `relationalTypeMappingSource` parameter), so we just verify the structural shape:
+    // it's a NewExpression that targets the expected public constructor.
+
+    [Fact]
+    public void ArrayLambdaReferenceExpression_Quote_TargetsPublicConstructor()
+    {
+        using var ctx = new GeneratorTestDbContext();
+        var typeMappingSource = ctx.GetService<IRelationalTypeMappingSource>();
+        var stringMapping = typeMappingSource.FindMapping(typeof(string))!;
+
+        var original = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping);
+
+        var quoted = Assert.IsAssignableFrom<NewExpression>(original.Quote());
+        Assert.NotNull(quoted.Constructor);
+        Assert.Equal(typeof(ClickHouseArrayLambdaReferenceExpression), quoted.Constructor.DeclaringType);
+        Assert.Equal(3, quoted.Arguments.Count);  // (name, type, typeMapping)
+    }
+
+    [Fact]
+    public void ArrayLambdaExpression_Quote_TargetsPublicConstructor()
+    {
+        using var ctx = new GeneratorTestDbContext();
+        var typeMappingSource = ctx.GetService<IRelationalTypeMappingSource>();
+        var stringMapping = typeMappingSource.FindMapping(typeof(string))!;
+        var boolMapping = typeMappingSource.FindMapping(typeof(bool))!;
+
+        var parameterRef = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping);
+        var body = new SqlConstantExpression(true, boolMapping);
+        var original = new ClickHouseArrayLambdaExpression(parameterRef, body);
+
+        var quoted = Assert.IsAssignableFrom<NewExpression>(original.Quote());
+        Assert.NotNull(quoted.Constructor);
+        Assert.Equal(typeof(ClickHouseArrayLambdaExpression), quoted.Constructor.DeclaringType);
+        Assert.Equal(2, quoted.Arguments.Count);  // (parameter, body)
     }
 
     // ─── helpers ────────────────────────────────────────────

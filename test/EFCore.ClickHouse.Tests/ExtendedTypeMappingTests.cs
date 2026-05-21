@@ -289,6 +289,97 @@ public class MapDbContext : DbContext
     }
 }
 
+// Interface-typed collection properties on entities map to Array(T) via the v0.2.0
+// EnumerableToArrayConverter<TCollection, T>. Each entity below points at array_test's
+// int_array column with a different declared CLR collection type, so the same
+// integration tests can confirm that Contains/Length/Count/Any translations fire
+// uniformly through the ClickHouseArrayTypeMapping the type-mapping source assigns.
+public class IEnumerableIntEntity { public long Id { get; set; } public IEnumerable<int> IntArray { get; set; } = []; }
+public class IListIntEntity { public long Id { get; set; } public IList<int> IntArray { get; set; } = []; }
+public class ICollectionIntEntity { public long Id { get; set; } public ICollection<int> IntArray { get; set; } = []; }
+public class IReadOnlyListIntEntity { public long Id { get; set; } public IReadOnlyList<int> IntArray { get; set; } = []; }
+public class IReadOnlyCollectionIntEntity { public long Id { get; set; } public IReadOnlyCollection<int> IntArray { get; set; } = []; }
+
+public class IEnumerableIntDbContext : DbContext
+{
+    public DbSet<IEnumerableIntEntity> Entities => Set<IEnumerableIntEntity>();
+    private readonly string _connectionString;
+    public IEnumerableIntDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m) =>
+        m.Entity<IEnumerableIntEntity>(e =>
+        {
+            e.ToTable("array_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
+        });
+}
+
+public class IListIntDbContext : DbContext
+{
+    public DbSet<IListIntEntity> Entities => Set<IListIntEntity>();
+    private readonly string _connectionString;
+    public IListIntDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m) =>
+        m.Entity<IListIntEntity>(e =>
+        {
+            e.ToTable("array_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
+        });
+}
+
+public class ICollectionIntDbContext : DbContext
+{
+    public DbSet<ICollectionIntEntity> Entities => Set<ICollectionIntEntity>();
+    private readonly string _connectionString;
+    public ICollectionIntDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m) =>
+        m.Entity<ICollectionIntEntity>(e =>
+        {
+            e.ToTable("array_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
+        });
+}
+
+public class IReadOnlyListIntDbContext : DbContext
+{
+    public DbSet<IReadOnlyListIntEntity> Entities => Set<IReadOnlyListIntEntity>();
+    private readonly string _connectionString;
+    public IReadOnlyListIntDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m) =>
+        m.Entity<IReadOnlyListIntEntity>(e =>
+        {
+            e.ToTable("array_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
+        });
+}
+
+public class IReadOnlyCollectionIntDbContext : DbContext
+{
+    public DbSet<IReadOnlyCollectionIntEntity> Entities => Set<IReadOnlyCollectionIntEntity>();
+    private readonly string _connectionString;
+    public IReadOnlyCollectionIntDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m) =>
+        m.Entity<IReadOnlyCollectionIntEntity>(e =>
+        {
+            e.ToTable("array_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
+        });
+}
+
 public class TupleDbContext : DbContext
 {
     public DbSet<TupleEntity> Entities => Set<TupleEntity>();
@@ -927,6 +1018,217 @@ public class ArrayTests
         Assert.Equal([42, -1, 0, 100], rows[2].IntArray);
         Assert.Equal(["hello", "world"], rows[2].StringArray);
     }
+
+    [Fact]
+    public async Task Array_Contains_Translates_To_Has()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // 1. Static Enumerable.Contains
+        var query1 = ctx.Entities.Where(e => e.IntArray.Contains(42));
+        var result1 = await query1.ToListAsync();
+        Assert.Single(result1);
+        Assert.Equal(3, result1[0].Id);
+
+        // 2. Queryable.Contains (via AsQueryable)
+        var query2 = ctx.Entities.Where(e => e.StringArray.AsQueryable().Contains("hello"));
+        var result2 = await query2.ToListAsync();
+        Assert.Single(result2);
+        Assert.Equal(3, result2[0].Id);
+    }
+
+    [Fact]
+    public async Task Array_SelectToLowerContains_GeneratesArrayMapHas()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        var query = ctx.Entities.Where(e => e.StringArray.Select(x => x.ToLower()).Contains("hello"));
+
+        // SQL shape: lambda translated through the existing scalar translator chain,
+        // so string.ToLower() routes to lowerUTF8 and is wrapped in arrayMap inside has().
+        // The compiler-assigned parameter name (often "p") shouldn't be load-bearing for
+        // the test; assert structure via multiple substring matches instead.
+        var sql = query.ToQueryString();
+        Assert.Contains("has(arrayMap(", sql);
+        Assert.Contains("lowerUTF8(", sql);
+        Assert.Contains("`a`.`string_array`", sql);
+        Assert.Contains(" -> ", sql);
+
+        // Execution: row 3 has ['hello', 'world'].
+        var results = await query.ToListAsync();
+        Assert.Single(results);
+        Assert.Equal(3, results[0].Id);
+    }
+
+    [Fact]
+    public async Task Array_AsQueryableSelectContains_RoundTrips()
+    {
+        // Regression: confirms `arr.AsQueryable().Select(...).Contains(...)` survives the
+        // dispatch — the inner AsQueryable marker is the source of selectCall.Arguments[0],
+        // which means LooksLikeArrayColumnAccess has to strip the wrapper to see the column.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        var query = ctx.Entities.Where(e => e.StringArray.AsQueryable().Select(x => x.ToLower()).Contains("hello"));
+
+        var sql = query.ToQueryString();
+        Assert.Contains("has(arrayMap(", sql);
+        Assert.Contains("lowerUTF8(", sql);
+        Assert.Contains("`a`.`string_array`", sql);
+
+        var results = await query.ToListAsync();
+        Assert.Single(results);
+        Assert.Equal(3, results[0].Id);
+    }
+
+    [Fact]
+    public async Task Array_Contains_NullElement_DoesNotMatchNullValuesInArray()
+    {
+        // Documents ClickHouse's `has()` null semantics: `has(arr, NULL)` returns 0 even
+        // when `arr` contains NULLs. This is the platform behavior — surfaced here so a
+        // future refactor can't accidentally invert it. (See ClickHouse `hasAny`/`indexOf`
+        // for explicit NULL-element handling.)
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // Non-null values still work as expected.
+        var match = await ctx.Entities.Where(e => e.StringArray.Contains("hello")).ToListAsync();
+        Assert.Single(match);
+    }
+
+    [Fact]
+    public async Task Array_SelectWithUnsupportedLambdaBody_FallsBackWithoutCrashing()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // The lambda body uses string.Normalize(), which has no ClickHouse translation. The
+        // lambda translation path must return null and fall back to base EF Core handling
+        // rather than crashing the translator. EF Core then surfaces its standard
+        // "could not be translated" exception at materialization — that's the expected
+        // outcome; asserting against the message catches a regression that throws a
+        // different (worse) exception from inside our translator.
+        var query = ctx.Entities.Where(e => e.StringArray.Select(x => x.Normalize()).Contains("hello"));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => query.ToQueryString());
+        Assert.Contains("could not be translated", ex.Message);
+    }
+
+    [Fact]
+    public async Task Array_Length_Count_Any_Translate()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // T[].Length → length() via IMemberTranslator.
+        var lengthSql = ctx.Entities.Where(e => e.IntArray.Length == 0).ToQueryString();
+        Assert.Contains("length(", lengthSql);
+
+        // Enumerable.Count() on a mapped array column → length() via the visitor.
+        var countSql = ctx.Entities.Where(e => e.StringArray.Count() > 1).ToQueryString();
+        Assert.Contains("length(", countSql);
+
+        // Enumerable.LongCount() → length() returning Int64 via the visitor.
+        var longCountSql = ctx.Entities.Where(e => e.StringArray.LongCount() > 1L).ToQueryString();
+        Assert.Contains("length(", longCountSql);
+
+        // Enumerable.Any() on a mapped array column → notEmpty() via the visitor.
+        var anySql = ctx.Entities.Where(e => e.StringArray.Any()).ToQueryString();
+        Assert.Contains("notEmpty(", anySql);
+
+        // Negation composes naturally — EF wraps notEmpty(arr) under a NOT/= 0 predicate.
+        var notAnyQuery = ctx.Entities.Where(e => !e.StringArray.Any());
+        Assert.Contains("notEmpty(", notAnyQuery.ToQueryString());
+        var emptyArrayResults = await notAnyQuery.OrderBy(e => e.Id).ToListAsync();
+        Assert.Single(emptyArrayResults);
+        Assert.Equal(2, emptyArrayResults[0].Id);  // Row 2 has empty arrays.
+
+        // Execution: row 2 has empty arrays.
+        var emptyArrayRows = await ctx.Entities
+            .Where(e => e.IntArray.Length == 0)
+            .AsNoTracking()
+            .ToListAsync();
+        Assert.Single(emptyArrayRows);
+        Assert.Equal(2, emptyArrayRows[0].Id);
+
+        var projection = await ctx.Entities
+            .OrderBy(e => e.Id)
+            .Select(e => new
+            {
+                e.Id,
+                IntLength = e.IntArray.Length,
+                StringCount = e.StringArray.Count(),
+                StringLongCount = e.StringArray.LongCount(),
+                HasStrings = e.StringArray.Any()
+            })
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, projection[0].IntLength);
+        Assert.Equal(3, projection[0].StringCount);
+        Assert.Equal(3L, projection[0].StringLongCount);
+        Assert.True(projection[0].HasStrings);
+
+        Assert.Equal(0, projection[1].IntLength);
+        Assert.Equal(0, projection[1].StringCount);
+        Assert.Equal(0L, projection[1].StringLongCount);
+        Assert.False(projection[1].HasStrings);
+    }
+
+    [Fact]
+    public async Task Array_PredicateOverloads_TranslateToHigherOrderArrayFunctions()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // Any(predicate) → arrayExists(lambda, arr). Assert both the outer function call
+        // shape and the lambda parameter arrow (" -> ") so a regression that erases the
+        // lambda body (e.g. emitting `arrayExists(true, arr)`) is caught.
+        var anyQuery = ctx.Entities.Where(e => e.IntArray.Any(x => x > 10));
+        var anySql = anyQuery.ToQueryString();
+        Assert.Contains("arrayExists(", anySql);
+        Assert.Contains(" -> ", anySql);
+        var anyResults = await anyQuery.OrderBy(e => e.Id).ToListAsync();
+        Assert.Single(anyResults);
+        Assert.Equal(3, anyResults[0].Id);  // Row 3 has [42, -1, 0, 100]
+
+        // Count(predicate) → arrayCount(lambda, arr).
+        var countQuery = ctx.Entities.Where(e => e.IntArray.Count(x => x > 0) >= 2);
+        var countSql = countQuery.ToQueryString();
+        Assert.Contains("arrayCount(", countSql);
+        Assert.Contains(" -> ", countSql);
+        var countResults = await countQuery.OrderBy(e => e.Id).ToListAsync();
+        Assert.Equal(2, countResults.Count);  // Row 1 [1,2,3], row 3 [42,-1,0,100] → 2 positives each
+
+        // LongCount(predicate) → arrayCount(lambda, arr) returning Int64.
+        var longCountQuery = ctx.Entities.Where(e => e.IntArray.LongCount(x => x > 0) >= 2L);
+        Assert.Contains("arrayCount(", longCountQuery.ToQueryString());
+        var longCountResults = await longCountQuery.OrderBy(e => e.Id).ToListAsync();
+        Assert.Equal(2, longCountResults.Count);
+
+        // Queryable.Any(predicate) variant — same shape via the AsQueryable wrapper.
+        var queryableAnyQuery = ctx.Entities.Where(e => e.IntArray.AsQueryable().Any(x => x > 10));
+        Assert.Contains("arrayExists(", queryableAnyQuery.ToQueryString());
+        var queryableAnyResults = await queryableAnyQuery.OrderBy(e => e.Id).ToListAsync();
+        Assert.Single(queryableAnyResults);
+        Assert.Equal(3, queryableAnyResults[0].Id);
+    }
+
+    [Fact]
+    public async Task DbSetRoot_AnyAndCount_StillUseEfBaseTranslation()
+    {
+        // Negative shape: when the source is the DbSet itself (not a mapped array column),
+        // the structural pre-filter in ClickHouseSqlTranslatingExpressionVisitor must skip
+        // the array path and let EF Core's standard subquery translation handle it. The SQL
+        // must NOT contain notEmpty(/length( — those are array-column shapes — and the
+        // top-level query must still return correct results.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        var anySubquerySql = ctx.Entities.Where(e => ctx.Entities.Any(other => other.Id > e.Id))
+            .ToQueryString();
+        Assert.DoesNotContain("notEmpty(", anySubquerySql);
+
+        var countTotal = await ctx.Entities.CountAsync();
+        Assert.Equal(3, countTotal);
+
+        var anyExists = await ctx.Entities.AnyAsync();
+        Assert.True(anyExists);
+    }
 }
 
 [Collection("ExtendedTypes")]
@@ -951,6 +1253,242 @@ public class ListArrayTests
 
         Assert.Equal([42, -1, 0, 100], rows[2].IntArray);
         Assert.Equal(["hello", "world"], rows[2].StringArray);
+    }
+
+    [Fact]
+    public async Task ListArray_Contains_Translates_To_Has()
+    {
+        await using var ctx = new ListArrayDbContext(_fixture.ConnectionString);
+
+        // 1. Instance List.Contains. EF Core rewrites this to Enumerable.Contains in the
+        // expression tree, so it flows through the SqlTranslatingExpressionVisitor intercept
+        // (same path as the static Enumerable.Contains form).
+        var query1 = ctx.Entities.Where(e => e.IntArray.Contains(42));
+        Assert.Contains("has(", query1.ToQueryString());
+        var result1 = await query1.ToListAsync();
+        Assert.Single(result1);
+        Assert.Equal(3, result1[0].Id);
+
+        // 2. Queryable.Contains (via AsQueryable)
+        var query2 = ctx.Entities.Where(e => e.StringArray.AsQueryable().Contains("hello"));
+        var result2 = await query2.ToListAsync();
+        Assert.Single(result2);
+        Assert.Equal(3, result2[0].Id);
+    }
+
+    [Fact]
+    public async Task ListArray_Count_Any_Translate()
+    {
+        await using var ctx = new ListArrayDbContext(_fixture.ConnectionString);
+
+        // List<T>.Count property → length() via IMemberTranslator.
+        var countPropertySql = ctx.Entities.Where(e => e.IntArray.Count == 0).ToQueryString();
+        Assert.Contains("length(", countPropertySql);
+
+        // Enumerable.Count() over the mapped column → length() via the visitor.
+        var countMethodSql = ctx.Entities.Where(e => e.StringArray.Count() > 1).ToQueryString();
+        Assert.Contains("length(", countMethodSql);
+
+        // Enumerable.Any() → notEmpty() via the visitor.
+        var anySql = ctx.Entities.Where(e => e.StringArray.Any()).ToQueryString();
+        Assert.Contains("notEmpty(", anySql);
+
+        var emptyListRows = await ctx.Entities
+            .Where(e => e.IntArray.Count == 0)
+            .AsNoTracking()
+            .ToListAsync();
+        Assert.Single(emptyListRows);
+        Assert.Equal(2, emptyListRows[0].Id);
+
+        var projection = await ctx.Entities
+            .OrderBy(e => e.Id)
+            .Select(e => new
+            {
+                e.Id,
+                IntCount = e.IntArray.Count,
+                StringCount = e.StringArray.Count(),
+                HasStrings = e.StringArray.Any()
+            })
+            .AsNoTracking()
+            .ToListAsync();
+
+        Assert.Equal(3, projection[0].IntCount);
+        Assert.Equal(3, projection[0].StringCount);
+        Assert.True(projection[0].HasStrings);
+
+        Assert.Equal(0, projection[1].IntCount);
+        Assert.Equal(0, projection[1].StringCount);
+        Assert.False(projection[1].HasStrings);
+    }
+}
+
+/// <summary>
+/// Confirms that array-helper translations (Contains/Length/Count/Any/predicate overloads)
+/// fire uniformly for entity properties typed as <c>IEnumerable&lt;T&gt;</c>,
+/// <c>ICollection&lt;T&gt;</c>, <c>IList&lt;T&gt;</c>, <c>IReadOnlyList&lt;T&gt;</c>, and
+/// <c>IReadOnlyCollection&lt;T&gt;</c> — all of which round-trip through
+/// <c>ClickHouseArrayTypeMapping</c> via <c>EnumerableToArrayConverter&lt;TCollection,T&gt;</c>.
+/// The translator gates on the type mapping, not the CLR collection type, so each interface
+/// shape should produce identical SQL.
+/// </summary>
+[Collection("ExtendedTypes")]
+public class InterfaceCollectionArrayTests
+{
+    private readonly ExtendedTypesFixture _fixture;
+    public InterfaceCollectionArrayTests(ExtendedTypesFixture fixture) => _fixture = fixture;
+
+    // Seed (array_test): row 1 IntArray=[1,2,3] (non-empty, len 3),
+    //                    row 2 IntArray=[] (empty, len 0),
+    //                    row 3 IntArray=[42,-1,0,100] (non-empty, len 4, contains 42).
+
+    [Fact]
+    public async Task IEnumerable_Contains_Count_Any_Translate()
+    {
+        await using var ctx = new IEnumerableIntDbContext(_fixture.ConnectionString);
+
+        var containsSql = ctx.Entities.Where(e => e.IntArray.Contains(42)).ToQueryString();
+        Assert.Contains("has(", containsSql);
+
+        var countSql = ctx.Entities.Where(e => e.IntArray.Count() > 0).ToQueryString();
+        Assert.Contains("length(", countSql);
+
+        var anySql = ctx.Entities.Where(e => e.IntArray.Any()).ToQueryString();
+        Assert.Contains("notEmpty(", anySql);
+
+        // Execute every translated query against the database.
+        var containsResults = await ctx.Entities.Where(e => e.IntArray.Contains(42))
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(containsResults);
+        Assert.Equal(3, containsResults[0].Id);
+
+        var countResults = await ctx.Entities.Where(e => e.IntArray.Count() > 0)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(2, countResults.Count);
+        Assert.Equal(new[] { 1L, 3L }, countResults.Select(r => r.Id).ToArray());
+
+        var anyResults = await ctx.Entities.Where(e => e.IntArray.Any())
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(2, anyResults.Count);
+        Assert.Equal(new[] { 1L, 3L }, anyResults.Select(r => r.Id).ToArray());
+
+        // IEnumerable<T> has no .Count property, only .Count() — that path covered above.
+    }
+
+    [Fact]
+    public async Task IList_Contains_Count_Any_Translate()
+    {
+        await using var ctx = new IListIntDbContext(_fixture.ConnectionString);
+
+        Assert.Contains("has(", ctx.Entities.Where(e => e.IntArray.Contains(42)).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count() > 0).ToQueryString());
+        // Count == N avoids EF Core's "Count > 0 -> Any" optimization.
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count == 4).ToQueryString());
+        Assert.Contains("notEmpty(", ctx.Entities.Where(e => e.IntArray.Any()).ToQueryString());
+
+        var containsResults = await ctx.Entities.Where(e => e.IntArray.Contains(42))
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(containsResults);
+        Assert.Equal(3, containsResults[0].Id);
+
+        var countMethodResults = await ctx.Entities.Where(e => e.IntArray.Count() > 0)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, countMethodResults.Select(r => r.Id).ToArray());
+
+        var countMemberResults = await ctx.Entities.Where(e => e.IntArray.Count == 4)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(countMemberResults);
+        Assert.Equal(3, countMemberResults[0].Id);
+
+        var anyResults = await ctx.Entities.Where(e => e.IntArray.Any())
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, anyResults.Select(r => r.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task ICollection_Contains_Count_Any_Translate()
+    {
+        await using var ctx = new ICollectionIntDbContext(_fixture.ConnectionString);
+
+        Assert.Contains("has(", ctx.Entities.Where(e => e.IntArray.Contains(42)).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count() > 0).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count == 4).ToQueryString());
+        Assert.Contains("notEmpty(", ctx.Entities.Where(e => e.IntArray.Any()).ToQueryString());
+
+        var containsResults = await ctx.Entities.Where(e => e.IntArray.Contains(42))
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(containsResults);
+        Assert.Equal(3, containsResults[0].Id);
+
+        var countMethodResults = await ctx.Entities.Where(e => e.IntArray.Count() > 0)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, countMethodResults.Select(r => r.Id).ToArray());
+
+        var countMemberResults = await ctx.Entities.Where(e => e.IntArray.Count == 4)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(countMemberResults);
+        Assert.Equal(3, countMemberResults[0].Id);
+
+        var anyResults = await ctx.Entities.Where(e => e.IntArray.Any())
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, anyResults.Select(r => r.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task IReadOnlyList_Contains_Count_Any_Translate()
+    {
+        await using var ctx = new IReadOnlyListIntDbContext(_fixture.ConnectionString);
+
+        Assert.Contains("has(", ctx.Entities.Where(e => e.IntArray.Contains(42)).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count() > 0).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count == 4).ToQueryString());
+        Assert.Contains("notEmpty(", ctx.Entities.Where(e => e.IntArray.Any()).ToQueryString());
+
+        var containsResults = await ctx.Entities.Where(e => e.IntArray.Contains(42))
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(containsResults);
+        Assert.Equal(3, containsResults[0].Id);
+
+        var countMethodResults = await ctx.Entities.Where(e => e.IntArray.Count() > 0)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, countMethodResults.Select(r => r.Id).ToArray());
+
+        var countMemberResults = await ctx.Entities.Where(e => e.IntArray.Count == 4)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(countMemberResults);
+        Assert.Equal(3, countMemberResults[0].Id);
+
+        var anyResults = await ctx.Entities.Where(e => e.IntArray.Any())
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, anyResults.Select(r => r.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task IReadOnlyCollection_Contains_Count_Any_Translate()
+    {
+        await using var ctx = new IReadOnlyCollectionIntDbContext(_fixture.ConnectionString);
+
+        Assert.Contains("has(", ctx.Entities.Where(e => e.IntArray.Contains(42)).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count() > 0).ToQueryString());
+        Assert.Contains("length(", ctx.Entities.Where(e => e.IntArray.Count == 4).ToQueryString());
+        Assert.Contains("notEmpty(", ctx.Entities.Where(e => e.IntArray.Any()).ToQueryString());
+
+        var containsResults = await ctx.Entities.Where(e => e.IntArray.Contains(42))
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(containsResults);
+        Assert.Equal(3, containsResults[0].Id);
+
+        var countMethodResults = await ctx.Entities.Where(e => e.IntArray.Count() > 0)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, countMethodResults.Select(r => r.Id).ToArray());
+
+        var countMemberResults = await ctx.Entities.Where(e => e.IntArray.Count == 4)
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Single(countMemberResults);
+        Assert.Equal(3, countMemberResults[0].Id);
+
+        var anyResults = await ctx.Entities.Where(e => e.IntArray.Any())
+            .OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+        Assert.Equal(new[] { 1L, 3L }, anyResults.Select(r => r.Id).ToArray());
     }
 }
 
