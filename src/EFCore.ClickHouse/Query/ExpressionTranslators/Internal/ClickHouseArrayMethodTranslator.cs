@@ -1,4 +1,5 @@
 using System.Reflection;
+using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -151,6 +152,92 @@ public class ClickHouseArrayMethodTranslator : IMethodCallTranslator, IMemberTra
             argumentsPropagateNullability: [false],
             returnType,
             _typeMappingSource.FindMapping(returnType));
+
+    /// <summary>
+    /// <c>arrayElement(arr, i)</c> — semantically identical to ClickHouse's <c>arr[i]</c>
+    /// indexer syntax. Used for <c>First</c>/<c>Last</c>/<c>ElementAt</c> translations.
+    /// </summary>
+    /// <param name="source">The array column SqlExpression. Must carry a
+    /// <see cref="ClickHouseArrayTypeMapping"/>.</param>
+    /// <param name="oneBasedIndex">The 1-based ClickHouse index. Callers handle the
+    /// 0→1 offset for <c>ElementAt(i)</c>; <c>First</c>/<c>Last</c> pass literal 1/-1.</param>
+    /// <remarks>
+    /// ClickHouse returns the element type's default (0, "", etc.) for out-of-bounds
+    /// indices rather than raising. This is a documented divergence from .NET LINQ's
+    /// <c>InvalidOperationException</c>/<c>ArgumentOutOfRangeException</c> on empty/OOB.
+    /// </remarks>
+    public SqlExpression TranslateElementAt(SqlExpression source, SqlExpression oneBasedIndex)
+    {
+        var arrayTypeMapping = (ClickHouseArrayTypeMapping)source.TypeMapping!;
+        return _sqlExpressionFactory.Function(
+            "arrayElement",
+            [source, oneBasedIndex],
+            nullable: false,
+            argumentsPropagateNullability: [false, false],
+            arrayTypeMapping.ElementMapping.ClrType,
+            arrayTypeMapping.ElementMapping);
+    }
+
+    /// <summary>
+    /// <c>arraySlice(arr, offset[, length])</c>. Both offset and length follow ClickHouse's
+    /// 1-based / positive-direction conventions — callers add 1 to LINQ-side 0-based offsets
+    /// (<c>Skip(n)</c> → offset n+1; <c>Take(m)</c> → offset 1, length m).
+    /// The result is itself <c>Array(T)</c> with the same element mapping as the source, so
+    /// chained helpers (<c>arr.Skip(1).Contains(x)</c>) compose naturally.
+    /// </summary>
+    public SqlExpression TranslateSlice(SqlExpression source, SqlExpression offset, SqlExpression? length)
+    {
+        var arrayTypeMapping = (ClickHouseArrayTypeMapping)source.TypeMapping!;
+        SqlExpression[] args = length is null ? [source, offset] : [source, offset, length];
+        bool[] propagate = length is null ? [false, false] : [false, false, false];
+
+        return _sqlExpressionFactory.Function(
+            "arraySlice",
+            args,
+            nullable: false,
+            argumentsPropagateNullability: propagate,
+            source.Type,
+            arrayTypeMapping);
+    }
+
+    public SqlExpression TranslateReverse(SqlExpression source)
+        => UnaryArrayProducing("arrayReverse", source);
+
+    public SqlExpression TranslateDistinct(SqlExpression source)
+        => UnaryArrayProducing("arrayDistinct", source);
+
+    public SqlExpression TranslateSort(SqlExpression source, ClickHouseArrayLambdaExpression? keyLambda)
+        => SortFunction("arraySort", source, keyLambda);
+
+    public SqlExpression TranslateReverseSort(SqlExpression source, ClickHouseArrayLambdaExpression? keyLambda)
+        => SortFunction("arrayReverseSort", source, keyLambda);
+
+    private SqlExpression UnaryArrayProducing(string functionName, SqlExpression source)
+    {
+        var arrayTypeMapping = (ClickHouseArrayTypeMapping)source.TypeMapping!;
+        return _sqlExpressionFactory.Function(
+            functionName,
+            [source],
+            nullable: false,
+            argumentsPropagateNullability: [false],
+            source.Type,
+            arrayTypeMapping);
+    }
+
+    private SqlExpression SortFunction(string functionName, SqlExpression source, ClickHouseArrayLambdaExpression? keyLambda)
+    {
+        var arrayTypeMapping = (ClickHouseArrayTypeMapping)source.TypeMapping!;
+        SqlExpression[] args = keyLambda is null ? [source] : [keyLambda, source];
+        bool[] propagate = keyLambda is null ? [false] : [false, false];
+
+        return _sqlExpressionFactory.Function(
+            functionName,
+            args,
+            nullable: false,
+            argumentsPropagateNullability: propagate,
+            source.Type,
+            arrayTypeMapping);
+    }
 
     public static bool IsClickHouseArray(SqlExpression expression)
         => expression.TypeMapping is ClickHouseArrayTypeMapping;
