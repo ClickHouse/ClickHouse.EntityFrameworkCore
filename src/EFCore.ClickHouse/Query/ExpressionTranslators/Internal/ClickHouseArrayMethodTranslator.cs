@@ -165,14 +165,18 @@ public class ClickHouseArrayMethodTranslator : IMethodCallTranslator, IMemberTra
     /// ClickHouse returns the element type's default (0, "", etc.) for out-of-bounds
     /// indices rather than raising. This is a documented divergence from .NET LINQ's
     /// <c>InvalidOperationException</c>/<c>ArgumentOutOfRangeException</c> on empty/OOB.
+    /// For <c>Array(Nullable(T))</c> the element type's default IS NULL, so the result is
+    /// declared nullable when the element store type carries a <c>Nullable(...)</c> wrapper.
     /// </remarks>
     public SqlExpression TranslateElementAt(SqlExpression source, SqlExpression oneBasedIndex)
     {
         var arrayTypeMapping = (ClickHouseArrayTypeMapping)source.TypeMapping!;
+        var elementIsNullable = arrayTypeMapping.ElementMapping.StoreType
+            .StartsWith("Nullable(", StringComparison.Ordinal);
         return _sqlExpressionFactory.Function(
             "arrayElement",
             [source, oneBasedIndex],
-            nullable: false,
+            nullable: elementIsNullable,
             argumentsPropagateNullability: [false, false],
             arrayTypeMapping.ElementMapping.ClrType,
             arrayTypeMapping.ElementMapping);

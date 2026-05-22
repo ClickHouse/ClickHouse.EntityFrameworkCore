@@ -17,7 +17,10 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
     public RelationalTypeMapping ElementMapping { get; }
 
     /// <summary>
-    /// Creates a mapping for T[] CLR types.
+    /// Creates a mapping for T[] CLR types. Element nullability flows through
+    /// <paramref name="elementMapping"/>'s <see cref="RelationalTypeMapping.ClrType"/>:
+    /// <c>Array(Nullable(Int32))</c> arrives here with a <see cref="ClickHouseNullableElementMapping"/>
+    /// whose <c>ClrType</c> is <c>int?</c>, so <c>MakeArrayType()</c> produces <c>int?[]</c>.
     /// </summary>
     public ClickHouseArrayTypeMapping(RelationalTypeMapping elementMapping)
         : base(
