@@ -396,7 +396,9 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         // HasColumnType("Array(...)"), prefer parsing the inner type from the store
         // type over EF Core's pre-resolved element mapping — the pre-resolved one
         // only reflects the CLR element type and misses LowCardinality/Nullable wrappers
-        // that the user explicitly specified.
+        // that the user explicitly specified. FindComponentMapping threads Nullable(...)
+        // through to the returned mapping's CLR type for value-type elements so
+        // Array(Nullable(Int32)) naturally composes to int?[].
         if (string.Equals(mappingInfo.StoreTypeNameBase, "Array", StringComparison.OrdinalIgnoreCase)
             && mappingInfo.StoreTypeName is { } storeTypeName)
         {
@@ -404,7 +406,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             if (innerType is null)
                 return null;
 
-            elementMapping = FindMapping(innerType);
+            elementMapping = FindComponentMapping(innerType);
         }
 
         // Fall back to the pre-resolved element type mapping from EF Core (used by
@@ -449,6 +451,67 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         return new ClickHouseArrayTypeMapping(elementMapping);
     }
 
+    /// <summary>
+    /// Resolves a mapping for a composite-element store type that may be
+    /// <c>Nullable(...)</c>-wrapped. The wrapper is preserved in the returned mapping's
+    /// CLR type for value-type elements (via <see cref="ClickHouseNullableElementMapping"/>),
+    /// so composite resolvers (Array, Tuple, Map, Variant) can call
+    /// <c>elementMapping.ClrType.MakeArrayType()</c> / <c>MakeGenericType(...)</c> and get
+    /// the correct nullable-element composite CLR type without per-composite special cases.
+    /// <para>
+    /// EF Core's scalar nullability lives on <see cref="Microsoft.EntityFrameworkCore.Metadata.IProperty.IsNullable"/>,
+    /// which is why <see cref="ParseStoreTypeName"/> strips <c>Nullable(...)</c> and
+    /// <c>FindMapping</c> returns the unwrapped scalar mapping — correct for scalar columns
+    /// where the property/column annotation carries the nullability separately, but
+    /// insufficient for composites whose element nullability has no annotation channel.
+    /// </para>
+    /// </summary>
+    private RelationalTypeMapping? FindComponentMapping(string innerStoreType)
+    {
+        var inner = FindMapping(innerStoreType);
+        if (inner is null)
+            return null;
+
+        if (!HasNullableElementWrapper(innerStoreType))
+            return inner;
+
+        // Reference types and already-nullable mappings pass through unchanged — the runtime
+        // CLR type is identical with or without the nullable-reference annotation, and
+        // wrapping a Nullable<T> with another Nullable<> isn't a valid CLR type.
+        if (!inner.ClrType.IsValueType || Nullable.GetUnderlyingType(inner.ClrType) is not null)
+            return inner;
+
+        return new ClickHouseNullableElementMapping(inner);
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="storeType"/> directly or indirectly wraps with
+    /// <c>Nullable(...)</c>. LowCardinality is a storage-only wrapper, but composes with
+    /// Nullable (<c>LowCardinality(Nullable(T))</c>) so we strip it to check the inner.
+    /// </summary>
+    private static bool HasNullableElementWrapper(string storeType)
+    {
+        var s = storeType.AsSpan().TrimStart();
+        while (true)
+        {
+            if (s.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase))
+            {
+                // Drop the LowCardinality( and matching ) and look at the inner.
+                var openParen = s.IndexOf('(');
+                if (openParen < 0)
+                    return false;
+                s = s[(openParen + 1)..];
+                // Trim the trailing matching paren (no need to find the exact match — any
+                // Nullable( inside will be detected by the StartsWith check on the next loop).
+                s = s.TrimStart();
+                continue;
+            }
+            return false;
+        }
+    }
+
     private static Type? GetCollectionElementType(Type? clrType)
     {
         if (clrType is null)
@@ -483,8 +546,8 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             if (innerTypes is null)
                 return null;
 
-            var keyMapping = FindMapping(innerTypes[0]);
-            var valueMapping = FindMapping(innerTypes[1]);
+            var keyMapping = FindComponentMapping(innerTypes[0]);
+            var valueMapping = FindComponentMapping(innerTypes[1]);
             if (keyMapping is null || valueMapping is null)
                 return null;
 
@@ -521,7 +584,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             var elementMappings = new List<RelationalTypeMapping>();
             foreach (var innerType in innerTypes)
             {
-                var mapping = FindMapping(innerType);
+                var mapping = FindComponentMapping(innerType);
                 if (mapping is null)
                     return null;
                 elementMappings.Add(mapping);
@@ -573,7 +636,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         var elementMappings = new List<RelationalTypeMapping>();
         foreach (var innerType in innerTypes)
         {
-            var mapping = FindMapping(innerType);
+            var mapping = FindComponentMapping(innerType);
             if (mapping is null)
                 return null;
             elementMappings.Add(mapping);

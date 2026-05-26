@@ -75,6 +75,38 @@ public class ListArrayEntity
     public List<string> StringArray { get; set; } = [];
 }
 
+public class NullableElementArrayEntity
+{
+    public long Id { get; set; }
+    public int?[] NullableIntArray { get; set; } = [];
+}
+
+public class LowCardinalityArrayEntity
+{
+    public long Id { get; set; }
+    public string[] LowCardArray { get; set; } = [];
+    public string?[] LowCardNullableArray { get; set; } = [];
+    public string?[] NullableArray { get; set; } = [];
+}
+
+public class NullableListArrayEntity
+{
+    public long Id { get; set; }
+    public List<int?> NullableIntList { get; set; } = [];
+}
+
+public class NullableTupleEntity
+{
+    public long Id { get; set; }
+    public (int?, string) NullableIntStringTuple { get; set; }
+}
+
+public class NullableMapEntity
+{
+    public long Id { get; set; }
+    public Dictionary<string, int?> StringNullableIntMap { get; set; } = new();
+}
+
 public class MapEntity
 {
     public long Id { get; set; }
@@ -267,6 +299,98 @@ public class ListArrayDbContext : DbContext
             e.Property(x => x.Id).HasColumnName("id");
             e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
             e.Property(x => x.StringArray).HasColumnName("string_array").HasColumnType("Array(String)");
+        });
+    }
+}
+
+public class NullableElementArrayDbContext : DbContext
+{
+    public DbSet<NullableElementArrayEntity> Entities => Set<NullableElementArrayEntity>();
+    private readonly string _connectionString;
+    public NullableElementArrayDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<NullableElementArrayEntity>(e =>
+        {
+            e.ToTable("array_nullable_elements");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.NullableIntArray).HasColumnName("nullable_int_array").HasColumnType("Array(Nullable(Int32))");
+        });
+    }
+}
+
+public class LowCardinalityArrayDbContext : DbContext
+{
+    public DbSet<LowCardinalityArrayEntity> Entities => Set<LowCardinalityArrayEntity>();
+    private readonly string _connectionString;
+    public LowCardinalityArrayDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<LowCardinalityArrayEntity>(e =>
+        {
+            e.ToTable("array_wrapper_matrix");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.LowCardArray).HasColumnName("lowcard_array").HasColumnType("Array(LowCardinality(String))");
+            e.Property(x => x.LowCardNullableArray).HasColumnName("lowcard_nullable_array").HasColumnType("Array(LowCardinality(Nullable(String)))");
+            e.Property(x => x.NullableArray).HasColumnName("nullable_array").HasColumnType("Array(Nullable(String))");
+        });
+    }
+}
+
+public class NullableListArrayDbContext : DbContext
+{
+    public DbSet<NullableListArrayEntity> Entities => Set<NullableListArrayEntity>();
+    private readonly string _connectionString;
+    public NullableListArrayDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<NullableListArrayEntity>(e =>
+        {
+            e.ToTable("array_nullable_list");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.NullableIntList).HasColumnName("nullable_int_list").HasColumnType("Array(Nullable(Int32))");
+        });
+    }
+}
+
+public class NullableTupleDbContext : DbContext
+{
+    public DbSet<NullableTupleEntity> Entities => Set<NullableTupleEntity>();
+    private readonly string _connectionString;
+    public NullableTupleDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<NullableTupleEntity>(e =>
+        {
+            e.ToTable("tuple_nullable_element");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.NullableIntStringTuple).HasColumnName("nullable_tuple").HasColumnType("Tuple(Nullable(Int32), String)");
+        });
+    }
+}
+
+public class NullableMapDbContext : DbContext
+{
+    public DbSet<NullableMapEntity> Entities => Set<NullableMapEntity>();
+    private readonly string _connectionString;
+    public NullableMapDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<NullableMapEntity>(e =>
+        {
+            e.ToTable("map_nullable_value");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.StringNullableIntMap).HasColumnName("nullable_value_map").HasColumnType("Map(String, Nullable(Int32))");
         });
     }
 }
@@ -1555,6 +1679,266 @@ public class ArrayTests
     }
 
     [Fact]
+    public async Task Array_NullableElements_PropagateNullability()
+    {
+        // Array(Nullable(Int32)) — exercises both (a) the Tier 3 translator's nullability
+        // propagation on arrayElement and (b) the type-mapping pipeline's threading of
+        // element nullability through to the array CLR type. ClickHouse-side: arrayElement on
+        // a row whose element is NULL returns NULL (not the element default), and the
+        // SqlExpression's nullable: flag must reflect that so the nullability processor
+        // doesn't fold away outer IS NULL predicates. CLR-side: FindArrayMapping detects the
+        // Nullable(...) wrapping in the element store type and builds the array as int?[]
+        // so EF Core's materializer can assign to the `int?[]` property.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+        await using var conn = (global::ClickHouse.Driver.ADO.ClickHouseConnection)ctx.Database.GetDbConnection();
+        await conn.OpenAsync();
+
+        const string scratchTable = "array_nullable_elements";
+        await using (var create = conn.CreateCommand())
+        {
+            create.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS {scratchTable} (
+                    id Int64,
+                    nullable_int_array Array(Nullable(Int32))
+                ) ENGINE = Memory
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = conn.CreateCommand())
+        {
+            insert.CommandText = $"""
+                INSERT INTO {scratchTable} VALUES
+                (1, [1, NULL, 3]),
+                (2, [NULL, NULL]),
+                (3, [5, 6, 7]),
+                (4, [])
+                """;
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var nullCtx = new NullableElementArrayDbContext(_fixture.ConnectionString);
+
+            // Round-trip entity materialization — int?[] arrays with NULL elements deserialize
+            // correctly. The type-mapping pipeline must thread Nullable(Int32) through to an
+            // int?[] array CLR type so EF Core's materializer accepts the driver's int?[]
+            // without an Int32[] → Nullable<Int32>[] coercion error.
+            var allRows = await nullCtx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+            Assert.Equal(4, allRows.Count);
+            Assert.Equal([1, null, 3], allRows[0].NullableIntArray);
+            Assert.Equal([null, null], allRows[1].NullableIntArray);
+            Assert.Equal([5, 6, 7], allRows[2].NullableIntArray);
+            Assert.Empty(allRows[3].NullableIntArray);
+
+            // SQL-shape: arrayElement must appear, and the nullable propagation must keep
+            // the IS NULL predicate alive. A regression that flips nullable: true → false
+            // on arrayElement would let the nullability processor fold the IS NULL check away
+            // and change the result set returned by the execution assertion below.
+            var nullFirstSql = nullCtx.Entities.Where(e => e.NullableIntArray.FirstOrDefault() == null).ToQueryString();
+            Assert.Contains("arrayElement(", nullFirstSql);
+
+            // First() on each row, projected as a scalar. Row 1 [1, NULL, 3] → 1; row 2
+            // [NULL, NULL] → NULL; row 3 [5, 6, 7] → 5; row 4 [] → NULL (CH OOB → element
+            // default = NULL because the element is Nullable(Int32)).
+            var firsts = await nullCtx.Entities.OrderBy(e => e.Id).Select(e => e.NullableIntArray.FirstOrDefault()).ToListAsync();
+            Assert.Equal([1, null, 5, null], firsts);
+
+            // ElementAt(1) on row 1 ([1, NULL, 3]) returns NULL — the element BETWEEN known
+            // values, not at the edge. Pins that nullability is per-element, not just per-row.
+            var middleElement = await nullCtx.Entities.Where(e => e.Id == 1).Select(e => e.NullableIntArray.ElementAtOrDefault(1)).SingleAsync();
+            Assert.Null(middleElement);
+
+            // Predicate over the nullable element — relies on the IS NULL check NOT being
+            // folded away. Returns row 2 (NULL first) and row 4 (empty → arrayElement → NULL).
+            var nullFirstRows = await nullCtx.Entities
+                .Where(e => e.NullableIntArray.FirstOrDefault() == null)
+                .OrderBy(e => e.Id)
+                .Select(e => e.Id)
+                .ToListAsync();
+            Assert.Equal([2L, 4L], nullFirstRows);
+
+            // Skip + chained scalar access — verifies arraySlice + arrayElement compose for
+            // nullable elements: row 1 [1, NULL, 3] → skip(1) → [NULL, 3] → first → NULL.
+            var skippedFirsts = await nullCtx.Entities.OrderBy(e => e.Id).Select(e => e.NullableIntArray.Skip(1).FirstOrDefault()).ToListAsync();
+            Assert.Equal([null, null, 6, null], skippedFirsts);
+        }
+        finally
+        {
+            await using var teardown = conn.CreateCommand();
+            teardown.CommandText = $"DROP TABLE IF EXISTS {scratchTable}";
+            await teardown.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Array_WrapperMatrix_RoundTripsAndQueries()
+    {
+        // Covers the Array(...) wrapper matrix that's resolvable in the type-mapping source
+        // but wasn't exercised end-to-end before today: LowCardinality(String), LowCardinality(
+        // Nullable(String)), and Nullable(String). All three have a `string[]` runtime CLR
+        // type (the `?` on string is a C# nullable-reference annotation the runtime doesn't
+        // see), so the test verifies entity round-trip, NULL element preservation, and basic
+        // Tier 3 query operations on each column.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+        await using var conn = (global::ClickHouse.Driver.ADO.ClickHouseConnection)ctx.Database.GetDbConnection();
+        await conn.OpenAsync();
+
+        const string scratchTable = "array_wrapper_matrix";
+        await using (var create = conn.CreateCommand())
+        {
+            create.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS {scratchTable} (
+                    id Int64,
+                    lowcard_array Array(LowCardinality(String)),
+                    lowcard_nullable_array Array(LowCardinality(Nullable(String))),
+                    nullable_array Array(Nullable(String))
+                ) ENGINE = Memory
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = conn.CreateCommand())
+        {
+            insert.CommandText = $"""
+                INSERT INTO {scratchTable} VALUES
+                (1, ['a','b','c'], ['x', NULL, 'y'], ['p', NULL, 'q']),
+                (2, [], [], []),
+                (3, ['hello','world'], [NULL, NULL], [NULL])
+                """;
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var matrixCtx = new LowCardinalityArrayDbContext(_fixture.ConnectionString);
+            var rows = await matrixCtx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+            Assert.Equal(3, rows.Count);
+
+            // LowCardinality(String) — non-nullable elements; LowCardinality is purely a
+            // storage encoding so the CLR shape is identical to plain Array(String).
+            Assert.Equal(["a", "b", "c"], rows[0].LowCardArray);
+            Assert.Empty(rows[1].LowCardArray);
+            Assert.Equal(["hello", "world"], rows[2].LowCardArray);
+
+            // LowCardinality(Nullable(String)) — nullable elements still survive the
+            // round-trip; NULL strings appear as null entries in the array. The CLR runtime
+            // type is the same string[], but the values are sparse. Element-by-element via
+            // Assert.Collection avoids xUnit's `T : IEquatable<T>` NRT constraint on
+            // `Assert.Equal` with reference-nullable arrays.
+            AssertSequenceEqual(["x", null, "y"], rows[0].LowCardNullableArray);
+            Assert.Empty(rows[1].LowCardNullableArray);
+            AssertSequenceEqual([null, null], rows[2].LowCardNullableArray);
+
+            // Nullable(String) without LowCardinality.
+            AssertSequenceEqual(["p", null, "q"], rows[0].NullableArray);
+            Assert.Empty(rows[1].NullableArray);
+            AssertSequenceEqual([null], rows[2].NullableArray);
+
+            static void AssertSequenceEqual(string?[] expected, string?[] actual)
+            {
+                Assert.Equal(expected.Length, actual.Length);
+                for (var i = 0; i < expected.Length; i++)
+                    Assert.Equal(expected[i], actual[i]);
+            }
+
+            // Query translation: Contains on LowCardinality(String) — should emit has(),
+            // not a fallback subquery. The translator gates on ClickHouseArrayTypeMapping
+            // regardless of wrapper, so a regression that loses the mapping when the
+            // wrapper is present would surface here.
+            var containsSql = matrixCtx.Entities.Where(e => e.LowCardArray.Contains("a")).ToQueryString();
+            Assert.Contains("has(", containsSql);
+            var containsResults = await matrixCtx.Entities.Where(e => e.LowCardArray.Contains("a")).OrderBy(e => e.Id).ToListAsync();
+            Assert.Single(containsResults);
+            Assert.Equal(1, containsResults[0].Id);
+
+            // First() on LowCardinality(Nullable(String)) at a row that starts with NULL —
+            // pin that the nullability flag is set so the projection materializes a string?
+            // and yields null. Row 3's lowcard_nullable_array starts with NULL.
+            var firstOnNullStart = await matrixCtx.Entities.Where(e => e.Id == 3)
+                .Select(e => e.LowCardNullableArray.FirstOrDefault())
+                .SingleAsync();
+            Assert.Null(firstOnNullStart);
+
+            // Where(...First() == null) — the nullability processor must NOT fold the IS
+            // NULL away. Both row 2 (empty → element default → NULL because element is
+            // Nullable) and row 3 (NULL first) should match.
+            var nullFirstIds = await matrixCtx.Entities
+                .Where(e => e.NullableArray.FirstOrDefault() == null)
+                .OrderBy(e => e.Id)
+                .Select(e => e.Id)
+                .ToListAsync();
+            Assert.Equal([2L, 3L], nullFirstIds);
+
+            // Length / Count on each wrapper — exercises IMemberTranslator + the visitor's
+            // generic Count() dispatch over wrapped element types.
+            var lowCardLengths = await matrixCtx.Entities.OrderBy(e => e.Id).Select(e => e.LowCardArray.Length).ToListAsync();
+            Assert.Equal([3, 0, 2], lowCardLengths);
+        }
+        finally
+        {
+            await using var teardown = conn.CreateCommand();
+            teardown.CommandText = $"DROP TABLE IF EXISTS {scratchTable}";
+            await teardown.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Array_NullableElements_ListPath_RoundTripsAndQueries()
+    {
+        // List<int?> mapped to Array(Nullable(Int32)) — exercises the ListToArrayConverter<T>
+        // path for nullable elements. The converter's job is to convert between List<int?>
+        // (model side) and int?[] (provider side); a regression that built the converter
+        // against List<int> would surface here at materialization or query-parameter time.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+        await using var conn = (global::ClickHouse.Driver.ADO.ClickHouseConnection)ctx.Database.GetDbConnection();
+        await conn.OpenAsync();
+
+        const string scratchTable = "array_nullable_list";
+        await using (var create = conn.CreateCommand())
+        {
+            create.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS {scratchTable} (
+                    id Int64,
+                    nullable_int_list Array(Nullable(Int32))
+                ) ENGINE = Memory
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = conn.CreateCommand())
+        {
+            insert.CommandText = $"INSERT INTO {scratchTable} VALUES (1, [10, NULL, 30]), (2, []), (3, [NULL])";
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var listCtx = new NullableListArrayDbContext(_fixture.ConnectionString);
+            var rows = await listCtx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(new List<int?> { 10, null, 30 }, rows[0].NullableIntList);
+            Assert.Empty(rows[1].NullableIntList);
+            Assert.Equal(new List<int?> { null }, rows[2].NullableIntList);
+
+            // Query operations on a nullable-element List<T?> — same translator path as the
+            // array case, gated on the type mapping not the CLR collection shape.
+            var firsts = await listCtx.Entities.OrderBy(e => e.Id).Select(e => e.NullableIntList.FirstOrDefault()).ToListAsync();
+            Assert.Equal([10, null, null], firsts);
+
+            var countWhereFirstNull = await listCtx.Entities
+                .Where(e => e.NullableIntList.FirstOrDefault() == null)
+                .CountAsync();
+            Assert.Equal(2, countWhereFirstNull);  // Row 2 (empty → default NULL), row 3 (NULL first).
+        }
+        finally
+        {
+            await using var teardown = conn.CreateCommand();
+            teardown.CommandText = $"DROP TABLE IF EXISTS {scratchTable}";
+            await teardown.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
     public async Task Array_OrderBy_TranslatesToArraySort()
     {
         await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
@@ -1927,6 +2311,61 @@ public class MapTests
         Assert.Equal(3, rows[2].StringIntMap.Count);
         Assert.Equal(42, rows[2].StringIntMap["x"]);
     }
+
+    [Fact]
+    public async Task Map_NullableValueElement_RoundTrips()
+    {
+        // Map(String, Nullable(Int32)) → Dictionary<string, int?>. Exercises the generic
+        // ClickHouseNullableElementMapping path through FindMapMapping: the value-side
+        // FindComponentMapping wraps the Int32 mapping so the composite's CLR type composes
+        // correctly. Scratch table (Engine=Memory) keeps the shared seed unpolluted.
+        await using var ctx = new MapDbContext(_fixture.ConnectionString);
+        await using var conn = (global::ClickHouse.Driver.ADO.ClickHouseConnection)ctx.Database.GetDbConnection();
+        await conn.OpenAsync();
+
+        const string scratchTable = "map_nullable_value";
+        await using (var create = conn.CreateCommand())
+        {
+            create.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS {scratchTable} (
+                    id Int64,
+                    nullable_value_map Map(String, Nullable(Int32))
+                ) ENGINE = Memory
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = conn.CreateCommand())
+        {
+            insert.CommandText = """
+                INSERT INTO map_nullable_value VALUES
+                (1, {'a': 1, 'b': NULL, 'c': 3}),
+                (2, {}),
+                (3, {'only': NULL})
+                """;
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var nullableMapCtx = new NullableMapDbContext(_fixture.ConnectionString);
+            var rows = await nullableMapCtx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(3, rows[0].StringNullableIntMap.Count);
+            Assert.Equal(1, rows[0].StringNullableIntMap["a"]);
+            Assert.Null(rows[0].StringNullableIntMap["b"]);
+            Assert.Equal(3, rows[0].StringNullableIntMap["c"]);
+            Assert.Empty(rows[1].StringNullableIntMap);
+            Assert.Single(rows[2].StringNullableIntMap);
+            Assert.Null(rows[2].StringNullableIntMap["only"]);
+        }
+        finally
+        {
+            await using var teardown = conn.CreateCommand();
+            teardown.CommandText = $"DROP TABLE IF EXISTS {scratchTable}";
+            await teardown.ExecuteNonQueryAsync();
+        }
+    }
 }
 
 [Collection("ExtendedTypes")]
@@ -1946,6 +2385,57 @@ public class TupleTests
         Assert.Equal((42, "hello"), rows[0].IntStringTuple);
         Assert.Equal((0, ""), rows[1].IntStringTuple);
         Assert.Equal((-1, "world"), rows[2].IntStringTuple);
+    }
+
+    [Fact]
+    public async Task Tuple_NullableElement_RoundTrips()
+    {
+        // Tuple(Nullable(Int32), String) → (int?, string). The generic
+        // ClickHouseNullableElementMapping path threads Nullable<Int32> as the first
+        // element's CLR type so MakeTupleType yields (int?, string) and the driver's
+        // ValueTuple<int?, string> materializes without coercion.
+        await using var ctx = new TupleDbContext(_fixture.ConnectionString);
+        await using var conn = (global::ClickHouse.Driver.ADO.ClickHouseConnection)ctx.Database.GetDbConnection();
+        await conn.OpenAsync();
+
+        const string scratchTable = "tuple_nullable_element";
+        await using (var create = conn.CreateCommand())
+        {
+            create.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS {scratchTable} (
+                    id Int64,
+                    nullable_tuple Tuple(Nullable(Int32), String)
+                ) ENGINE = Memory
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = conn.CreateCommand())
+        {
+            insert.CommandText = $"""
+                INSERT INTO {scratchTable} VALUES
+                (1, (42, 'hello')),
+                (2, (NULL, 'world')),
+                (3, (-1, ''))
+                """;
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var nullableTupleCtx = new NullableTupleDbContext(_fixture.ConnectionString);
+            var rows = await nullableTupleCtx.Entities.OrderBy(e => e.Id).AsNoTracking().ToListAsync();
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(((int?)42, "hello"), rows[0].NullableIntStringTuple);
+            Assert.Equal(((int?)null, "world"), rows[1].NullableIntStringTuple);
+            Assert.Equal(((int?)-1, ""), rows[2].NullableIntStringTuple);
+        }
+        finally
+        {
+            await using var teardown = conn.CreateCommand();
+            teardown.CommandText = $"DROP TABLE IF EXISTS {scratchTable}";
+            await teardown.ExecuteNonQueryAsync();
+        }
     }
 }
 
