@@ -1713,6 +1713,39 @@ public class TypeMappingSourceStoreTypeTests
         Assert.Equal(storeType, mapping.StoreType);
     }
 
+    // Matrix coverage for store types whose canonical mapping diverges from the
+    // user's HasColumnType text. Each case below was either silently lossy before
+    // PR #25 (aliased to a generic fallback) or canonicalized to a different
+    // string by the underlying mapping. The PreserveExplicitStoreType pathway
+    // should restore the user's verbatim text in every case.
+    [Theory]
+    // Aliased scalars — mapping.StoreType used to come from the aliased target,
+    // not the alias key. E.g. BFloat16 → Float32Mapping (StoreType "Float32"),
+    // Date32 → DateOnlyMapping (StoreType "Date").
+    [InlineData(typeof(float), "BFloat16")]
+    [InlineData(typeof(DateOnly), "Date32")]
+    // Enum16 is the Enum8 sibling — same StringMapping fallback, same fix.
+    [InlineData(typeof(string), "Enum16('x'=100,'y'=200)")]
+    // Decimal32/64/256 canonicalize to "Decimal(P,S)" via ClickHouseDecimalTypeMapping.
+    [InlineData(typeof(decimal), "Decimal32(4)")]
+    [InlineData(typeof(decimal), "Decimal64(8)")]
+    [InlineData(typeof(ClickHouseDecimal), "Decimal256(38)")]
+    [InlineData(typeof(decimal), "Decimal(18, 4)")]
+    // Time64(N) — verify the parameter survives the parse round-trip.
+    [InlineData(typeof(TimeSpan), "Time64(6)")]
+    // FixedString(N) — parameter-bearing scalar.
+    [InlineData(typeof(string), "FixedString(16)")]
+    // DateTime / DateTime64 with timezones — the user's timezone string must survive.
+    [InlineData(typeof(DateTime), "DateTime('UTC')")]
+    [InlineData(typeof(DateTime), "DateTime64(6, 'Europe/Berlin')")]
+    public void FindMapping_CanonicallyDivergentStoreType_PreservesVerbatim(Type clrType, string storeType)
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(clrType, storeType);
+        Assert.NotNull(mapping);
+        Assert.Equal(storeType, mapping.StoreType);
+    }
+
     [Fact]
     public void FindMapping_ClrEnum_WithExplicitEnumStoreType_Preserved()
     {

@@ -20,6 +20,12 @@ public class JsonStringEntity
     public string? Data { get; set; }
 }
 
+public class JsonHintedEntity
+{
+    public long Id { get; set; }
+    public JsonNode? Data { get; set; }
+}
+
 #endregion
 
 #region DbContexts
@@ -56,6 +62,27 @@ public class JsonStringDbContext : DbContext
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id");
             e.Property(x => x.Data).HasColumnName("data").HasColumnType("Json");
+        });
+    }
+}
+
+public class JsonHintedDbContext : DbContext
+{
+    public DbSet<JsonHintedEntity> Entities => Set<JsonHintedEntity>();
+    private readonly string _connectionString;
+    public JsonHintedDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<JsonHintedEntity>(e =>
+        {
+            e.ToTable("json_hinted_test");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            // The PR-25 behavior change: HasColumnType text flows through verbatim
+            // to both DDL and to the SQL parameter type ({p:Json(name String, age Int32)}).
+            e.Property(x => x.Data).HasColumnName("data")
+                .HasColumnType("Json(name String, age Int32)");
         });
     }
 }
@@ -117,6 +144,20 @@ public class JsonTypesFixture : IAsyncLifetime
                 CREATE TABLE json_insert_test (
                     id Int64,
                     data Json
+                ) ENGINE = MergeTree() ORDER BY id
+                SETTINGS allow_experimental_json_type = 1
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // Table for Json-with-type-hints round-trip. The hint syntax exists
+        // so the server can pre-allocate typed sub-columns for known paths.
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE json_hinted_test (
+                    id Int64,
+                    data Json(name String, age Int32)
                 ) ENGINE = MergeTree() ORDER BY id
                 SETTINGS allow_experimental_json_type = 1
                 """;
@@ -253,6 +294,65 @@ public class JsonInsertTests
 
         // ClickHouse JSON type returns empty object '{}' for NULL, not SQL NULL
         Assert.NotNull(result.Data);
+    }
+}
+
+[Collection("JsonTypes")]
+public class JsonHintedRoundTripTests
+{
+    private readonly JsonTypesFixture _fixture;
+    public JsonHintedRoundTripTests(JsonTypesFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task Insert_JsonWithTypeHints_RoundTrip()
+    {
+        // Validates that PR #25's "preserve verbatim HasColumnType" behavior is safe
+        // end-to-end for parameterized Json columns: the SQL parameter type becomes
+        // {p:Json(name String, age Int32)}, which the driver parses via JsonType.Parse.
+        await using var ctx = new JsonHintedDbContext(_fixture.ConnectionString);
+
+        var entity = new JsonHintedEntity
+        {
+            Id = 200,
+            Data = JsonNode.Parse("""{"name":"Alice","age":30,"extra":"untyped"}""")
+        };
+
+        ctx.Entities.Add(entity);
+        await ctx.SaveChangesAsync();
+
+        await using var readCtx = new JsonHintedDbContext(_fixture.ConnectionString);
+        var result = await readCtx.Entities
+            .Where(e => e.Id == 200)
+            .AsNoTracking().SingleAsync();
+
+        Assert.NotNull(result.Data);
+        Assert.Equal("Alice", result.Data!["name"]?.GetValue<string>());
+        // Hinted Int32 path materializes as Int32; un-hinted paths still flow as Int64
+        // through the dynamic JSON sub-columns, but JsonNode coerces either way.
+        Assert.Equal(30, result.Data!["age"]?.GetValue<int>());
+        Assert.Equal("untyped", result.Data!["extra"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CreateTable_JsonWithTypeHints_PreservesDDL()
+    {
+        // Independent confirmation that the server-side column type matches the
+        // user's HasColumnType text once the row has been written through EF Core.
+        await using var ctx = new JsonHintedDbContext(_fixture.ConnectionString);
+        ctx.Entities.Add(new JsonHintedEntity { Id = 201, Data = JsonNode.Parse("""{"name":"x"}""") });
+        await ctx.SaveChangesAsync();
+
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT type FROM system.columns WHERE table = 'json_hinted_test' AND name = 'data'";
+        var actualType = (string?)await cmd.ExecuteScalarAsync();
+        Assert.NotNull(actualType);
+        // ClickHouse uppercases the base name and reorders hint fields alphabetically
+        // when reporting in system.columns. The hints themselves survive.
+        Assert.Contains("JSON", actualType, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("name String", actualType);
+        Assert.Contains("age Int32", actualType);
     }
 }
 
