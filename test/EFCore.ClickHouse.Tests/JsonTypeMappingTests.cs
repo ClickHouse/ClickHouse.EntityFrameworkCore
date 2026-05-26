@@ -353,12 +353,17 @@ public class JsonTypeMappingUnitTests
     }
 
     [Fact]
-    public void FindMapping_JsonWithTypeHints_Resolves()
+    public void FindMapping_JsonWithTypeHints_PreservesHints()
     {
+        // Explicit HasColumnType text flows through verbatim so DDL and the SQL
+        // parameter type both see the hints. The driver's JsonType.Parse accepts
+        // the hint syntax in parameter type strings; runtime materialization is
+        // unchanged because the mapping is still a JsonNode-typed mapping.
         var source = GetTypeMappingSource();
-        var mapping = source.FindMapping(typeof(object), "Json(name String, age Int32)");
+        var storeType = "Json(name String, age Int32)";
+        var mapping = source.FindMapping(typeof(object), storeType);
         Assert.NotNull(mapping);
-        Assert.Equal("Json", mapping.StoreType);
+        Assert.Equal(storeType, mapping.StoreType);
     }
 
     [Fact]

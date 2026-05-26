@@ -1679,10 +1679,9 @@ public class DynamicTests
 public class TypeMappingSourceStoreTypeTests
 {
     /// <summary>
-    /// Verifies that Nullable(...) and LowCardinality(...) wrappers in the user's
-    /// configured store type are preserved on the resolved mapping's StoreType.
-    /// The internal resolver unwraps these wrappers to find the inner CLR mapping,
-    /// then re-wraps so migration DDL and SQL parameter types see the full form.
+    /// Verifies that explicit HasColumnType(...) text is preserved on the resolved
+    /// mapping's StoreType, even when the resolver normalizes/parses to discover
+    /// CLR semantics.
     /// </summary>
     [Theory]
     [InlineData("Nullable(Int32)")]
@@ -1690,12 +1689,40 @@ public class TypeMappingSourceStoreTypeTests
     [InlineData("LowCardinality(String)")]
     [InlineData("LowCardinality(Nullable(String))")]
     [InlineData("Nullable(Float64)")]
-    public void FindMapping_PreservesWrapperTypes(string storeType)
+    [InlineData("Enum8('a'=1,'b'=2)")]
+    [InlineData("Dynamic(max_types=16)")]
+    [InlineData("Json(max_dynamic_paths=256, max_dynamic_types=8, a.b UInt32, SKIP a.e)")]
+    [InlineData("Decimal128(18)")]
+    public void FindMapping_PreservesExplicitStoreType(string storeType)
     {
         var source = GetTypeMappingSource();
         var mapping = source.FindMapping(typeof(object), storeType);
         Assert.NotNull(mapping);
         Assert.Equal(storeType, mapping.StoreType);
+    }
+
+    [Theory]
+    [InlineData("AggregateFunction(uniq, UInt64)")]
+    [InlineData("SimpleAggregateFunction(sum, UInt64)")]
+    [InlineData("Nested(k String, v UInt64)")]
+    public void FindMapping_PreservesUnknownParameterizedStoreType(string storeType)
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(typeof(string), storeType);
+        Assert.NotNull(mapping);
+        Assert.Equal(storeType, mapping.StoreType);
+    }
+
+    [Fact]
+    public void FindMapping_ClrEnum_WithExplicitEnumStoreType_Preserved()
+    {
+        var source = GetTypeMappingSource();
+        var storeType = "Enum8('a'=1,'b'=2,'c'=3)";
+        var mapping = source.FindMapping(typeof(TestEnum8), storeType);
+        Assert.NotNull(mapping);
+        Assert.Equal(typeof(TestEnum8), mapping.ClrType);
+        Assert.Equal(storeType, mapping.StoreType);
+        Assert.NotNull(mapping.Converter);
     }
 
     [Fact]
@@ -1902,7 +1929,7 @@ public class TypeMappingSourceStoreTypeTests
         var mapping = source.FindMapping(typeof(ClickHouseDecimal), "Decimal128(18)");
         Assert.NotNull(mapping);
         Assert.Equal(typeof(ClickHouseDecimal), mapping.ClrType);
-        Assert.Equal("Decimal(38,18)", mapping.StoreType);
+        Assert.Equal("Decimal128(18)", mapping.StoreType);
     }
 
     [Fact]

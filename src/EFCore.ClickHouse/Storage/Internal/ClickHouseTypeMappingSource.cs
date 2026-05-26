@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data;
+using System.Linq;
 using System.Net;
 using System.Numerics;
 using System.Text.Json.Nodes;
@@ -296,20 +297,19 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
            ?? FindExistingMapping(mappingInfo)
            ?? FindDecimalMapping(mappingInfo);
 
-        return mapping is null ? null : PreserveStoreTypeWrappers(mapping, mappingInfo);
+        return mapping is null ? null : PreserveExplicitStoreType(mapping, mappingInfo);
     }
 
-    // ParseStoreTypeName strips LowCardinality(...) and Nullable(...) wrappers so the inner
-    // CLR mapping can be resolved. EF Core's Property.GetColumnType() prefers
-    // RelationalTypeMapping.StoreType over the user's annotation, so without re-wrapping
-    // here the wrapper would be lost from generated migrations DDL and SQL parameter types.
-    private static RelationalTypeMapping PreserveStoreTypeWrappers(
+    // ParseStoreTypeName may normalize or partially unwrap the store type in order to resolve
+    // the underlying CLR mapping. EF Core's Property.GetColumnType() prefers
+    // RelationalTypeMapping.StoreType over the user's annotation, so preserve the explicit
+    // HasColumnType(...) text verbatim on the resolved mapping.
+    private static RelationalTypeMapping PreserveExplicitStoreType(
         RelationalTypeMapping mapping,
         in RelationalTypeMappingInfo mappingInfo)
     {
         var storeTypeName = mappingInfo.StoreTypeName;
         if (string.IsNullOrEmpty(storeTypeName)
-            || !HasWrapper(storeTypeName)
             || string.Equals(storeTypeName, mapping.StoreType, StringComparison.Ordinal))
         {
             return mapping;
@@ -321,13 +321,6 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         // Clone's overload signature takes `in RelationalTypeMappingInfo?`.
         RelationalTypeMappingInfo? cloneInfo = mappingInfo;
         return mapping.Clone(in cloneInfo, storeTypePostfix: StoreTypePostfix.None);
-    }
-
-    private static bool HasWrapper(string storeTypeName)
-    {
-        var s = storeTypeName.AsSpan().TrimStart();
-        return s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase)
-            || s.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsCollectionClrType(Type? clrType)
@@ -777,25 +770,32 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             return null;
 
         var inner = storeTypeName[(openParen + 1)..closeParen];
+        var results = SplitTopLevel(inner);
+
+        if (expectedCount.HasValue && results.Count != expectedCount.Value)
+            return null;
+
+        return results;
+    }
+
+    private static List<string> SplitTopLevel(string input)
+    {
         var results = new List<string>();
         var depth = 0;
         var start = 0;
 
-        for (var i = 0; i < inner.Length; i++)
+        for (var i = 0; i < input.Length; i++)
         {
-            if (inner[i] == '(') depth++;
-            else if (inner[i] == ')') depth--;
-            else if (inner[i] == ',' && depth == 0)
+            if (input[i] == '(') depth++;
+            else if (input[i] == ')') depth--;
+            else if (input[i] == ',' && depth == 0)
             {
-                results.Add(inner[start..i].Trim());
+                results.Add(input[start..i].Trim());
                 start = i + 1;
             }
         }
 
-        results.Add(inner[start..].Trim());
-
-        if (expectedCount.HasValue && results.Count != expectedCount.Value)
-            return null;
+        results.Add(input[start..].Trim());
 
         return results;
     }

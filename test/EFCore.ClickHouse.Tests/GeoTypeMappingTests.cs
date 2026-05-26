@@ -379,28 +379,31 @@ public class GeoTypeMappingSourceTests
     }
 
     [Fact]
-    public void FindMapping_Point_StoreType_ShowsComposedType()
+    public void FindMapping_Point_StoreType_PreservesAlias()
     {
         var source = GetTypeMappingSource();
         var mapping = source.FindMapping(typeof(object), "Point")!;
-        // Store type shows the composed structural type, not the alias
-        Assert.Equal("Tuple(Float64, Float64)", mapping.StoreType);
+        // The driver registers Point as a first-class plain type (PointType :
+        // TupleType), so the alias round-trips through parameter binding and DDL.
+        // Preserve the user's HasColumnType text rather than expanding it to the
+        // structural Tuple(Float64, Float64) form.
+        Assert.Equal("Point", mapping.StoreType);
     }
 
     [Fact]
-    public void FindMapping_Ring_StoreType_ShowsComposedType()
+    public void FindMapping_Ring_StoreType_PreservesAlias()
     {
         var source = GetTypeMappingSource();
         var mapping = source.FindMapping(typeof(object), "Ring")!;
-        Assert.Equal("Array(Tuple(Float64, Float64))", mapping.StoreType);
+        Assert.Equal("Ring", mapping.StoreType);
     }
 
     [Fact]
-    public void FindMapping_Geometry_StoreType_ShowsVariantComposition()
+    public void FindMapping_Geometry_StoreType_PreservesAlias()
     {
         var source = GetTypeMappingSource();
         var mapping = source.FindMapping(typeof(object), "Geometry")!;
-        Assert.Contains("Variant(", mapping.StoreType);
+        Assert.Equal("Geometry", mapping.StoreType);
     }
 
     private static Microsoft.EntityFrameworkCore.Storage.IRelationalTypeMappingSource GetTypeMappingSource()

@@ -13,6 +13,7 @@ v0.3.0 (Unreleased)
 
 ### Bug fixes
 * Preserve `LowCardinality(...)` and `Nullable(...)` wrappers from `HasColumnType(...)` in generated migration DDL. Previously the wrapper was stripped during type-mapping resolution, so the migration emitted the inner type. ([#18](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/18))
+* Preserve explicit `HasColumnType(...)` text whenever the resolved mapping's canonical store type differs from the user's input — fixes `Enum8(...)` and `AggregateFunction(...)` columns silently emitting `String` in generated DDL. Also covers `Enum16`, `SimpleAggregateFunction`, `Nested`, and the parameter-bearing forms (`Decimal128(S)`, `Json(...)` with type hints, etc.). ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24))
 
 v0.2.0
 ---

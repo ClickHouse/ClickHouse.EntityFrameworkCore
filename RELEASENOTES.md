@@ -11,6 +11,9 @@ v0.3.0 (Unreleased)
   * `Any(x => f(x))` / `Count(x => f(x))` / `LongCount(x => f(x))` predicate overloads → `arrayExists(x -> f(x), array)` / `arrayCount(x -> f(x), array)`. The predicate body is translated through the existing scalar translator chain, just like `Select(...).Contains(...)`.
   * `arr.Select(x => f(x)).Contains(value)` → `has(arrayMap(x -> f(x), array), value)`. The inner lambda body is translated through the existing scalar translator chain, so e.g. `x => x.ToLower()` becomes `lowerUTF8(x)` (the shape Gridify's `CaseInsensitiveFiltering` produces for string-array properties).
 
+### Bug fixes
+* `HasColumnType("Enum8(...)")`, `HasColumnType("AggregateFunction(...)")`, and similar parameterized or aliased store types are now preserved verbatim in generated migration DDL. Previously these silently emitted `String` because the resolver canonicalized to a generic fallback mapping. ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24))
+
 v0.2.0
 ---
 ### Table engine and DDL

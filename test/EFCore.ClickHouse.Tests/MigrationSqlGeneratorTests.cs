@@ -923,6 +923,10 @@ public class MigrationSqlGeneratorTests
     public void HasColumnType_Array_LowCardinality_element_preserved_in_CreateTable_DDL()
         => AssertColumnTypePreserved<ArrayLowCardinalityContext>("Array(LowCardinality(String))");
 
+    [Fact]
+    public void HasColumnType_AggregateFunction_preserved_in_CreateTable_DDL()
+        => AssertColumnTypePreserved<AggregateFunctionContext>("AggregateFunction(uniq, UInt64)");
+
     // Nullable CLR property + LowCardinality(...) store type must not auto-wrap to
     // Nullable(LowCardinality(...)) — ClickHouse rejects that wrapper order. The user
     // is responsible for writing LowCardinality(Nullable(...)) when they want both.
@@ -1006,6 +1010,11 @@ public class MigrationSqlGeneratorTests
     private sealed class NullableStringContext : LowCardinalityContextBase
     {
         protected override string ColumnType => "Nullable(String)";
+    }
+
+    private sealed class AggregateFunctionContext : LowCardinalityContextBase
+    {
+        protected override string ColumnType => "AggregateFunction(uniq, UInt64)";
     }
 
     private sealed class NullablePropertyLowCardinalityContext : DbContext
