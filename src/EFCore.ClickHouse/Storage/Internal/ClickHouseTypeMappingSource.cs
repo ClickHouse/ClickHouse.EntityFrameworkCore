@@ -755,7 +755,9 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     }
 
     /// <summary>
-    /// Splits the inner types of a parameterized store type, respecting nested parens.
+    /// Splits the inner types of a parameterized store type, respecting nested parens
+    /// and single-quoted string literals (so commas/parens inside enum value names
+    /// like Enum8(',' = 1, ';' = 2) or 'a)b' do not corrupt the parse).
     /// Example: Map(String, Array(Int32)) → ["String", "Array(Int32)"]
     /// </summary>
     private static List<string>? ExtractInnerTypes(string storeTypeName, string prefix, int? expectedCount = null)
@@ -783,12 +785,30 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         var results = new List<string>();
         var depth = 0;
         var start = 0;
+        var inQuote = false;
 
         for (var i = 0; i < input.Length; i++)
         {
-            if (input[i] == '(') depth++;
-            else if (input[i] == ')') depth--;
-            else if (input[i] == ',' && depth == 0)
+            var c = input[i];
+
+            if (c == '\'')
+            {
+                // ClickHouse uses doubled '' as the in-string apostrophe escape.
+                if (inQuote && i + 1 < input.Length && input[i + 1] == '\'')
+                {
+                    i++;
+                    continue;
+                }
+
+                inQuote = !inQuote;
+                continue;
+            }
+
+            if (inQuote) continue;
+
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+            else if (c == ',' && depth == 0)
             {
                 results.Add(input[start..i].Trim());
                 start = i + 1;
@@ -801,15 +821,33 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     }
 
     /// <summary>
-    /// Finds the matching closing paren for the opening paren at the given index.
+    /// Finds the matching closing paren for the opening paren at the given index,
+    /// ignoring parens that appear inside single-quoted string literals.
     /// </summary>
     private static int FindMatchingCloseParen(string s, int openParenIndex)
     {
         var depth = 0;
+        var inQuote = false;
         for (var i = openParenIndex; i < s.Length; i++)
         {
-            if (s[i] == '(') depth++;
-            else if (s[i] == ')')
+            var c = s[i];
+
+            if (c == '\'')
+            {
+                if (inQuote && i + 1 < s.Length && s[i + 1] == '\'')
+                {
+                    i++;
+                    continue;
+                }
+
+                inQuote = !inQuote;
+                continue;
+            }
+
+            if (inQuote) continue;
+
+            if (c == '(') depth++;
+            else if (c == ')')
             {
                 depth--;
                 if (depth == 0)
