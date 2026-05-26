@@ -53,6 +53,26 @@ public class ClickHouseArrayLinqTranslator
     private static readonly MethodInfo EnumerableLongCountMethod = GetEnumerableMethod(nameof(Enumerable.LongCount));
     private static readonly MethodInfo EnumerableLongCountPredicateMethod = GetEnumerableMethod(nameof(Enumerable.LongCount), parameterCount: 2);
     private static readonly MethodInfo EnumerableAsEnumerableMethod = GetEnumerableMethod(nameof(Enumerable.AsEnumerable));
+    private static readonly MethodInfo EnumerableFirstMethod = GetEnumerableMethod(nameof(Enumerable.First));
+    private static readonly MethodInfo EnumerableFirstOrDefaultMethod = GetEnumerableMethod(nameof(Enumerable.FirstOrDefault));
+    private static readonly MethodInfo EnumerableLastMethod = GetEnumerableMethod(nameof(Enumerable.Last));
+    private static readonly MethodInfo EnumerableLastOrDefaultMethod = GetEnumerableMethod(nameof(Enumerable.LastOrDefault));
+    private static readonly MethodInfo EnumerableElementAtMethod = GetEnumerableElementAtMethod(nameof(Enumerable.ElementAt));
+    private static readonly MethodInfo EnumerableElementAtOrDefaultMethod = GetEnumerableElementAtMethod(nameof(Enumerable.ElementAtOrDefault));
+    private static readonly MethodInfo EnumerableSkipMethod = GetEnumerableMethod(nameof(Enumerable.Skip), parameterCount: 2);
+    private static readonly MethodInfo EnumerableTakeMethod = GetEnumerableTakeIntMethod();
+    private static readonly MethodInfo EnumerableReverseMethod = GetEnumerableReverseMethod(typeof(IEnumerable<>));
+
+    /// <summary>
+    /// .NET 9 added <c>Enumerable.Reverse&lt;T&gt;(T[])</c> alongside the classic
+    /// <c>Enumerable.Reverse&lt;T&gt;(IEnumerable&lt;T&gt;)</c>. C# overload resolution picks
+    /// the array overload for <c>int[]</c>-typed sources, so we register and dispatch on it
+    /// in addition to the IEnumerable form.
+    /// </summary>
+    private static readonly MethodInfo? EnumerableReverseArrayMethod = TryGetEnumerableReverseArrayMethod();
+    private static readonly MethodInfo EnumerableDistinctMethod = GetEnumerableMethod(nameof(Enumerable.Distinct));
+    private static readonly MethodInfo EnumerableOrderByMethod = GetEnumerableMethod(nameof(Enumerable.OrderBy), parameterCount: 2);
+    private static readonly MethodInfo EnumerableOrderByDescendingMethod = GetEnumerableMethod(nameof(Enumerable.OrderByDescending), parameterCount: 2);
 
     private static readonly MethodInfo QueryableContainsMethod = GetQueryableMethod(nameof(Queryable.Contains), parameterCount: 2);
     private static readonly MethodInfo QueryableAnyMethod = GetQueryableMethod(nameof(Queryable.Any));
@@ -62,16 +82,43 @@ public class ClickHouseArrayLinqTranslator
     private static readonly MethodInfo QueryableLongCountMethod = GetQueryableMethod(nameof(Queryable.LongCount));
     private static readonly MethodInfo QueryableLongCountPredicateMethod = GetQueryableMethod(nameof(Queryable.LongCount), parameterCount: 2);
     private static readonly MethodInfo QueryableAsQueryableMethod = GetQueryableMethod(nameof(Queryable.AsQueryable));
+    private static readonly MethodInfo QueryableFirstMethod = GetQueryableMethod(nameof(Queryable.First));
+    private static readonly MethodInfo QueryableFirstOrDefaultMethod = GetQueryableMethod(nameof(Queryable.FirstOrDefault));
+    private static readonly MethodInfo QueryableLastMethod = GetQueryableMethod(nameof(Queryable.Last));
+    private static readonly MethodInfo QueryableLastOrDefaultMethod = GetQueryableMethod(nameof(Queryable.LastOrDefault));
+    private static readonly MethodInfo QueryableElementAtMethod = GetQueryableElementAtMethod(nameof(Queryable.ElementAt));
+    private static readonly MethodInfo QueryableElementAtOrDefaultMethod = GetQueryableElementAtMethod(nameof(Queryable.ElementAtOrDefault));
+    private static readonly MethodInfo QueryableSkipMethod = GetQueryableMethod(nameof(Queryable.Skip), parameterCount: 2);
+    private static readonly MethodInfo QueryableTakeMethod = GetQueryableTakeIntMethod();
+    private static readonly MethodInfo QueryableReverseMethod = GetQueryableMethod(nameof(Queryable.Reverse));
+    private static readonly MethodInfo QueryableDistinctMethod = GetQueryableMethod(nameof(Queryable.Distinct));
+    private static readonly MethodInfo QueryableOrderByMethod = GetQueryableMethod(nameof(Queryable.OrderBy), parameterCount: 2);
+    private static readonly MethodInfo QueryableOrderByDescendingMethod = GetQueryableMethod(nameof(Queryable.OrderByDescending), parameterCount: 2);
 
     /// <summary>
     /// Generic method definitions whose result is an <c>Array(T)</c> SqlExpression with a
     /// <see cref="ClickHouseArrayTypeMapping"/>. Chained patterns whose outer call is one
-    /// of these (e.g. <c>a.Concat(b).Distinct().Contains(x)</c>) pass
-    /// <see cref="LooksLikeArrayColumnAccess"/> as legitimate sources. Empty in PR #15 — to
-    /// be populated when Tier 3+ array-producing translations (<c>arrayConcat</c>,
-    /// <c>arrayDistinct</c>, …) land.
+    /// of these (e.g. <c>arr.Skip(1).Contains(x)</c>) pass
+    /// <see cref="LooksLikeArrayColumnAccess"/> as legitimate sources.
     /// </summary>
-    private static readonly HashSet<MethodInfo> ArrayProducingMethods = [];
+    private static readonly HashSet<MethodInfo> ArrayProducingMethods = BuildArrayProducingMethods();
+
+    private static HashSet<MethodInfo> BuildArrayProducingMethods()
+    {
+        var set = new HashSet<MethodInfo>
+        {
+            EnumerableSkipMethod, QueryableSkipMethod,
+            EnumerableTakeMethod, QueryableTakeMethod,
+            EnumerableReverseMethod, QueryableReverseMethod,
+            EnumerableDistinctMethod, QueryableDistinctMethod,
+            EnumerableOrderByMethod, QueryableOrderByMethod,
+            EnumerableOrderByDescendingMethod, QueryableOrderByDescendingMethod,
+            EnumerableAsEnumerableMethod, QueryableAsQueryableMethod,
+        };
+        if (EnumerableReverseArrayMethod is not null)
+            set.Add(EnumerableReverseArrayMethod);
+        return set;
+    }
 
     private delegate bool DispatchFn(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated);
 
@@ -79,34 +126,76 @@ public class ClickHouseArrayLinqTranslator
     /// Static dispatch table built once for the process. Handlers are static methods that
     /// receive the translator instance via the <see cref="DispatchFn"/> delegate's
     /// <c>self</c> parameter — avoids per-query dictionary construction and delegate
-    /// allocation (EF Core creates a fresh visitor on every query compile).
+    /// allocation (EF Core creates a fresh visitor on every query compile). The conditional
+    /// <see cref="EnumerableReverseArrayMethod"/> entry (.NET 9+) is added via
+    /// <see cref="BuildDispatch"/> below so the table is built in a single pass.
     /// </summary>
-    private static readonly Dictionary<MethodInfo, DispatchFn> Dispatch = new()
+    private static readonly Dictionary<MethodInfo, DispatchFn> Dispatch = BuildDispatch();
+
+    private static Dictionary<MethodInfo, DispatchFn> BuildDispatch()
     {
-        [EnumerableAsEnumerableMethod] = TranslateAsMarker,
-        [QueryableAsQueryableMethod] = TranslateAsMarker,
+        var dispatch = new Dictionary<MethodInfo, DispatchFn>
+        {
+            [EnumerableAsEnumerableMethod] = TranslateAsMarker,
+            [QueryableAsQueryableMethod] = TranslateAsMarker,
 
-        [EnumerableContainsMethod] = TranslateContains,
-        [QueryableContainsMethod] = TranslateContains,
+            [EnumerableContainsMethod] = TranslateContains,
+            [QueryableContainsMethod] = TranslateContains,
 
-        [EnumerableAnyMethod] = TranslateAny,
-        [QueryableAnyMethod] = TranslateAny,
+            [EnumerableAnyMethod] = TranslateAny,
+            [QueryableAnyMethod] = TranslateAny,
 
-        [EnumerableCountMethod] = TranslateCountInt32,
-        [QueryableCountMethod] = TranslateCountInt32,
+            [EnumerableCountMethod] = TranslateCountInt32,
+            [QueryableCountMethod] = TranslateCountInt32,
 
-        [EnumerableLongCountMethod] = TranslateCountInt64,
-        [QueryableLongCountMethod] = TranslateCountInt64,
+            [EnumerableLongCountMethod] = TranslateCountInt64,
+            [QueryableLongCountMethod] = TranslateCountInt64,
 
-        [EnumerableAnyPredicateMethod] = TranslateAnyPredicate,
-        [QueryableAnyPredicateMethod] = TranslateAnyPredicate,
+            [EnumerableAnyPredicateMethod] = TranslateAnyPredicate,
+            [QueryableAnyPredicateMethod] = TranslateAnyPredicate,
 
-        [EnumerableCountPredicateMethod] = TranslateCountPredicateInt32,
-        [QueryableCountPredicateMethod] = TranslateCountPredicateInt32,
+            [EnumerableCountPredicateMethod] = TranslateCountPredicateInt32,
+            [QueryableCountPredicateMethod] = TranslateCountPredicateInt32,
 
-        [EnumerableLongCountPredicateMethod] = TranslateCountPredicateInt64,
-        [QueryableLongCountPredicateMethod] = TranslateCountPredicateInt64,
-    };
+            [EnumerableLongCountPredicateMethod] = TranslateCountPredicateInt64,
+            [QueryableLongCountPredicateMethod] = TranslateCountPredicateInt64,
+
+            [EnumerableFirstMethod] = TranslateFirst,
+            [QueryableFirstMethod] = TranslateFirst,
+            [EnumerableFirstOrDefaultMethod] = TranslateFirst,
+            [QueryableFirstOrDefaultMethod] = TranslateFirst,
+
+            [EnumerableLastMethod] = TranslateLast,
+            [QueryableLastMethod] = TranslateLast,
+            [EnumerableLastOrDefaultMethod] = TranslateLast,
+            [QueryableLastOrDefaultMethod] = TranslateLast,
+
+            [EnumerableElementAtMethod] = TranslateElementAt,
+            [QueryableElementAtMethod] = TranslateElementAt,
+            [EnumerableElementAtOrDefaultMethod] = TranslateElementAt,
+            [QueryableElementAtOrDefaultMethod] = TranslateElementAt,
+
+            [EnumerableSkipMethod] = TranslateSkip,
+            [QueryableSkipMethod] = TranslateSkip,
+
+            [EnumerableTakeMethod] = TranslateTake,
+            [QueryableTakeMethod] = TranslateTake,
+
+            [EnumerableReverseMethod] = TranslateReverse,
+            [QueryableReverseMethod] = TranslateReverse,
+
+            [EnumerableDistinctMethod] = TranslateDistinct,
+            [QueryableDistinctMethod] = TranslateDistinct,
+
+            [EnumerableOrderByMethod] = TranslateOrderBy,
+            [QueryableOrderByMethod] = TranslateOrderBy,
+            [EnumerableOrderByDescendingMethod] = TranslateOrderByDescending,
+            [QueryableOrderByDescendingMethod] = TranslateOrderByDescending,
+        };
+        if (EnumerableReverseArrayMethod is not null)
+            dispatch[EnumerableReverseArrayMethod] = TranslateReverse;
+        return dispatch;
+    }
 
     private readonly ISqlExpressionFactory _sqlExpressionFactory;
     private readonly IRelationalTypeMappingSource _typeMappingSource;
@@ -227,6 +316,96 @@ public class ClickHouseArrayLinqTranslator
     private static bool TranslateCountPredicateInt64(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
         => self.TryTranslateArrayHigherOrderPredicate(call, "arrayCount", typeof(long), out translated);
 
+    /// <summary>
+    /// <c>arr.First()</c> / <c>arr.FirstOrDefault()</c> → <c>arrayElement(arr, 1)</c>.
+    /// Both share an emission because ClickHouse never raises on empty arrays — it returns
+    /// the element type's default. For <c>First()</c> on an empty array this is a documented
+    /// divergence from .NET LINQ (which throws <see cref="InvalidOperationException"/>).
+    /// </summary>
+    private static bool TranslateFirst(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(
+            call,
+            src => self._arrayTranslator.TranslateElementAt(src, self._sqlExpressionFactory.Constant(1)),
+            out translated);
+
+    /// <summary>
+    /// <c>arr.Last()</c> / <c>arr.LastOrDefault()</c> → <c>arrayElement(arr, -1)</c>.
+    /// ClickHouse supports negative indices as offsets from the end of the array; index
+    /// <c>-1</c> is the last element. Empty-array semantics same as <see cref="TranslateFirst"/>.
+    /// </summary>
+    private static bool TranslateLast(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(
+            call,
+            src => self._arrayTranslator.TranslateElementAt(src, self._sqlExpressionFactory.Constant(-1)),
+            out translated);
+
+    /// <summary>
+    /// <c>arr.ElementAt(i)</c> / <c>arr.ElementAtOrDefault(i)</c> → <c>arrayElement(arr, i + 1)</c>.
+    /// ClickHouse indices are 1-based, so the LINQ-side index gets <c>+1</c> applied. Diverges
+    /// from .NET in two documented ways: out-of-range positive indices return the element
+    /// type's default (no exception), and negative LINQ indices map to ClickHouse's from-end
+    /// addressing instead of yielding default.
+    /// </summary>
+    private static bool TranslateElementAt(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCallWithIntArg(
+            call,
+            (src, index) => self._arrayTranslator.TranslateElementAt(src, self.IndexPlusOne(index)),
+            out translated);
+
+    /// <summary>
+    /// <c>arr.Skip(n)</c> → <c>arraySlice(arr, n + 1)</c>. The result is itself a mapped
+    /// array, so chained operations (<c>Skip(n).Contains(x)</c>) light up via
+    /// <see cref="ArrayProducingMethods"/>.
+    /// </summary>
+    private static bool TranslateSkip(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCallWithIntArg(
+            call,
+            (src, count) => self._arrayTranslator.TranslateSlice(src, self.IndexPlusOne(count), length: null),
+            out translated);
+
+    /// <summary>
+    /// Widens an Int32 LINQ-side index to Int64 before adding 1, so the arithmetic doesn't
+    /// wrap on <c>int.MaxValue</c>. ClickHouse parses bare integer literals as the narrowest
+    /// type that fits, so <c>index + 1</c> stays Int32 unless the cast is on the index side;
+    /// without it, <c>ElementAt(int.MaxValue)</c> wraps to a from-end address (returns a real
+    /// element instead of the documented OOB default).
+    /// </summary>
+    private SqlExpression IndexPlusOne(SqlExpression index)
+    {
+        var indexAsLong = _sqlExpressionFactory.Function(
+            "toInt64",
+            [index],
+            nullable: false,
+            argumentsPropagateNullability: [false],
+            typeof(long),
+            _typeMappingSource.FindMapping(typeof(long)));
+        return _sqlExpressionFactory.Add(indexAsLong, _sqlExpressionFactory.Constant(1));
+    }
+
+    /// <summary>
+    /// <c>arr.Take(n)</c> → <c>arraySlice(arr, 1, n)</c>.
+    /// </summary>
+    private static bool TranslateTake(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCallWithIntArg(
+            call,
+            (src, count) => self._arrayTranslator.TranslateSlice(
+                src,
+                self._sqlExpressionFactory.Constant(1),
+                count),
+            out translated);
+
+    private static bool TranslateReverse(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(call, self._arrayTranslator.TranslateReverse, out translated);
+
+    private static bool TranslateDistinct(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateUnaryArrayCall(call, self._arrayTranslator.TranslateDistinct, out translated);
+
+    private static bool TranslateOrderBy(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateArrayOrderBy(call, ascending: true, out translated);
+
+    private static bool TranslateOrderByDescending(ClickHouseArrayLinqTranslator self, MethodCallExpression call, out SqlExpression translated)
+        => self.TryTranslateArrayOrderBy(call, ascending: false, out translated);
+
     // ─── Shared dispatch helpers ──────────────────────────────────────────
 
     /// <summary>
@@ -250,6 +429,75 @@ public class ClickHouseArrayLinqTranslator
         translated = build(arraySql);
         return true;
     }
+
+    /// <summary>
+    /// Two-argument shape: the source array followed by an integer argument (index/count).
+    /// Visits both, then hands off to the builder. The integer argument flows through the
+    /// standard scalar translator chain so parameter and constant literals materialize via
+    /// their normal Int32 mapping.
+    /// </summary>
+    private bool TryTranslateUnaryArrayCallWithIntArg(
+        MethodCallExpression call,
+        Func<SqlExpression, SqlExpression, SqlExpression> build,
+        out SqlExpression translated)
+    {
+        translated = null!;
+        if (GetArraySourceCandidate(call) is not { } sourceExpr
+            || !LooksLikeArrayColumnAccess(sourceExpr)
+            || _visit(sourceExpr) is not SqlExpression arraySql
+            || !ClickHouseArrayMethodTranslator.IsClickHouseArray(arraySql)
+            || _visit(call.Arguments[1]) is not SqlExpression intArgSql)
+        {
+            return false;
+        }
+
+        translated = build(arraySql, intArgSql);
+        return true;
+    }
+
+    private bool TryTranslateArrayOrderBy(
+        MethodCallExpression methodCallExpression,
+        bool ascending,
+        out SqlExpression translated)
+    {
+        translated = null!;
+        if (GetArraySourceCandidate(methodCallExpression) is not { } sourceExpr
+            || !LooksLikeArrayColumnAccess(sourceExpr)
+            || _visit(sourceExpr) is not SqlExpression arraySql
+            || arraySql.TypeMapping is not ClickHouseArrayTypeMapping arrayMapping)
+        {
+            return false;
+        }
+
+        var lambda = UnwrapLambda(methodCallExpression.Arguments[1]);
+        if (lambda is null || lambda.Parameters.Count != 1)
+            return false;
+
+        // Identity lambda (x => x) translates to the no-lambda form arraySort(arr) /
+        // arrayReverseSort(arr). ClickHouse's no-lambda form sorts by the elements
+        // themselves, which is what `OrderBy(x => x)` requests — and emitting it without a
+        // synthetic lambda keeps the SQL compact and avoids forcing a type mapping on the
+        // body when the identity translator would otherwise need one.
+        if (IsIdentityLambda(lambda))
+        {
+            translated = ascending
+                ? _arrayTranslator.TranslateSort(arraySql, keyLambda: null)
+                : _arrayTranslator.TranslateReverseSort(arraySql, keyLambda: null);
+            return true;
+        }
+
+        var arrayLambda = TranslateArrayLambda(lambda, arrayMapping.ElementMapping);
+        if (arrayLambda is null)
+            return false;
+
+        translated = ascending
+            ? _arrayTranslator.TranslateSort(arraySql, arrayLambda)
+            : _arrayTranslator.TranslateReverseSort(arraySql, arrayLambda);
+        return true;
+    }
+
+    private static bool IsIdentityLambda(LambdaExpression lambda)
+        => lambda.Body is ParameterExpression p && p == lambda.Parameters[0];
 
     private bool TryTranslateArrayHigherOrderPredicate(
         MethodCallExpression methodCallExpression,
@@ -365,12 +613,11 @@ public class ClickHouseArrayLinqTranslator
 
     /// <summary>
     /// Returns the LINQ expression that represents the array source for
-    /// <paramref name="call"/>, or <c>null</c> if the call shape doesn't expose one.
-    /// Static <c>Enumerable</c>/<c>Queryable</c> extensions carry the source as
-    /// <c>Arguments[0]</c>; instance methods (today out of scope for this translator, but
-    /// planned for Tier 3 — indexer, <c>IndexOf</c>) would carry it as <c>Object</c>.
-    /// Precedence is <c>Object</c>-first to make instance dispatch correct as soon as it
-    /// becomes reachable — invariant: a given method call cannot meaningfully expose both
+    /// <paramref name="call"/>, or <c>null</c> if the call shape doesn't expose one. Static
+    /// <c>Enumerable</c>/<c>Queryable</c> extensions carry the source as <c>Arguments[0]</c>;
+    /// instance methods (e.g. a future <c>List&lt;T&gt;.IndexOf</c> translation) would carry
+    /// it as <c>Object</c>. <c>Object</c>-first precedence keeps instance dispatch correct
+    /// once registered — invariant: a given method call cannot meaningfully expose both
     /// (instance methods have null arguments[0] for the receiver, statics have null Object).
     /// </summary>
     private static Expression? GetArraySourceCandidate(MethodCallExpression call)
@@ -451,6 +698,53 @@ public class ClickHouseArrayLinqTranslator
     private static MethodInfo GetQueryableMethod(string name, int parameterCount = 1)
         => typeof(Queryable).GetRuntimeMethods()
             .Single(m => m.Name == name && m.IsGenericMethod && m.GetParameters().Length == parameterCount);
+
+    /// <summary>
+    /// <c>Enumerable.ElementAt</c> / <c>ElementAtOrDefault</c> ship two overloads — one
+    /// taking <c>int</c> and one taking <see cref="Index"/>. We only translate the <c>int</c>
+    /// form; the <see cref="Index"/> form falls through to base translation.
+    /// </summary>
+    private static MethodInfo GetEnumerableElementAtMethod(string name)
+        => typeof(Enumerable).GetRuntimeMethods()
+            .Single(m => m.Name == name && m.IsGenericMethod
+                && m.GetParameters() is { Length: 2 } ps && ps[1].ParameterType == typeof(int));
+
+    private static MethodInfo GetQueryableElementAtMethod(string name)
+        => typeof(Queryable).GetRuntimeMethods()
+            .Single(m => m.Name == name && m.IsGenericMethod
+                && m.GetParameters() is { Length: 2 } ps && ps[1].ParameterType == typeof(int));
+
+    /// <summary>
+    /// <c>Enumerable.Take</c> ships an <c>int</c> overload and (since .NET 6) a
+    /// <see cref="Range"/> overload. Match only the <c>int</c> form.
+    /// </summary>
+    private static MethodInfo GetEnumerableTakeIntMethod()
+        => typeof(Enumerable).GetRuntimeMethods()
+            .Single(m => m.Name == nameof(Enumerable.Take) && m.IsGenericMethod
+                && m.GetParameters() is { Length: 2 } ps && ps[1].ParameterType == typeof(int));
+
+    private static MethodInfo GetQueryableTakeIntMethod()
+        => typeof(Queryable).GetRuntimeMethods()
+            .Single(m => m.Name == nameof(Queryable.Take) && m.IsGenericMethod
+                && m.GetParameters() is { Length: 2 } ps && ps[1].ParameterType == typeof(int));
+
+    /// <summary>
+    /// Picks <c>Enumerable.Reverse&lt;T&gt;</c> by source parameter shape — either
+    /// <c>IEnumerable&lt;T&gt;</c> (classic) or <c>T[]</c> (.NET 9+). C# picks whichever
+    /// matches at the call site, so dispatch must match the actually-bound MethodInfo.
+    /// </summary>
+    private static MethodInfo GetEnumerableReverseMethod(Type sourceDefinition)
+        => typeof(Enumerable).GetRuntimeMethods()
+            .Single(m => m.Name == nameof(Enumerable.Reverse) && m.IsGenericMethod
+                && m.GetParameters() is { Length: 1 } ps
+                && (sourceDefinition == typeof(IEnumerable<>)
+                    ? ps[0].ParameterType.IsGenericType && ps[0].ParameterType.GetGenericTypeDefinition() == typeof(IEnumerable<>)
+                    : ps[0].ParameterType.IsArray));
+
+    private static MethodInfo? TryGetEnumerableReverseArrayMethod()
+        => typeof(Enumerable).GetRuntimeMethods()
+            .SingleOrDefault(m => m.Name == nameof(Enumerable.Reverse) && m.IsGenericMethod
+                && m.GetParameters() is { Length: 1 } ps && ps[0].ParameterType.IsArray);
 
     private sealed class ParameterReplacingVisitor : ExpressionVisitor
     {

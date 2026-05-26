@@ -271,6 +271,25 @@ public class ListArrayDbContext : DbContext
     }
 }
 
+public class ArrayDistinctScratchDbContext : DbContext
+{
+    public DbSet<ArrayEntity> Entities => Set<ArrayEntity>();
+    private readonly string _connectionString;
+    public ArrayDistinctScratchDbContext(string cs) => _connectionString = cs;
+    protected override void OnConfiguring(DbContextOptionsBuilder o) => o.UseClickHouse(_connectionString);
+    protected override void OnModelCreating(ModelBuilder m)
+    {
+        m.Entity<ArrayEntity>(e =>
+        {
+            e.ToTable("array_distinct_scratch");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.IntArray).HasColumnName("int_array").HasColumnType("Array(Int32)");
+            e.Property(x => x.StringArray).HasColumnName("string_array").HasColumnType("Array(String)");
+        });
+    }
+}
+
 public class MapDbContext : DbContext
 {
     public DbSet<MapEntity> Entities => Set<MapEntity>();
@@ -1210,6 +1229,365 @@ public class ArrayTests
     }
 
     [Fact]
+    public async Task Array_FirstLast_TranslateToArrayElement()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // First / FirstOrDefault → arrayElement(arr, 1); Last / LastOrDefault → arrayElement(arr, -1).
+        // Asserted via projection so the runtime element value is also covered, not just SQL shape.
+        var firstSql = ctx.Entities.Select(e => e.IntArray.First()).ToQueryString();
+        Assert.Contains("arrayElement(", firstSql);
+
+        var firstValues = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.IntArray.First()).ToListAsync();
+        Assert.Equal([1, 0, 42], firstValues);  // Row 2 [] → ClickHouse default (0), not exception.
+
+        var firstOrDefaultValues = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.IntArray.FirstOrDefault()).ToListAsync();
+        Assert.Equal([1, 0, 42], firstOrDefaultValues);
+
+        var lastValues = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.IntArray.Last()).ToListAsync();
+        Assert.Equal([3, 0, 100], lastValues);
+
+        var lastOrDefaultValues = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.IntArray.LastOrDefault()).ToListAsync();
+        Assert.Equal([3, 0, 100], lastOrDefaultValues);
+
+        // Filter shape: First() comparable in Where, runs through SqlTranslatingExpressionVisitor.
+        var firstGtZero = await ctx.Entities.Where(e => e.IntArray.First() > 0).OrderBy(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], firstGtZero.Select(r => r.Id));
+    }
+
+    [Fact]
+    public async Task Array_ElementAt_TranslatesToArrayElement()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // ElementAt(i) → arrayElement(arr, i + 1). The 0→1 offset is applied at translation
+        // time, so LINQ-side 0-based ElementAt(0) maps to ClickHouse 1-based arrayElement(arr, 1).
+        var elementAtSql = ctx.Entities.Select(e => e.IntArray.ElementAt(1)).ToQueryString();
+        Assert.Contains("arrayElement(", elementAtSql);
+
+        var secondValues = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.IntArray.ElementAtOrDefault(1)).ToListAsync();
+        Assert.Equal([2, 0, -1], secondValues);  // Row 1 [1,2,3][1]=2, row 2 []→default, row 3 [42,-1,0,100][1]=-1.
+
+        // Parameter-bound index — round trips through the standard scalar translator chain.
+        var idx = 0;
+        var firstValueViaParam = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.StringArray.ElementAtOrDefault(idx)).ToListAsync();
+        Assert.Equal(["a", "", "hello"], firstValueViaParam);
+    }
+
+    [Fact]
+    public async Task Array_ElementAt_DocumentedDivergencesFromNet()
+    {
+        // ClickHouse intentionally diverges from .NET LINQ on element-access edge cases —
+        // empty arrays return the element default rather than raising, and negative indices
+        // are from-the-end addressing rather than yielding default. Pin this behavior with
+        // explicit assertions so a future "fix" (e.g. emitting a length guard) is caught.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // First() / Last() on row 2 (empty) → 0, not InvalidOperationException.
+        var firstOnEmpty = await ctx.Entities.Where(e => e.Id == 2).Select(e => e.IntArray.First()).SingleAsync();
+        Assert.Equal(0, firstOnEmpty);
+        var lastOnEmpty = await ctx.Entities.Where(e => e.Id == 2).Select(e => e.IntArray.Last()).SingleAsync();
+        Assert.Equal(0, lastOnEmpty);
+        var firstOnEmptyString = await ctx.Entities.Where(e => e.Id == 2).Select(e => e.StringArray.First()).SingleAsync();
+        Assert.Equal(string.Empty, firstOnEmptyString);
+
+        // ElementAt out-of-bounds positive (i + 1 > length) → 0, not ArgumentOutOfRangeException.
+        var oobPositive = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.ElementAt(99)).SingleAsync();
+        Assert.Equal(0, oobPositive);
+
+        // ElementAt(-1) → arrayElement(arr, 0) in ClickHouse → 0 (since index 0 is OOB in
+        // ClickHouse's 1-based scheme). The deliberate divergence: .NET would throw.
+        var negativeOne = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.ElementAt(-1)).SingleAsync();
+        Assert.Equal(0, negativeOne);
+
+        // ElementAt(-2) → arrayElement(arr, -1) → LAST element of row 1's [1,2,3] = 3.
+        // This is the ClickHouse from-end semantic surfacing; documented in CHANGELOG.
+        var negativeTwo = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.ElementAt(-2)).SingleAsync();
+        Assert.Equal(3, negativeTwo);
+
+        // int.MaxValue regression: without Int64 widening of the +1 arithmetic, ClickHouse's
+        // Int32 + UInt8 promotion produces an Int32 sum that wraps to int.MinValue, which
+        // then addresses from the end of the array — surfacing the array's actual last
+        // elements rather than the documented OOB default. Pin the "always default for huge
+        // positive indices" behavior so a regression that removes the toInt64() widening
+        // surfaces immediately.
+        var hugePositiveOnNonEmpty = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.ElementAt(int.MaxValue)).SingleAsync();
+        Assert.Equal(0, hugePositiveOnNonEmpty);
+        var hugePositiveOnLargerRow = await ctx.Entities.Where(e => e.Id == 3).Select(e => e.IntArray.ElementAt(int.MaxValue)).SingleAsync();
+        Assert.Equal(0, hugePositiveOnLargerRow);
+    }
+
+    [Fact]
+    public async Task Array_Skip_Take_TranslateToArraySlice()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // Skip(n) → arraySlice(arr, n + 1); Take(m) → arraySlice(arr, 1, m). Verified in
+        // chained scalar context — array-shape projections of slice results go through EF
+        // Core's QueryableMethodTranslatingExpressionVisitor, not SqlTranslatingExpressionVisitor,
+        // so they are not supported in this PR. Filter/scalar consumers are.
+        var skipContains = ctx.Entities.Where(e => e.IntArray.Skip(1).Contains(0));
+        var skipContainsSql = skipContains.ToQueryString();
+        Assert.Contains("has(", skipContainsSql);
+        Assert.Contains("arraySlice(", skipContainsSql);
+        var skipContainsResults = await skipContains.OrderBy(e => e.Id).ToListAsync();
+        Assert.Single(skipContainsResults);
+        Assert.Equal(3, skipContainsResults[0].Id);  // Only row 3 has 0 in its post-skip slice.
+
+        // Take(m).Count() → length(arraySlice(arr, 1, m)). Row-by-row execution covers the
+        // empty-array case (Take on empty array yields empty array, length 0).
+        var firstTwoCount = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.IntArray.Take(2).Count())
+            .ToListAsync();
+        Assert.Equal([2, 0, 2], firstTwoCount);  // Row 1 [1,2]→2, row 2 []→0, row 3 [42,-1]→2.
+
+        // Skip then Take then scalar follow-up: arr.Skip(1).Take(2).Count(). Verifies the
+        // chained-shape gate: each intermediate must be recognized by
+        // LooksLikeArrayColumnAccess (via ArrayProducingMethods) so the next step can attach.
+        var middleTwoCount = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.IntArray.Skip(1).Take(2).Count())
+            .ToListAsync();
+        Assert.Equal([2, 0, 2], middleTwoCount);  // Row 1 [2,3]→2, row 2 []→0, row 3 [-1,0]→2.
+
+        // Skip().FirstOrDefault() — scalar element access on a sliced array.
+        var afterSkip = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.IntArray.Skip(1).FirstOrDefault())
+            .ToListAsync();
+        Assert.Equal([2, 0, -1], afterSkip);
+    }
+
+    [Fact]
+    public async Task Array_SkipTake_EdgeCases()
+    {
+        // Skip/Take edge cases — Skip(0) is no-op, Take(0) is empty, Take past length is full
+        // array, parameter-bound counts. Each exercises arraySlice's bounds-handling without
+        // a separate translation path; the test pins the runtime behavior.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // Skip(0).First() == arr[0] — Skip(0)→arraySlice(arr, 1), then arrayElement(slice, 1)
+        // = original first element.
+        var skipZeroFirst = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.Skip(0).First()).SingleAsync();
+        Assert.Equal(1, skipZeroFirst);
+
+        // Take(0).Count() == 0 — slicing zero elements yields an empty array.
+        var takeZeroCount = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.Take(0).Count()).SingleAsync();
+        Assert.Equal(0, takeZeroCount);
+
+        // Take past length — Take(10) on [1,2,3] yields the full array.
+        var takePastLengthCount = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.Take(10).Count()).SingleAsync();
+        Assert.Equal(3, takePastLengthCount);
+
+        // Skip past length — empty result.
+        var skipPastLengthCount = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.IntArray.Skip(10).Count()).SingleAsync();
+        Assert.Equal(0, skipPastLengthCount);
+
+        // Parameter-bound Skip / Take — verifies LINQ parameters flow through the n+1 / count
+        // arithmetic correctly. The SQL parameterization is what binds the runtime value, so a
+        // bug here would manifest as a query-cache poisoning (constant baked into SQL).
+        var skipN = 1;
+        var takeN = 2;
+        var parameterizedCount = await ctx.Entities.Where(e => e.Id == 3)
+            .Select(e => e.IntArray.Skip(skipN).Take(takeN).Count())
+            .SingleAsync();
+        Assert.Equal(2, parameterizedCount);
+    }
+
+    [Fact]
+    public async Task Array_Distinct_ActuallyDeduplicates()
+    {
+        // The seed `array_test` has unique elements per row, so Distinct() over it would
+        // pass even if Distinct were a no-op. Use a dedicated scratch table with an Engine=
+        // Memory engine — gone the moment the connection drops, so the shared seed can't be
+        // polluted by a crash between INSERT and the cleanup DROP.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+        await using var conn = (global::ClickHouse.Driver.ADO.ClickHouseConnection)ctx.Database.GetDbConnection();
+        await conn.OpenAsync();
+
+        const string scratchTable = "array_distinct_scratch";
+        await using (var create = conn.CreateCommand())
+        {
+            create.CommandText = $"""
+                CREATE TABLE IF NOT EXISTS {scratchTable} (
+                    id Int64,
+                    int_array Array(Int32),
+                    string_array Array(String)
+                ) ENGINE = Memory
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+        await using (var insert = conn.CreateCommand())
+        {
+            insert.CommandText = $"INSERT INTO {scratchTable} VALUES (1, [1,1,2,2,3], ['x','x','y'])";
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var scratchCtx = new ArrayDistinctScratchDbContext(_fixture.ConnectionString);
+
+            var distinctIntCount = await scratchCtx.Entities.Select(e => e.IntArray.Distinct().Count()).SingleAsync();
+            Assert.Equal(3, distinctIntCount);  // [1,1,2,2,3] → {1,2,3}.
+
+            var distinctStringCount = await scratchCtx.Entities.Select(e => e.StringArray.Distinct().Count()).SingleAsync();
+            Assert.Equal(2, distinctStringCount);  // ['x','x','y'] → {'x','y'}.
+
+            // Composition: Distinct().Contains — should see the deduped element.
+            var hasDistinctValue = await scratchCtx.Entities.Where(e => e.IntArray.Distinct().Contains(1)).CountAsync();
+            Assert.Equal(1, hasDistinctValue);
+        }
+        finally
+        {
+            await using var teardown = conn.CreateCommand();
+            teardown.CommandText = $"DROP TABLE IF EXISTS {scratchTable}";
+            await teardown.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Array_OrderBy_OnStringsAndWithKeySelector()
+    {
+        // OrderBy/OrderByDescending coverage gaps: String element type (not just int) and
+        // a non-identity key selector that translates through the existing scalar chain.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // OrderBy(x => x) on a String array — verifies arraySort works for non-numeric
+        // elements. Row 3 ['hello','world'] sorted ascending → ['hello','world'] (already sorted).
+        var firstSortedString = await ctx.Entities.Where(e => e.Id == 3)
+            .Select(e => e.StringArray.OrderBy(x => x).First())
+            .SingleAsync();
+        Assert.Equal("hello", firstSortedString);
+
+        var firstSortedStringDesc = await ctx.Entities.Where(e => e.Id == 3)
+            .Select(e => e.StringArray.OrderByDescending(x => x).First())
+            .SingleAsync();
+        Assert.Equal("world", firstSortedStringDesc);
+
+        // Non-identity key selector with translation: OrderByDescending(x => -x) — should emit
+        // arrayReverseSort(x -> -x, arr). Row 3 [42,-1,0,100] sorted desc by negated key =
+        // ascending order [-1, 0, 42, 100], so .First() is -1.
+        var orderByDescNegSql = ctx.Entities.Where(e => e.IntArray.OrderByDescending(x => -x).First() == -1).ToQueryString();
+        Assert.Contains("arrayReverseSort(", orderByDescNegSql);
+        Assert.Contains(" -> ", orderByDescNegSql);
+
+        var smallestViaDescNeg = await ctx.Entities.Where(e => e.Id == 3)
+            .Select(e => e.IntArray.OrderByDescending(x => -x).First())
+            .SingleAsync();
+        Assert.Equal(-1, smallestViaDescNeg);
+
+        // OrderBy on a non-trivial body that routes through the string translator (Length).
+        // Row 3 ['hello','world'] sorted by string length ascending — both are length 5, so
+        // the order is stable; just verify the SQL shape compiles and emits a lambda.
+        var orderByLengthSql = ctx.Entities.Select(e => e.StringArray.OrderBy(x => x.Length).First()).ToQueryString();
+        Assert.Contains("arraySort(", orderByLengthSql);
+        Assert.Contains(" -> ", orderByLengthSql);
+        Assert.Contains("length(", orderByLengthSql);
+    }
+
+    [Fact]
+    public async Task DbSetRoot_SkipTakeFirst_StillUseEfBaseTranslation()
+    {
+        // Negative shape: Skip/Take/First on the DbSet root (not a mapped array column) must
+        // continue to flow through EF Core's standard queryable-method pipeline, not our array
+        // dispatcher. The SQL must not contain arraySlice/arrayElement; the result must still
+        // be correct.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        var skipQuery = ctx.Entities.OrderBy(e => e.Id).Skip(1).Take(1);
+        var skipSql = skipQuery.ToQueryString();
+        Assert.DoesNotContain("arraySlice(", skipSql);
+        Assert.DoesNotContain("arrayElement(", skipSql);
+        var skipResults = await skipQuery.ToListAsync();
+        Assert.Single(skipResults);
+        Assert.Equal(2, skipResults[0].Id);
+
+        var firstQuery = ctx.Entities.OrderBy(e => e.Id);
+        var firstResult = await firstQuery.FirstAsync();
+        Assert.Equal(1, firstResult.Id);
+    }
+
+    [Fact]
+    public async Task LocalArray_Contains_DoesNotUseHas()
+    {
+        // Local in-memory arrays must NOT be routed through the array helpers — they have no
+        // ClickHouseArrayTypeMapping, so the type-mapping gate must reject them and let EF's
+        // inline-collection pipeline emit IN-style SQL instead of has(). This is the
+        // simplest shape that pins the gate: Contains is the most likely to mistranslate if
+        // the structural pre-filter ever loosens.
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        var localIds = new long[] { 1L, 3L };
+        var query = ctx.Entities.Where(e => localIds.Contains(e.Id));
+        var sql = query.ToQueryString();
+        Assert.DoesNotContain("has(", sql);
+
+        var results = await query.OrderBy(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], results.Select(r => r.Id));
+    }
+
+    [Fact]
+    public async Task Array_Reverse_Distinct_TranslateNatively()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // Reverse and Distinct are verified through chained scalar shapes (collection
+        // projections are out of scope for this PR — see Skip/Take note).
+        var reverseSql = ctx.Entities.Where(e => e.IntArray.Reverse().First() == 3).ToQueryString();
+        Assert.Contains("arrayReverse(", reverseSql);
+        Assert.Contains("arrayElement(", reverseSql);
+
+        // Reverse().First() yields the last element. Row 1 [1,2,3] → 3, row 2 [] → 0, row 3 [42,-1,0,100] → 100.
+        var reversedFirst = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.IntArray.Reverse().FirstOrDefault())
+            .ToListAsync();
+        Assert.Equal([3, 0, 100], reversedFirst);
+
+        // Distinct on String array — verifies the function emission. Row 1 ['a','b','c'] is
+        // already unique so length-after-distinct == length-before. The test asserts SQL shape
+        // and that downstream Count() composes correctly.
+        var distinctCountSql = ctx.Entities.Where(e => e.StringArray.Distinct().Count() == 3).ToQueryString();
+        Assert.Contains("arrayDistinct(", distinctCountSql);
+        Assert.Contains("length(", distinctCountSql);
+
+        var distinctCounts = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.StringArray.Distinct().Count())
+            .ToListAsync();
+        Assert.Equal([3, 0, 2], distinctCounts);
+    }
+
+    [Fact]
+    public async Task Array_OrderBy_TranslatesToArraySort()
+    {
+        await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
+
+        // Identity lambda (x => x) elides to the no-lambda form arraySort(arr); the
+        // non-identity body emits an explicit lambda. Verified by SQL shape on Where
+        // predicates and by composing with First() for execution.
+        var orderBySql = ctx.Entities.Where(e => e.IntArray.OrderBy(x => x).First() == 1).ToQueryString();
+        Assert.Contains("arraySort(", orderBySql);
+        Assert.DoesNotContain(" -> ", orderBySql);
+
+        var smallest = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.IntArray.OrderBy(x => x).FirstOrDefault())
+            .ToListAsync();
+        Assert.Equal([1, 0, -1], smallest);  // Row 1 min=1, row 2 empty=0, row 3 min=-1.
+
+        var orderByDescSql = ctx.Entities.Where(e => e.IntArray.OrderByDescending(x => x).First() == 100).ToQueryString();
+        Assert.Contains("arrayReverseSort(", orderByDescSql);
+        Assert.DoesNotContain(" -> ", orderByDescSql);
+
+        var largest = await ctx.Entities.OrderBy(e => e.Id)
+            .Select(e => e.IntArray.OrderByDescending(x => x).FirstOrDefault())
+            .ToListAsync();
+        Assert.Equal([3, 0, 100], largest);
+
+        // Non-identity lambda body: arraySort(x -> -x, arr) sorts by negation. Validates the
+        // lambda-emission path for OrderBy. Negated order means the largest element comes first.
+        var orderByNegatedSql = ctx.Entities.Where(e => e.IntArray.OrderBy(x => -x).First() == 100).ToQueryString();
+        Assert.Contains("arraySort(", orderByNegatedSql);
+        Assert.Contains(" -> ", orderByNegatedSql);
+    }
+
+    [Fact]
     public async Task DbSetRoot_AnyAndCount_StillUseEfBaseTranslation()
     {
         // Negative shape: when the source is the DbSet itself (not a mapped array column),
@@ -1319,6 +1697,40 @@ public class ListArrayTests
         Assert.Equal(0, projection[1].IntCount);
         Assert.Equal(0, projection[1].StringCount);
         Assert.False(projection[1].HasStrings);
+    }
+
+    [Fact]
+    public async Task ListArray_Tier3_Helpers_Translate()
+    {
+        // Confirms the Tier 3 helpers (element access, slicing, ordering) light up identically
+        // for List<T>-typed properties as for T[]. The translator gates on
+        // ClickHouseArrayTypeMapping, not the CLR type — but a regression in the type-mapping
+        // pipeline for List<T> (e.g. losing the converter wiring) would silently break Tier 3.
+        await using var ctx = new ListArrayDbContext(_fixture.ConnectionString);
+
+        // Element access on List<int>.
+        var firstList = await ctx.Entities.OrderBy(e => e.Id).Select(e => e.IntArray.FirstOrDefault()).ToListAsync();
+        Assert.Equal([1, 0, 42], firstList);
+
+        // ElementAt on List<string>.
+        var secondString = await ctx.Entities.Where(e => e.Id == 1).Select(e => e.StringArray.ElementAtOrDefault(1)).SingleAsync();
+        Assert.Equal("b", secondString);
+
+        // Skip + Count composition.
+        var skipCount = await ctx.Entities.Where(e => e.Id == 3).Select(e => e.IntArray.Skip(1).Count()).SingleAsync();
+        Assert.Equal(3, skipCount);  // [-1, 0, 100]
+
+        // Reverse + First composition. List<T>.Reverse is the void in-place instance method;
+        // route through Enumerable.Reverse via IEnumerable cast so the LINQ MethodInfo binds
+        // to the static overload our dispatch table knows.
+        var reverseQuery = ctx.Entities.Where(e => e.Id == 1).Select(e => ((IEnumerable<int>)e.IntArray).Reverse().FirstOrDefault());
+        Assert.Contains("arrayReverse(", reverseQuery.ToQueryString());
+        var lastViaReverse = await reverseQuery.SingleAsync();
+        Assert.Equal(3, lastViaReverse);
+
+        // OrderBy + First composition on List<T>.
+        var smallest = await ctx.Entities.Where(e => e.Id == 3).Select(e => e.IntArray.OrderBy(x => x).FirstOrDefault()).SingleAsync();
+        Assert.Equal(-1, smallest);
     }
 }
 
