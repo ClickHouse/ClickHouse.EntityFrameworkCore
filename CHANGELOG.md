@@ -1,4 +1,4 @@
-v0.3.0 (Unreleased)
+v0.3.0
 ---
 ### Advanced queries
 * **Native JSON navigation**: support for `JsonNode` indexing (`Data["key"]`, `Data[index]`) and member access.
