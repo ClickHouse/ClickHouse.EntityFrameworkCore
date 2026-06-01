@@ -31,6 +31,18 @@ v0.3.0
   views that read them, and drops run before creates — via a phase-based splitter with a topological sort over
   materialized-view dependencies (with cycle detection). The generated step migrations are **forward-only**: their
   `Down` methods throw `ClickHouseDownMigrationNotSupportedException`. Single-operation migrations are unaffected.
+* **Dictionaries.** Declare a ClickHouse dictionary in the model with
+  `modelBuilder.HasDictionary<TDict>("name").FromTable<TSource>().HasKey(...).Layout(...).Lifetime(...)`
+  and it is scaffolded/applied as a migration (`CREATE DICTIONARY` / `DROP DICTIONARY`). The dictionary's
+  columns are the properties of `TDict`; the source is a ClickHouse table (`SOURCE(CLICKHOUSE(...))`).
+  Changes re-apply atomically via `CREATE OR REPLACE DICTIONARY` (ClickHouse has no `ALTER DICTIONARY`),
+  and dictionaries are ordered after their source tables (and dropped before them) by the splitter.
+  A declared dictionary is also **queryable like a keyless `DbSet`**: its type is mapped as a view over
+  the dictionary, so `context.Set<TDict>().Where(...)` runs `SELECT … FROM <dict>` (and it is never
+  migrated as a table). Scope: only credential-free ClickHouse-table-backed dictionaries are emitted into
+  migrations; external sources (MySQL/PostgreSQL/HTTP) are intentionally excluded to avoid storing
+  credentials in migration files, and scalar `dictGet(...)` lookups in queries over other tables are not
+  yet translated.
 
 v0.2.0
 ---

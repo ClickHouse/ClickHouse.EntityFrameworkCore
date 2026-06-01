@@ -44,6 +44,12 @@ public class ClickHouseCSharpMigrationOperationGenerator : CSharpMigrationOperat
             case ClickHouseDropDatabaseOperation dropDb:
                 Generate(dropDb, builder);
                 break;
+            case ClickHouseCreateDictionaryOperation createDict:
+                Generate(createDict, builder);
+                break;
+            case ClickHouseDropDictionaryOperation dropDict:
+                Generate(dropDict, builder);
+                break;
             default:
                 base.Generate(operation, builder);
                 break;
@@ -84,6 +90,64 @@ public class ClickHouseCSharpMigrationOperationGenerator : CSharpMigrationOperat
         using (builder.Indent())
         {
             var args = new List<string> { $"viewName: {code.Literal(operation.ViewName)}" };
+            if (operation.Database != null)
+                args.Add($"database: {code.Literal(operation.Database)}");
+            if (operation.Cluster != null)
+                args.Add($"cluster: {code.Literal(operation.Cluster)}");
+            if (operation.IfExists)
+                args.Add($"ifExists: {code.Literal(true)}");
+
+            AppendArgs(builder, args);
+        }
+    }
+
+    protected virtual void Generate(ClickHouseCreateDictionaryOperation operation, IndentedStringBuilder builder)
+    {
+        var code = Dependencies.CSharpHelper;
+        builder.AppendLine(".CreateClickHouseDictionary(");
+        using (builder.Indent())
+        {
+            var columns = string.Join(", ", operation.Columns.Select(c => c.Default is null
+                ? $"new ClickHouseDictionaryColumn({code.Literal(c.Name)}, {code.Literal(c.Type)})"
+                : $"new ClickHouseDictionaryColumn({code.Literal(c.Name)}, {code.Literal(c.Type)}, {code.Literal(c.Default)})"));
+            var keys = string.Join(", ", operation.KeyColumns.Select(k => code.Literal(k)));
+
+            var args = new List<string>
+            {
+                $"name: {code.Literal(operation.DictionaryName)}",
+                $"columns: new[] {{ {columns} }}",
+                $"keyColumns: new[] {{ {keys} }}",
+                $"sourceTable: {code.Literal(operation.SourceTable)}",
+                $"layout: {code.Literal(operation.Layout)}",
+            };
+            if (operation.SourceDatabase != null)
+                args.Add($"sourceDatabase: {code.Literal(operation.SourceDatabase)}");
+            if (operation.LayoutParams != null)
+                args.Add($"layoutParams: {code.Literal(operation.LayoutParams)}");
+            if (operation.LifetimeMin is { } min)
+                args.Add($"lifetimeMin: {code.Literal(min)}");
+            if (operation.LifetimeMax is { } max)
+                args.Add($"lifetimeMax: {code.Literal(max)}");
+            if (operation.Database != null)
+                args.Add($"database: {code.Literal(operation.Database)}");
+            if (operation.Cluster != null)
+                args.Add($"cluster: {code.Literal(operation.Cluster)}");
+            if (operation.IfNotExists)
+                args.Add($"ifNotExists: {code.Literal(true)}");
+            if (operation.OrReplace)
+                args.Add($"orReplace: {code.Literal(true)}");
+
+            AppendArgs(builder, args);
+        }
+    }
+
+    protected virtual void Generate(ClickHouseDropDictionaryOperation operation, IndentedStringBuilder builder)
+    {
+        var code = Dependencies.CSharpHelper;
+        builder.AppendLine(".DropClickHouseDictionary(");
+        using (builder.Indent())
+        {
+            var args = new List<string> { $"name: {code.Literal(operation.DictionaryName)}" };
             if (operation.Database != null)
                 args.Add($"database: {code.Literal(operation.Database)}");
             if (operation.Cluster != null)

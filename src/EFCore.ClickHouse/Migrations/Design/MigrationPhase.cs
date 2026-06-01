@@ -13,14 +13,16 @@ internal enum MigrationPhase
     // ── Tear-down (most dependent first) ───────────────────────────────
     DropIndexes = 1,
     DropMaterializedViews = 2,
-    DropTables = 3,
-    DropDatabases = 4,
+    DropDictionaries = 3,
+    DropTables = 4,
+    DropDatabases = 5,
 
     // ── Build-up (least dependent first) ───────────────────────────────
-    CreateDatabases = 5,
-    CreateTables = 6,
-    AddColumns = 7,
-    CreateMaterializedViews = 8,
-    AlterColumns = 9,
-    CreateIndexes = 10,
+    CreateDatabases = 6,
+    CreateTables = 7,
+    AddColumns = 8,
+    CreateMaterializedViews = 9,
+    CreateDictionaries = 10,
+    AlterColumns = 11,
+    CreateIndexes = 12,
 }

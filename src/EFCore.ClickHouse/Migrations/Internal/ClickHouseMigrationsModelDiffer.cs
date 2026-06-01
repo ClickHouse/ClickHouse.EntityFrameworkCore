@@ -19,6 +19,8 @@ namespace ClickHouse.EntityFrameworkCore.Migrations.Internal;
 /// </summary>
 public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
 {
+    private readonly IRelationalTypeMappingSource _typeMappingSource;
+
     public ClickHouseMigrationsModelDiffer(
         IRelationalTypeMappingSource typeMappingSource,
         IMigrationsAnnotationProvider migrationsAnnotationProvider,
@@ -27,6 +29,7 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         CommandBatchPreparerDependencies commandBatchPreparerDependencies)
         : base(typeMappingSource, migrationsAnnotationProvider, relationalAnnotationProvider, rowIdentityMapFactory, commandBatchPreparerDependencies)
     {
+        _typeMappingSource = typeMappingSource;
     }
 
     public override IReadOnlyList<MigrationOperation> GetDifferences(
@@ -37,8 +40,10 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
 
         var sourceViews = (source?.Model.GetMaterializedViews() ?? []).ToDictionary(v => v.Name);
         var targetViews = (target?.Model.GetMaterializedViews() ?? []).ToDictionary(v => v.Name);
+        var sourceDicts = (source?.Model.GetDictionaries() ?? []).ToDictionary(d => d.Name);
+        var targetDicts = (target?.Model.GetDictionaries() ?? []).ToDictionary(d => d.Name);
 
-        if (sourceViews.Count == 0 && targetViews.Count == 0)
+        if (sourceViews.Count == 0 && targetViews.Count == 0 && sourceDicts.Count == 0 && targetDicts.Count == 0)
             return baseOps;
 
         // Translate any pending LINQ lambdas on the TARGET model. Model is locked at this point,
@@ -66,6 +71,21 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         {
             if (!sourceViews.ContainsKey(name))
                 createOps.Add(BuildCreateOperation(ResolvedView(targetView, translatedTargets), target!.Model));
+        }
+
+        // Dictionaries: new → create, removed → drop, changed → CREATE OR REPLACE (no ALTER DICTIONARY).
+        foreach (var (name, sourceDict) in sourceDicts)
+        {
+            if (!targetDicts.TryGetValue(name, out var targetDict))
+                dropOps.Add(BuildDropDictionaryOperation(sourceDict));
+            else if (!DictionariesEqual(sourceDict, targetDict))
+                createOps.Add(BuildCreateDictionaryOperation(targetDict, target!.Model, orReplace: true));
+        }
+
+        foreach (var (name, targetDict) in targetDicts)
+        {
+            if (!sourceDicts.ContainsKey(name))
+                createOps.Add(BuildCreateDictionaryOperation(targetDict, target!.Model, orReplace: false));
         }
 
         if (dropOps.Count == 0 && createOps.Count == 0)
@@ -198,6 +218,97 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         => a.TargetTypeName == b.TargetTypeName
         && a.SelectSql == b.SelectSql
         && a.Populate == b.Populate
+        && a.Cluster == b.Cluster
+        && a.Database == b.Database;
+
+    private ClickHouseCreateDictionaryOperation BuildCreateDictionaryOperation(
+        DictionaryDefinition dict,
+        IReadOnlyModel model,
+        bool orReplace)
+    {
+        if (string.IsNullOrEmpty(dict.SourceTypeName))
+            throw new InvalidOperationException(
+                $"Dictionary '{dict.Name}' has no source table. Call .FromTable<T>().");
+
+        var sourceType = Type.GetType(dict.SourceTypeName)
+            ?? throw new InvalidOperationException(
+                $"Dictionary '{dict.Name}' source type '{dict.SourceTypeName}' could not be resolved.");
+
+        var sourceEntity = model.FindEntityType(sourceType)
+            ?? throw new InvalidOperationException(
+                $"Dictionary '{dict.Name}' source type '{sourceType.Name}' is not a registered entity type.");
+
+        var sourceTable = sourceEntity.GetTableName()
+            ?? throw new InvalidOperationException(
+                $"Dictionary '{dict.Name}' source entity '{sourceType.Name}' is not mapped to a table.");
+
+        if (dict.KeyColumns.Count == 0)
+            throw new InvalidOperationException(
+                $"Dictionary '{dict.Name}' has no key. Call .HasKey(...).");
+
+        return new ClickHouseCreateDictionaryOperation
+        {
+            DictionaryName = dict.Name,
+            Columns = ResolveColumns(dict),
+            KeyColumns = dict.KeyColumns,
+            SourceTable = sourceTable,
+            SourceDatabase = sourceEntity.GetSchema(),
+            Layout = dict.Layout,
+            LayoutParams = dict.LayoutParams,
+            LifetimeMin = dict.LifetimeMin,
+            LifetimeMax = dict.LifetimeMax,
+            Database = dict.Database,
+            Cluster = dict.Cluster,
+            OrReplace = orReplace,
+        };
+    }
+
+    private static ClickHouseDropDictionaryOperation BuildDropDictionaryOperation(DictionaryDefinition dict)
+        => new()
+        {
+            DictionaryName = dict.Name,
+            Database = dict.Database,
+            Cluster = dict.Cluster,
+            IfExists = true,
+        };
+
+    private List<ClickHouseDictionaryColumn> ResolveColumns(DictionaryDefinition dict)
+    {
+        // ClickHouse dictionary keys cannot be Nullable; attributes can.
+        var keys = new HashSet<string>(dict.KeyColumns, StringComparer.Ordinal);
+        var columns = new List<ClickHouseDictionaryColumn>(dict.ColumnNames.Count);
+        for (var i = 0; i < dict.ColumnNames.Count; i++)
+        {
+            var name = dict.ColumnNames[i];
+            columns.Add(new ClickHouseDictionaryColumn(
+                name, ResolveStoreType(dict.ColumnClrTypes[i], allowNullable: !keys.Contains(name))));
+        }
+        return columns;
+    }
+
+    private string ResolveStoreType(string clrTypeName, bool allowNullable)
+    {
+        var clrType = Type.GetType(clrTypeName)
+            ?? throw new InvalidOperationException($"Dictionary column CLR type '{clrTypeName}' could not be resolved.");
+        var underlying = Nullable.GetUnderlyingType(clrType);
+        var mapping = _typeMappingSource.FindMapping(underlying ?? clrType)
+            ?? throw new InvalidOperationException($"No ClickHouse type mapping for dictionary column type '{underlying ?? clrType}'.");
+
+        // Honor a nullable value-type attribute (e.g. double? → Nullable(Float64)). Reference-type
+        // nullability (e.g. string?) is not detectable here and defaults to non-nullable.
+        return underlying is not null && allowNullable ? $"Nullable({mapping.StoreType})" : mapping.StoreType;
+    }
+
+    private static bool DictionariesEqual(DictionaryDefinition a, DictionaryDefinition b)
+        => a.DictTypeName == b.DictTypeName
+        && a.SourceTypeName == b.SourceTypeName
+        && a.ColumnNames.SequenceEqual(b.ColumnNames, StringComparer.Ordinal)
+        && a.ColumnClrTypes.SequenceEqual(b.ColumnClrTypes, StringComparer.Ordinal)
+        && a.KeyColumns.SequenceEqual(b.KeyColumns, StringComparer.Ordinal)
+        && a.Layout == b.Layout
+        && a.LayoutParams == b.LayoutParams
+        && a.LifetimeMin == b.LifetimeMin
+        && a.LifetimeMax == b.LifetimeMax
         && a.Cluster == b.Cluster
         && a.Database == b.Database;
 

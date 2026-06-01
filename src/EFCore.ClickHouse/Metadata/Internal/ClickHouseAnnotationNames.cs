@@ -47,6 +47,21 @@ public static class ClickHouseAnnotationNames
     // consumed by ClickHouseMaterializedViewTranslationConvention and removed before snapshot.
     public const string MaterializedViewPendingLambdaSuffix = "PendingLambda";
 
+    // Dictionary annotations — stored on IModel as prefix-based per-dictionary annotations of the
+    // form "ClickHouse:Dictionary:{name}:{suffix}" (same pattern as materialized views).
+    public const string DictionaryPrefix = Prefix + "Dictionary:";
+    public const string DictionaryTypeSuffix = "DictType";      // assembly-qualified CLR type defining the columns
+    public const string DictionarySourceTypeSuffix = "SourceType"; // assembly-qualified CLR type of the source table entity
+    public const string DictionaryColumnNamesSuffix = "ColumnNames";   // string[] — captured so column changes are diffable
+    public const string DictionaryColumnTypesSuffix = "ColumnClrTypes"; // string[] — parallel to ColumnNames
+    public const string DictionaryKeySuffix = "Key";            // string[] of key column names
+    public const string DictionaryLayoutSuffix = "Layout";      // canonical LAYOUT name (e.g. "HASHED")
+    public const string DictionaryLayoutParamsSuffix = "LayoutParams";
+    public const string DictionaryLifetimeMinSuffix = "LifetimeMin";
+    public const string DictionaryLifetimeMaxSuffix = "LifetimeMax";
+    public const string DictionaryClusterSuffix = "Cluster";
+    public const string DictionaryDatabaseSuffix = "Database";
+
     // Engine name constants
     public const string MergeTree = "MergeTree";
     public const string ReplacingMergeTree = "ReplacingMergeTree";
