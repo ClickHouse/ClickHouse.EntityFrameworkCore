@@ -20,6 +20,18 @@ v0.3.0
 * Preserve `LowCardinality(...)` and `Nullable(...)` wrappers from `HasColumnType(...)` in generated migration DDL. Previously the wrapper was stripped during type-mapping resolution, so the migration emitted the inner type. ([#18](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/18))
 * Preserve explicit `HasColumnType(...)` text whenever the resolved mapping's canonical store type differs from the user's input — fixes `Enum8(...)` and `AggregateFunction(...)` columns silently emitting `String` in generated DDL. Also covers `Enum16`, `SimpleAggregateFunction`, `Nested`, and the parameter-bearing forms (`Decimal128(S)`, `Json(...)` with type hints, etc.). ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24))
 
+### Migrations
+* **Materialized views are now scaffoldable.** A custom `CSharpMigrationOperationGenerator` renders the provider's
+  custom operations (`CreateClickHouseMaterializedView`/`DropClickHouseMaterializedView` and the database create/drop
+  operations) into migration code, so `dotnet ef migrations add` works for models that declare `HasMaterializedView(...)`.
+* **Dependency-ordered, single-operation step migrations.** Because ClickHouse has no transactions, a multi-operation
+  `migrations add` is now scaffolded as a sequence of single-operation step files (`<name>_001`, `<name>_002`, …), each
+  with its own history row, so a partial failure is resumable (already-applied steps stay recorded). Operations are
+  ordered so every object exists before it is referenced — databases and tables are created before the materialized
+  views that read them, and drops run before creates — via a phase-based splitter with a topological sort over
+  materialized-view dependencies (with cycle detection). The generated step migrations are **forward-only**: their
+  `Down` methods throw `ClickHouseDownMigrationNotSupportedException`. Single-operation migrations are unaffected.
+
 v0.2.0
 ---
 ### Table engine and DDL

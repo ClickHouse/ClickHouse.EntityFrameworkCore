@@ -26,5 +26,11 @@ public class ClickHouseDesignTimeServices : IDesignTimeServices
         // (materialized view / database create + drop) into C#.
         serviceCollection.Replace(
             ServiceDescriptor.Scoped<ICSharpMigrationOperationGenerator, ClickHouseCSharpMigrationOperationGenerator>());
+
+        // Split `migrations add` into dependency-ordered, single-operation step files. The core
+        // services above register the default MigrationsScaffolder, so replace it with ours.
+        serviceCollection.AddScoped<ClickHouseMigrationsSplitter>();
+        serviceCollection.Replace(
+            ServiceDescriptor.Scoped<IMigrationsScaffolder, ClickHouseMigrationsScaffolder>());
     }
 }

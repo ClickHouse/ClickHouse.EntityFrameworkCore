@@ -25,10 +25,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.2" />
-    <!-- compile assets are required so the provider can subclass design-time codegen
-         (ClickHouseCSharpMigrationOperationGenerator) to render its custom migration operations.
-         PrivateAssets="all" keeps EFCore.Design from flowing to consumers; it is only loaded at
-         design time (dotnet ef). -->
+    <!-- compile assets are required so the provider can subclass MigrationsScaffolder for
+         dependency-ordered step-file scaffolding. PrivateAssets="all" keeps EFCore.Design from
+         flowing to consumers; it is only loaded at design time (dotnet ef). -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.2" PrivateAssets="all" IncludeAssets="compile; runtime; build; native; contentfiles; analyzers; buildtransitive" />
     <PackageReference Include="ClickHouse.Driver" Version="1.1.0" />
   </ItemGroup>
