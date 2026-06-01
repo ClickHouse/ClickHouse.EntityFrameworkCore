@@ -34,6 +34,19 @@ public static class ClickHouseAnnotationNames
     public const string SkippingIndexGranularity = Prefix + "SkippingIndex:Granularity";
     public const string SkippingIndexParams = Prefix + "SkippingIndex:Params";
 
+    // Materialized view annotations — stored on IModel as prefix-based per-view
+    // annotations of the form "ClickHouse:MaterializedView:{name}:{suffix}".
+    public const string MaterializedViewPrefix = Prefix + "MaterializedView:";
+    public const string MaterializedViewTargetTypeSuffix = "TargetType";
+    public const string MaterializedViewSelectSqlSuffix = "SelectSql";
+    public const string MaterializedViewPopulateSuffix = "Populate";
+    public const string MaterializedViewClusterSuffix = "Cluster";
+    public const string MaterializedViewDatabaseSuffix = "Database";
+
+    // Transient (non-snapshotted) annotation carrying the unresolved LINQ lambda for a view —
+    // consumed by ClickHouseMaterializedViewTranslationConvention and removed before snapshot.
+    public const string MaterializedViewPendingLambdaSuffix = "PendingLambda";
+
     // Engine name constants
     public const string MergeTree = "MergeTree";
     public const string ReplacingMergeTree = "ReplacingMergeTree";

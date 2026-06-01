@@ -1,5 +1,6 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
 using ClickHouse.EntityFrameworkCore.Metadata.Internal;
+using ClickHouse.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -659,6 +660,442 @@ public class MigrationIntegrationTests : IAsyncLifetime
         Assert.NotEqual("1970-01-01 00:00:00", createdAt); // not epoch — got now()
     }
 
+    // ── Materialized view operations ──────────────────────────────────────
+
+    [Fact]
+    public async Task CreateMaterializedView_creates_view_and_populates_target()
+    {
+        await ExecuteRawAsync(
+            "CREATE TABLE IF NOT EXISTS mv_source (ts DateTime, value UInt64) ENGINE = MergeTree() ORDER BY ts",
+            "CREATE TABLE IF NOT EXISTS mv_target (hour DateTime, total UInt64) ENGINE = SummingMergeTree() ORDER BY hour");
+
+        await ApplyMigrationAsync(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test_view",
+            TargetTable = "mv_target",
+            SelectQuery = "SELECT toStartOfHour(ts) AS hour, sum(value) AS total FROM mv_source GROUP BY hour",
+        });
+
+        var engine = await QueryScalarRaw(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'mv_test_view'");
+        Assert.Equal("MaterializedView", engine);
+
+        // DDL shape: the view targets mv_target via TO, and the SELECT body is preserved.
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'mv_test_view'");
+        Assert.Contains("TO", createSql!);
+        Assert.Contains("mv_target", createSql!);
+        var asSelect = await QueryScalarRaw(
+            "SELECT as_select FROM system.tables WHERE database = currentDatabase() AND name = 'mv_test_view'");
+        Assert.Contains("sum(value)", asSelect!);
+        Assert.Contains("GROUP BY", asSelect!);
+
+        await ExecuteRawAsync(
+            "INSERT INTO mv_source VALUES ('2024-01-01 10:30:00', 5), ('2024-01-01 10:45:00', 3)");
+
+        var total = await QueryScalarRaw("SELECT total FROM mv_target");
+        Assert.Equal("8", total);
+
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_test_view",
+            "DROP TABLE IF EXISTS mv_target",
+            "DROP TABLE IF EXISTS mv_source");
+    }
+
+    [Fact]
+    public async Task DropMaterializedView_removes_view_but_keeps_target()
+    {
+        await ExecuteRawAsync(
+            "CREATE TABLE IF NOT EXISTS mv_drop_source (id UInt64) ENGINE = MergeTree() ORDER BY id",
+            "CREATE TABLE IF NOT EXISTS mv_drop_target (id UInt64) ENGINE = MergeTree() ORDER BY id",
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS mv_drop_test TO mv_drop_target AS SELECT id FROM mv_drop_source");
+
+        await ApplyMigrationAsync(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_drop_test",
+        });
+
+        var viewCount = await QueryScalarRaw(
+            "SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'mv_drop_test'");
+        Assert.Equal("0", viewCount);
+
+        var targetCount = await QueryScalarRaw(
+            "SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'mv_drop_target'");
+        Assert.Equal("1", targetCount);
+
+        await ExecuteRawAsync(
+            "DROP TABLE IF EXISTS mv_drop_target",
+            "DROP TABLE IF EXISTS mv_drop_source");
+    }
+
+    [Fact]
+    public async Task CreateMaterializedView_IfNotExists_is_idempotent()
+    {
+        await ExecuteRawAsync(
+            "CREATE TABLE IF NOT EXISTS mv_idem_source (id UInt64) ENGINE = MergeTree() ORDER BY id",
+            "CREATE TABLE IF NOT EXISTS mv_idem_target (id UInt64) ENGINE = MergeTree() ORDER BY id");
+
+        var operation = new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_idem_view",
+            TargetTable = "mv_idem_target",
+            SelectQuery = "SELECT id FROM mv_idem_source",
+            IfNotExists = true,
+        };
+
+        await ApplyMigrationAsync(operation);
+        await ApplyMigrationAsync(operation);
+
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_idem_view",
+            "DROP TABLE IF EXISTS mv_idem_target",
+            "DROP TABLE IF EXISTS mv_idem_source");
+    }
+
+    [Fact]
+    public async Task DropMaterializedView_IfExists_is_idempotent()
+    {
+        var operation = new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_nonexistent_view",
+            IfExists = true,
+        };
+
+        await ApplyMigrationAsync(operation);
+    }
+
+    // ── Model-level materialized view tests (end-to-end through differ) ─────
+
+    [Fact]
+    public async Task ModelLevel_FromRaw_view_creates_via_differ()
+    {
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_model_raw_view",
+            "DROP TABLE IF EXISTS mv_model_raw_source",
+            "DROP TABLE IF EXISTS mv_model_raw_target");
+
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<MvSource>(e => { e.HasKey(x => x.Id); e.ToTable("mv_model_raw_source"); });
+            b.Entity<MvTarget>(e =>
+            {
+                e.HasKey(x => x.Bucket);
+                e.ToTable("mv_model_raw_target", t => t.HasSummingMergeTreeEngine("Total").WithOrderBy("Bucket"));
+            });
+
+            b.HasMaterializedView<MvTarget>("mv_model_raw_view")
+                .FromRaw("SELECT Id AS Bucket, Value AS Total FROM mv_model_raw_source");
+        });
+
+        var prevModel = CreateContext(_ => { }).GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var currModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var operations = ctx.GetService<IMigrationsModelDiffer>().GetDifferences(prevModel, currModel);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        using var conn = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+        foreach (var command in generator.Generate(operations))
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = command.CommandText;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var engine = await QueryScalarRaw(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'mv_model_raw_view'");
+        Assert.Equal("MaterializedView", engine);
+
+        // DDL shape: the differ-built view points at the EF-mapped target table and keeps the FromRaw body.
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'mv_model_raw_view'");
+        Assert.Contains("TO", createSql!);
+        Assert.Contains("mv_model_raw_target", createSql!);
+        var asSelect = await QueryScalarRaw(
+            "SELECT as_select FROM system.tables WHERE database = currentDatabase() AND name = 'mv_model_raw_view'");
+        Assert.Contains("mv_model_raw_source", asSelect!);
+        Assert.Contains("Bucket", asSelect!);
+
+        await ExecuteRawAsync("INSERT INTO mv_model_raw_source VALUES (1, 10), (1, 5), (2, 7)");
+        var totalForOne = await QueryScalarRaw("SELECT Total FROM mv_model_raw_target FINAL WHERE Bucket = 1");
+        Assert.Equal("15", totalForOne);
+
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_model_raw_view",
+            "DROP TABLE IF EXISTS mv_model_raw_source",
+            "DROP TABLE IF EXISTS mv_model_raw_target");
+    }
+
+    [Fact]
+    public async Task ModelLevel_LINQ_view_translates_and_executes()
+    {
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_model_linq_view",
+            "DROP TABLE IF EXISTS mv_model_linq_source",
+            "DROP TABLE IF EXISTS mv_model_linq_target");
+
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<MvSource>(e => { e.HasKey(x => x.Id); e.ToTable("mv_model_linq_source"); });
+            b.Entity<MvTarget>(e =>
+            {
+                e.HasKey(x => x.Bucket);
+                e.ToTable("mv_model_linq_target", t => t.HasSummingMergeTreeEngine("Total").WithOrderBy("Bucket"));
+            });
+
+            b.HasMaterializedView<MvTarget>("mv_model_linq_view")
+                .From<MvSource>()
+                .Select(src => src
+                    .GroupBy(s => s.Id)
+                    .Select(g => new MvTarget { Bucket = g.Key, Total = (long)g.Sum(s => s.Value) }));
+        });
+
+        var prevModel = CreateContext(_ => { }).GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var currModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var operations = ctx.GetService<IMigrationsModelDiffer>().GetDifferences(prevModel, currModel);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        using var conn = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+        foreach (var command in generator.Generate(operations))
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = command.CommandText;
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        // View should exist
+        var engine = await QueryScalarRaw(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'mv_model_linq_view'");
+        Assert.Equal("MaterializedView", engine);
+
+        // DDL shape: the LINQ body was translated to ClickHouse SQL at differ time (GROUP BY over the source),
+        // and the view points at the EF-mapped target.
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'mv_model_linq_view'");
+        Assert.Contains("TO", createSql!);
+        Assert.Contains("mv_model_linq_target", createSql!);
+        var asSelect = await QueryScalarRaw(
+            "SELECT as_select FROM system.tables WHERE database = currentDatabase() AND name = 'mv_model_linq_view'");
+        Assert.Contains("mv_model_linq_source", asSelect!);
+        Assert.Contains("GROUP BY", asSelect!);
+
+        // Data flows through
+        await ExecuteRawAsync("INSERT INTO mv_model_linq_source VALUES (1, 10), (1, 5), (2, 7)");
+        var totalForOne = await QueryScalarRaw("SELECT Total FROM mv_model_linq_target FINAL WHERE Bucket = 1");
+        Assert.Equal("15", totalForOne);
+
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_model_linq_view",
+            "DROP TABLE IF EXISTS mv_model_linq_source",
+            "DROP TABLE IF EXISTS mv_model_linq_target");
+    }
+
+    [Fact]
+    public async Task ModelLevel_changing_view_drops_and_recreates()
+    {
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_change_view",
+            "DROP TABLE IF EXISTS mv_change_source",
+            "DROP TABLE IF EXISTS mv_change_target");
+
+        Action<ModelBuilder> mapTables = b =>
+        {
+            b.Entity<MvSource>(e => { e.HasKey(x => x.Id); e.ToTable("mv_change_source"); });
+            b.Entity<MvTarget>(e =>
+            {
+                e.HasKey(x => x.Bucket);
+                e.ToTable("mv_change_target", t => t.HasSummingMergeTreeEngine("Total").WithOrderBy("Bucket"));
+            });
+        };
+
+        // v1: Total = Value
+        await using var ctxV1 = CreateContext(b =>
+        {
+            mapTables(b);
+            b.HasMaterializedView<MvTarget>("mv_change_view")
+                .FromRaw("SELECT Id AS Bucket, Value AS Total FROM mv_change_source");
+        });
+        await using var emptyCtx = CreateContext(_ => { });
+
+        var emptyModel = emptyCtx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var v1Model = ctxV1.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            ctxV1.GetService<IMigrationsModelDiffer>().GetDifferences(emptyModel, v1Model), ctxV1);
+
+        var asSelectV1 = await QueryScalarRaw(
+            "SELECT as_select FROM system.tables WHERE database = currentDatabase() AND name = 'mv_change_view'");
+        Assert.Contains("mv_change_source", asSelectV1!);
+
+        // v2: Total = Value * 10 — different SELECT body forces a drop + recreate.
+        await using var ctxV2 = CreateContext(b =>
+        {
+            mapTables(b);
+            b.HasMaterializedView<MvTarget>("mv_change_view")
+                .FromRaw("SELECT Id AS Bucket, Value * 10 AS Total FROM mv_change_source");
+        });
+
+        var v2Model = ctxV2.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var changeOps = ctxV2.GetService<IMigrationsModelDiffer>().GetDifferences(v1Model, v2Model);
+
+        // The differ emits both a drop and a recreate for the changed view.
+        Assert.Contains(changeOps, o => o is ClickHouseDropMaterializedViewOperation);
+        Assert.Contains(changeOps, o => o is ClickHouseCreateMaterializedViewOperation);
+
+        await ApplyOperationsAsync(changeOps, ctxV2);
+
+        var engine = await QueryScalarRaw(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'mv_change_view'");
+        Assert.Equal("MaterializedView", engine);
+
+        var asSelectV2 = await QueryScalarRaw(
+            "SELECT as_select FROM system.tables WHERE database = currentDatabase() AND name = 'mv_change_view'");
+        Assert.NotEqual(asSelectV1, asSelectV2);
+
+        // The recreated view (Value * 10) is the one now running.
+        await ExecuteRawAsync("INSERT INTO mv_change_source VALUES (1, 5)");
+        var total = await QueryScalarRaw("SELECT Total FROM mv_change_target FINAL WHERE Bucket = 1");
+        Assert.Equal("50", total);
+
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_change_view",
+            "DROP TABLE IF EXISTS mv_change_source",
+            "DROP TABLE IF EXISTS mv_change_target");
+    }
+
+    [Fact]
+    public async Task ModelLevel_view_and_target_in_other_database()
+    {
+        var otherDb = _databaseName + "_alt";
+        await ExecuteRawAsync(
+            $"DROP DATABASE IF EXISTS {otherDb}",
+            $"CREATE DATABASE {otherDb}",
+            $"CREATE TABLE {otherDb}.qual_source (Id UInt64, Value UInt64) ENGINE = MergeTree() ORDER BY Id",
+            $"CREATE TABLE {otherDb}.qual_target (Bucket UInt64, Total UInt64) ENGINE = SummingMergeTree() ORDER BY Bucket");
+
+        // Map the target into the other database (schema). Pre-create the tables so the differ
+        // only has to emit the view; the view itself is placed in the other database via InDatabase.
+        Action<ModelBuilder> mapTarget = b =>
+            b.Entity<MvTarget>(e =>
+            {
+                e.HasKey(x => x.Bucket);
+                e.ToTable("qual_target", otherDb, t => t.HasSummingMergeTreeEngine("Total").WithOrderBy("Bucket"));
+            });
+
+        await using var baseCtx = CreateContext(mapTarget);
+        await using var viewCtx = CreateContext(b =>
+        {
+            mapTarget(b);
+            b.HasMaterializedView<MvTarget>("qual_view")
+                .FromRaw($"SELECT Id AS Bucket, Value AS Total FROM {otherDb}.qual_source")
+                .InDatabase(otherDb);
+        });
+
+        var prevModel = baseCtx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var currModel = viewCtx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            viewCtx.GetService<IMigrationsModelDiffer>().GetDifferences(prevModel, currModel), viewCtx);
+
+        var engine = await QueryScalarRaw(
+            $"SELECT engine FROM system.tables WHERE database = '{otherDb}' AND name = 'qual_view'");
+        Assert.Equal("MaterializedView", engine);
+
+        // DDL is qualified with the other database for both the view and its TO target.
+        var createSql = await QueryScalarRaw(
+            $"SELECT create_table_query FROM system.tables WHERE database = '{otherDb}' AND name = 'qual_view'");
+        Assert.Contains(otherDb, createSql!);
+        Assert.Contains("qual_target", createSql!);
+
+        await ExecuteRawAsync($"INSERT INTO {otherDb}.qual_source VALUES (1, 10), (1, 5)");
+        var total = await QueryScalarRaw($"SELECT Total FROM {otherDb}.qual_target FINAL WHERE Bucket = 1");
+        Assert.Equal("15", total);
+
+        await ExecuteRawAsync($"DROP DATABASE IF EXISTS {otherDb}");
+    }
+
+    [Fact]
+    public async Task ModelLevel_multi_source_join_view_translates_and_executes()
+    {
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_join_view",
+            "DROP TABLE IF EXISTS mv_join_left",
+            "DROP TABLE IF EXISTS mv_join_right",
+            "DROP TABLE IF EXISTS mv_join_target");
+
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<JoinLeft>(e => { e.HasKey(x => x.Id); e.ToTable("mv_join_left"); });
+            b.Entity<JoinRight>(e => { e.HasKey(x => x.Id); e.ToTable("mv_join_right"); });
+            b.Entity<MvTarget>(e =>
+            {
+                e.HasKey(x => x.Bucket);
+                e.ToTable("mv_join_target", t => t.HasSummingMergeTreeEngine("Total").WithOrderBy("Bucket"));
+            });
+
+            b.HasMaterializedView<MvTarget>("mv_join_view")
+                .From<JoinLeft>()
+                .Join<JoinRight>()
+                .Select((left, right) => left
+                    .Join(right, l => l.Id, r => r.Id, (l, r) => new MvTarget { Bucket = l.Id, Total = l.Value * r.Factor }));
+        });
+
+        var prevModel = CreateContext(_ => { }).GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var currModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            ctx.GetService<IMigrationsModelDiffer>().GetDifferences(prevModel, currModel), ctx);
+
+        var engine = await QueryScalarRaw(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'mv_join_view'");
+        Assert.Equal("MaterializedView", engine);
+
+        // The multi-source LINQ body was translated to a JOIN over both source tables.
+        var asSelect = await QueryScalarRaw(
+            "SELECT as_select FROM system.tables WHERE database = currentDatabase() AND name = 'mv_join_view'");
+        Assert.Contains("JOIN", asSelect!);
+        Assert.Contains("mv_join_left", asSelect!);
+        Assert.Contains("mv_join_right", asSelect!);
+
+        // The right table must hold data before the left insert triggers the joined view.
+        await ExecuteRawAsync("INSERT INTO mv_join_right VALUES (1, 3)");
+        await ExecuteRawAsync("INSERT INTO mv_join_left VALUES (1, 10)");
+        var total = await QueryScalarRaw("SELECT Total FROM mv_join_target FINAL WHERE Bucket = 1");
+        Assert.Equal("30", total);
+
+        await ExecuteRawAsync(
+            "DROP VIEW IF EXISTS mv_join_view",
+            "DROP TABLE IF EXISTS mv_join_left",
+            "DROP TABLE IF EXISTS mv_join_right",
+            "DROP TABLE IF EXISTS mv_join_target");
+    }
+
+    // Note: ClickHouse forbids combining POPULATE with a TO clause. Since this provider's
+    // model-level materialized views always use TO-table (the target is an EF-mapped entity),
+    // POPULATE is intentionally not exposed at the model level. Use INSERT INTO target SELECT ...
+    // FROM source in a follow-up migration if backfill is needed.
+
+    public class MvSource
+    {
+        public long Id { get; set; }
+        public long Value { get; set; }
+    }
+
+    public class MvTarget
+    {
+        public long Bucket { get; set; }
+        public long Total { get; set; }
+    }
+
+    public class JoinLeft
+    {
+        public long Id { get; set; }
+        public long Value { get; set; }
+    }
+
+    public class JoinRight
+    {
+        public long Id { get; set; }
+        public long Factor { get; set; }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private TestContext CreateContext(Action<ModelBuilder> configure)
@@ -687,6 +1124,41 @@ public class MigrationIntegrationTests : IAsyncLifetime
             cmd.CommandText = command.CommandText;
             await cmd.ExecuteNonQueryAsync();
         }
+    }
+
+    private async Task ApplyOperationsAsync(IReadOnlyList<MigrationOperation> operations, DbContext context)
+    {
+        var generator = context.GetService<IMigrationsSqlGenerator>();
+        using var conn = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+        foreach (var command in generator.Generate(operations))
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = command.CommandText;
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    private async Task ExecuteRawAsync(params string[] statements)
+    {
+        using var conn = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+        foreach (var sql in statements)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    private async Task<string?> QueryScalarRaw(string sql)
+    {
+        using var conn = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        var result = await cmd.ExecuteScalarAsync();
+        return result?.ToString();
     }
 
     private static async Task<string?> QueryScalar(DbContext context, string sql)

@@ -31,6 +31,7 @@ public class ClickHouseConventionSetBuilder : RelationalConventionSetBuilder
         conventionSet.SkipNavigationForeignKeyChangedConventions.Clear();
 
         conventionSet.ModelFinalizingConventions.Add(new ClickHouseDefaultEngineConvention());
+        conventionSet.ModelFinalizingConventions.Add(new ClickHouseMaterializedViewTranslationConvention());
 
         return conventionSet;
     }
