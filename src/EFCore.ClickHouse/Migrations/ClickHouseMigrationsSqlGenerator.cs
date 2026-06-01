@@ -45,6 +45,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             case ClickHouseDropMaterializedViewOperation dropMv:
                 Generate(dropMv, builder);
                 return;
+            case ClickHouseCreateDictionaryOperation createDict:
+                Generate(createDict, builder);
+                return;
+            case ClickHouseDropDictionaryOperation dropDict:
+                Generate(dropDict, builder);
+                return;
             default:
                 base.Generate(operation, model, builder);
                 return;
@@ -105,6 +111,82 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         TerminateStatement(builder);
     }
+
+    protected virtual void Generate(ClickHouseCreateDictionaryOperation operation, MigrationCommandListBuilder builder)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+
+        builder.Append(operation.OrReplace ? "CREATE OR REPLACE DICTIONARY " : "CREATE DICTIONARY ");
+
+        if (operation.IfNotExists && !operation.OrReplace)
+            builder.Append("IF NOT EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.DictionaryName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        // Column list
+        builder.AppendLine();
+        builder.AppendLine("(");
+        using (builder.Indent())
+        {
+            for (var i = 0; i < operation.Columns.Count; i++)
+            {
+                var col = operation.Columns[i];
+                builder.Append(helper.DelimitIdentifier(col.Name)).Append(" ").Append(col.Type);
+                if (!string.IsNullOrWhiteSpace(col.Default))
+                    builder.Append(" DEFAULT ").Append(col.Default);
+                if (i < operation.Columns.Count - 1)
+                    builder.Append(",");
+                builder.AppendLine();
+            }
+        }
+        builder.AppendLine(")");
+
+        // PRIMARY KEY
+        builder.Append("PRIMARY KEY ");
+        builder.AppendLine(string.Join(", ", operation.KeyColumns.Select(helper.DelimitIdentifier)));
+
+        // SOURCE — local ClickHouse table (no credentials)
+        builder.Append("SOURCE(CLICKHOUSE(TABLE ").Append(SqlStringLiteral(operation.SourceTable));
+        if (!string.IsNullOrWhiteSpace(operation.SourceDatabase))
+            builder.Append(" DB ").Append(SqlStringLiteral(operation.SourceDatabase));
+        builder.AppendLine("))");
+
+        // LAYOUT
+        builder.Append("LAYOUT(").Append(operation.Layout).Append("(");
+        if (!string.IsNullOrWhiteSpace(operation.LayoutParams))
+            builder.Append(operation.LayoutParams);
+        builder.AppendLine("))");
+
+        // LIFETIME
+        if (operation.LifetimeMin is { } min && operation.LifetimeMax is { } max)
+            builder.Append($"LIFETIME(MIN {min} MAX {max})");
+        else if (operation.LifetimeMax is { } maxOnly)
+            builder.Append($"LIFETIME({maxOnly})");
+
+        TerminateStatement(builder);
+    }
+
+    protected virtual void Generate(ClickHouseDropDictionaryOperation operation, MigrationCommandListBuilder builder)
+    {
+        builder.Append("DROP DICTIONARY ");
+
+        if (operation.IfExists)
+            builder.Append("IF EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.DictionaryName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        TerminateStatement(builder);
+    }
+
+    // A single-quoted ClickHouse string literal (used for dictionary SOURCE parameters).
+    private static string SqlStringLiteral(string value)
+        => "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'";
 
     private void AppendQualifiedName(MigrationCommandListBuilder builder, string? database, string name)
     {

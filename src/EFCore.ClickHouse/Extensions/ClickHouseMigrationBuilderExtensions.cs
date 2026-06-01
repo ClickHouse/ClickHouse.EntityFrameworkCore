@@ -1,3 +1,4 @@
+using ClickHouse.EntityFrameworkCore.Migrations;
 using ClickHouse.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations.Builders;
@@ -66,5 +67,59 @@ public static class ClickHouseMigrationBuilderExtensions
         };
         builder.Operations.Add(operation);
         return new OperationBuilder<ClickHouseDropMaterializedViewOperation>(operation);
+    }
+
+    public static OperationBuilder<ClickHouseCreateDictionaryOperation> CreateClickHouseDictionary(
+        this MigrationBuilder builder,
+        string name,
+        IReadOnlyList<ClickHouseDictionaryColumn> columns,
+        IReadOnlyList<string> keyColumns,
+        string sourceTable,
+        string layout,
+        string? sourceDatabase = null,
+        string? layoutParams = null,
+        int? lifetimeMin = null,
+        int? lifetimeMax = null,
+        string? database = null,
+        string? cluster = null,
+        bool ifNotExists = false,
+        bool orReplace = false)
+    {
+        var operation = new ClickHouseCreateDictionaryOperation
+        {
+            DictionaryName = name,
+            Columns = columns,
+            KeyColumns = keyColumns,
+            SourceTable = sourceTable,
+            SourceDatabase = sourceDatabase,
+            Layout = layout,
+            LayoutParams = layoutParams,
+            LifetimeMin = lifetimeMin,
+            LifetimeMax = lifetimeMax,
+            Database = database,
+            Cluster = cluster,
+            IfNotExists = ifNotExists,
+            OrReplace = orReplace,
+        };
+        builder.Operations.Add(operation);
+        return new OperationBuilder<ClickHouseCreateDictionaryOperation>(operation);
+    }
+
+    public static OperationBuilder<ClickHouseDropDictionaryOperation> DropClickHouseDictionary(
+        this MigrationBuilder builder,
+        string name,
+        string? database = null,
+        string? cluster = null,
+        bool ifExists = false)
+    {
+        var operation = new ClickHouseDropDictionaryOperation
+        {
+            DictionaryName = name,
+            Database = database,
+            Cluster = cluster,
+            IfExists = ifExists,
+        };
+        builder.Operations.Add(operation);
+        return new OperationBuilder<ClickHouseDropDictionaryOperation>(operation);
     }
 }

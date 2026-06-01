@@ -56,14 +56,16 @@ public sealed class ClickHouseMigrationsSplitter
         // create order so a dependent view is dropped before what it reads.
         result.AddRange(phaseGroups[MigrationPhase.DropIndexes]);
         result.AddRange(SortByDependencies(phaseGroups[MigrationPhase.DropMaterializedViews], reverseForDrops: true));
+        result.AddRange(phaseGroups[MigrationPhase.DropDictionaries]);
         result.AddRange(phaseGroups[MigrationPhase.DropTables]);
         result.AddRange(phaseGroups[MigrationPhase.DropDatabases]);
 
-        // Build-up: least dependent first. Tables exist before the views that read them.
+        // Build-up: least dependent first. Tables exist before the views and dictionaries that read them.
         result.AddRange(phaseGroups[MigrationPhase.CreateDatabases]);
         result.AddRange(phaseGroups[MigrationPhase.CreateTables]);
         result.AddRange(phaseGroups[MigrationPhase.AddColumns]);
         result.AddRange(SortByDependencies(phaseGroups[MigrationPhase.CreateMaterializedViews], reverseForDrops: false));
+        result.AddRange(phaseGroups[MigrationPhase.CreateDictionaries]);
         result.AddRange(phaseGroups[MigrationPhase.AlterColumns]);
         result.AddRange(phaseGroups[MigrationPhase.CreateIndexes]);
 
@@ -80,6 +82,8 @@ public sealed class ClickHouseMigrationsSplitter
         CreateTableOperation => MigrationPhase.CreateTables,
         AddColumnOperation => MigrationPhase.AddColumns,
         ClickHouseCreateMaterializedViewOperation => MigrationPhase.CreateMaterializedViews,
+        ClickHouseDropDictionaryOperation => MigrationPhase.DropDictionaries,
+        ClickHouseCreateDictionaryOperation => MigrationPhase.CreateDictionaries,
         AlterColumnOperation or DropColumnOperation or RenameColumnOperation
             or RenameTableOperation or RenameIndexOperation => MigrationPhase.AlterColumns,
         CreateIndexOperation => MigrationPhase.CreateIndexes,
@@ -197,6 +201,8 @@ public sealed class ClickHouseMigrationsSplitter
         DropIndexOperation o => $"Drop index {o.Name}",
         ClickHouseCreateMaterializedViewOperation o => $"Create materialized view {o.ViewName}",
         ClickHouseDropMaterializedViewOperation o => $"Drop materialized view {o.ViewName}",
+        ClickHouseCreateDictionaryOperation o => $"Create dictionary {o.DictionaryName}",
+        ClickHouseDropDictionaryOperation o => $"Drop dictionary {o.DictionaryName}",
         ClickHouseCreateDatabaseOperation o => $"Create database {o.Name}",
         ClickHouseDropDatabaseOperation o => $"Drop database {o.Name}",
         _ => op.GetType().Name,

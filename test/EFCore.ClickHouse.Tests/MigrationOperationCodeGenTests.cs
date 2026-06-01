@@ -1,4 +1,5 @@
 using ClickHouse.EntityFrameworkCore.Design.Internal;
+using ClickHouse.EntityFrameworkCore.Migrations;
 using ClickHouse.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.EntityFrameworkCore.Migrations.Design;
@@ -97,6 +98,44 @@ public class MigrationOperationCodeGenTests
         var drop = Generate(new ClickHouseDropDatabaseOperation { Name = "analytics" });
         Assert.Contains("migrationBuilder.DropClickHouseDatabase(", drop);
         Assert.Contains("name: \"analytics\"", drop);
+    }
+
+    [Fact]
+    public void CreateDictionary_emits_builder_call_with_columns_and_keys()
+    {
+        var code = Generate(new ClickHouseCreateDictionaryOperation
+        {
+            DictionaryName = "currency_dict",
+            Columns =
+            [
+                new ClickHouseDictionaryColumn("Id", "UInt64"),
+                new ClickHouseDictionaryColumn("Name", "String", "''"),
+            ],
+            KeyColumns = ["Id"],
+            SourceTable = "currencies",
+            Layout = "HASHED",
+            LifetimeMin = 300,
+            LifetimeMax = 360,
+        });
+
+        Assert.Contains("migrationBuilder.CreateClickHouseDictionary(", code);
+        Assert.Contains("name: \"currency_dict\"", code);
+        Assert.Contains("new ClickHouseDictionaryColumn(\"Id\", \"UInt64\")", code);
+        Assert.Contains("new ClickHouseDictionaryColumn(\"Name\", \"String\", \"''\")", code);
+        Assert.Contains("keyColumns: new[] { \"Id\" }", code);
+        Assert.Contains("sourceTable: \"currencies\"", code);
+        Assert.Contains("layout: \"HASHED\"", code);
+        Assert.Contains("lifetimeMin: 300", code);
+        Assert.Contains("lifetimeMax: 360", code);
+    }
+
+    [Fact]
+    public void DropDictionary_emits_builder_call()
+    {
+        var code = Generate(new ClickHouseDropDictionaryOperation { DictionaryName = "currency_dict", IfExists = true });
+        Assert.Contains("migrationBuilder.DropClickHouseDictionary(", code);
+        Assert.Contains("name: \"currency_dict\"", code);
+        Assert.Contains("ifExists: true", code);
     }
 
     [Fact]

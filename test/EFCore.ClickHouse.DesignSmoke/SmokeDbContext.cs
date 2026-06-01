@@ -1,4 +1,5 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
+using ClickHouse.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 
@@ -53,6 +54,13 @@ public class SmokeDbContext : DbContext
 
         modelBuilder.HasMaterializedView<HitsByHour>("hits_mv")
             .FromRaw("SELECT Id AS Bucket, Value AS Hits FROM hits_source");
+
+        // A dictionary over the hits_source table — scaffolding must order it after the table create.
+        modelBuilder.HasDictionary<HitsSource>("hits_dict")
+            .FromTable<HitsSource>()
+            .HasKey(h => h.Id)
+            .Layout(ClickHouseDictionaryLayout.Hashed)
+            .Lifetime(60);
     }
 }
 

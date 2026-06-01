@@ -1,3 +1,4 @@
+using ClickHouse.EntityFrameworkCore.Migrations;
 using ClickHouse.EntityFrameworkCore.Migrations.Design;
 using ClickHouse.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
@@ -146,6 +147,36 @@ public class MigrationSplitterTests
                 ViewName = "y", TargetTable = "y_tbl", SelectQuery = "SELECT * FROM x_tbl",
             },
         ]));
+    }
+
+    [Fact]
+    public void Dictionary_create_is_ordered_after_its_source_table()
+    {
+        var steps = _splitter.Split(
+        [
+            new ClickHouseCreateDictionaryOperation
+            {
+                DictionaryName = "d", Columns = [new ClickHouseDictionaryColumn("Id", "UInt64")],
+                KeyColumns = ["Id"], SourceTable = "src", Layout = "HASHED",
+            },
+            new CreateTableOperation { Name = "src" },
+        ]);
+
+        Assert.True(IndexOfTable(steps, "src") < FindIndex(steps,
+            s => s.Operation is ClickHouseCreateDictionaryOperation));
+    }
+
+    [Fact]
+    public void Dictionary_drop_precedes_table_drop()
+    {
+        var steps = _splitter.Split(
+        [
+            new DropTableOperation { Name = "src" },
+            new ClickHouseDropDictionaryOperation { DictionaryName = "d" },
+        ]);
+
+        Assert.IsType<ClickHouseDropDictionaryOperation>(steps[0].Operation);
+        Assert.IsType<DropTableOperation>(steps[1].Operation);
     }
 
     private static int IndexOfTable(IReadOnlyList<StepMigration> steps, string name)
