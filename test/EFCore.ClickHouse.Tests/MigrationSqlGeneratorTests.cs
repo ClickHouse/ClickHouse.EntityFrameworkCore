@@ -1227,11 +1227,79 @@ public class MigrationSqlGeneratorTests
         Assert.Contains("ON CLUSTER 'my_cluster'", sql);
     }
 
+    // ── Statement termination ─────────────────────────────────────────────
+    // Every emitted statement must end with the terminator (`;`). The base EndStatement only ends
+    // the command — the terminator is the caller's responsibility — so a missing one would only show
+    // up when statements are concatenated (e.g. `dotnet ef migrations script`), where they'd run
+    // together. These assert each produced command is individually terminated.
+
+    public static IEnumerable<object[]> TerminatedOperations()
+    {
+        var createTable = new CreateTableOperation { Name = "t" };
+        createTable.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+        createTable.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+        createTable.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        yield return [createTable];
+
+        yield return [new AddColumnOperation { Table = "t", Name = "C", ColumnType = "String", ClrType = typeof(string) }];
+        yield return [new DropColumnOperation { Table = "t", Name = "C" }];
+        yield return [new AlterColumnOperation { Table = "t", Name = "C", ColumnType = "Int64", ClrType = typeof(long) }];
+        yield return [new RenameColumnOperation { Table = "t", Name = "a", NewName = "b" }];
+        yield return [new RenameTableOperation { Name = "a", NewName = "b" }];
+
+        var createIndex = new CreateIndexOperation { Name = "idx", Table = "t", Columns = ["C"] };
+        createIndex.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexType, "minmax");
+        yield return [createIndex];
+
+        var dropIndex = new DropIndexOperation { Table = "t", Name = "idx" };
+        dropIndex.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexType, "minmax");
+        yield return [dropIndex];
+
+        yield return [new ClickHouseCreateDatabaseOperation { Name = "db" }];
+        yield return [new ClickHouseDropDatabaseOperation { Name = "db" }];
+        yield return [new ClickHouseCreateMaterializedViewOperation { ViewName = "mv", TargetTable = "t", SelectQuery = "SELECT * FROM s" }];
+        yield return [new ClickHouseDropMaterializedViewOperation { ViewName = "mv" }];
+    }
+
+    [Theory]
+    [MemberData(nameof(TerminatedOperations))]
+    public void Each_generated_statement_is_terminated(MigrationOperation operation)
+    {
+        var commands = GenerateCommands(operation);
+        Assert.NotEmpty(commands);
+        Assert.All(commands, c =>
+            Assert.EndsWith(";", c.CommandText.TrimEnd()));
+    }
+
+    [Fact]
+    public void AlterColumn_removing_annotation_terminates_both_modify_and_remove()
+    {
+        // This operation emits two statements (MODIFY COLUMN + REMOVE CODEC); both must be terminated.
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "C", ColumnType = "String", ClrType = typeof(string)
+        };
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "ZSTD");
+
+        var commands = GenerateCommands(op);
+        Assert.Equal(2, commands.Count);
+        Assert.All(commands, c => Assert.EndsWith(";", c.CommandText.TrimEnd()));
+    }
+
     private string GenerateCreateTable(Action<CreateTableOperation> configure)
     {
         var operation = new CreateTableOperation { Name = "test_table" };
         configure(operation);
         return Generate(operation);
+    }
+
+    private static IReadOnlyList<MigrationCommand> GenerateCommands(params MigrationOperation[] operations)
+    {
+        var optionsBuilder = new DbContextOptionsBuilder()
+            .UseClickHouse("Host=localhost;Database=test");
+
+        using var context = new DbContext(optionsBuilder.Options);
+        return context.GetService<IMigrationsSqlGenerator>().Generate(operations);
     }
 
     private string Generate(params MigrationOperation[] operations)
