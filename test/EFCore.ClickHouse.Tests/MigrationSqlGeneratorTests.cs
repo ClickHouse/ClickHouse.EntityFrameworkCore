@@ -1088,6 +1088,145 @@ public class MigrationSqlGeneratorTests
         }
     }
 
+    // ── Materialized view operations ──────────────────────────────────────
+
+    [Fact]
+    public void CreateMaterializedView_generates_minimal_DDL()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_hourly_hits",
+            TargetTable = "hourly_hits",
+            SelectQuery = "SELECT toStartOfHour(ts) AS hour, count() AS hits FROM raw_hits GROUP BY hour",
+        });
+
+        Assert.Contains("CREATE MATERIALIZED VIEW `mv_hourly_hits` TO `hourly_hits`", sql);
+        Assert.Contains("AS SELECT toStartOfHour(ts) AS hour, count() AS hits FROM raw_hits GROUP BY hour", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_IfNotExists()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            IfNotExists = true,
+        });
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS `mv_test`", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_database_qualified_names()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            Database = "analytics",
+            TargetDatabase = "analytics",
+        });
+
+        Assert.Contains("`analytics`.`mv_test`", sql);
+        Assert.Contains("TO `analytics`.`target`", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_OnCluster()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            Cluster = "my_cluster",
+        });
+
+        Assert.Contains("ON CLUSTER 'my_cluster'", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_all_options()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_hourly",
+            TargetTable = "hourly_agg",
+            SelectQuery = "SELECT toStartOfHour(ts) AS hour, count() AS cnt FROM events GROUP BY hour",
+            Database = "analytics",
+            TargetDatabase = "reporting",
+            Cluster = "prod",
+            IfNotExists = true,
+        });
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS `analytics`.`mv_hourly` ON CLUSTER 'prod' TO `reporting`.`hourly_agg`", sql);
+        Assert.Contains("AS SELECT toStartOfHour(ts) AS hour, count() AS cnt FROM events GROUP BY hour", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_Populate()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            Populate = true,
+        });
+
+        Assert.Contains("TO `target` POPULATE", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_generates_DROP_VIEW()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_hourly_hits",
+        });
+
+        Assert.Contains("DROP VIEW `mv_hourly_hits`", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_with_IfExists()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            IfExists = true,
+        });
+
+        Assert.Contains("DROP VIEW IF EXISTS `mv_test`", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_with_database_qualified_name()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            Database = "analytics",
+        });
+
+        Assert.Contains("DROP VIEW `analytics`.`mv_test`", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_with_OnCluster()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            Cluster = "my_cluster",
+        });
+
+        Assert.Contains("ON CLUSTER 'my_cluster'", sql);
+    }
+
     private string GenerateCreateTable(Action<CreateTableOperation> configure)
     {
         var operation = new CreateTableOperation { Name = "test_table" };
