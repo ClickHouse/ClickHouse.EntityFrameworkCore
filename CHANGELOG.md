@@ -24,6 +24,8 @@ v0.3.0
 * **Materialized views are now scaffoldable.** A custom `CSharpMigrationOperationGenerator` renders the provider's
   custom operations (`CreateClickHouseMaterializedView`/`DropClickHouseMaterializedView` and the database create/drop
   operations) into migration code, so `dotnet ef migrations add` works for models that declare `HasMaterializedView(...)`.
+  Because the provider's views always write to a `TO` target table, `POPULATE` (which ClickHouse forbids alongside `TO`)
+  is rejected with a descriptive `NotSupportedException`; backfill the target with an `INSERT … SELECT` after creation.
 * **Dependency-ordered, single-operation step migrations.** Because ClickHouse has no transactions, a multi-operation
   `migrations add` is now scaffolded as a sequence of single-operation step files (`<name>_001`, `<name>_002`, …), each
   with its own history row, so a partial failure is resumable (already-applied steps stay recorded). Operations are
@@ -39,10 +41,13 @@ v0.3.0
   and dictionaries are ordered after their source tables (and dropped before them) by the splitter.
   A declared dictionary is also **queryable like a keyless `DbSet`**: its type is mapped as a view over
   the dictionary, so `context.Set<TDict>().Where(...)` runs `SELECT … FROM <dict>` (and it is never
-  migrated as a table). Scope: only credential-free ClickHouse-table-backed dictionaries are emitted into
-  migrations; external sources (MySQL/PostgreSQL/HTTP) are intentionally excluded to avoid storing
-  credentials in migration files, and scalar `dictGet(...)` lookups in queries over other tables are not
-  yet translated.
+  migrated as a table). Because a `SOURCE(CLICKHOUSE(...))` dictionary loads by reconnecting to the server,
+  on a password-protected server it needs credentials: configure them inline with
+  `.WithSourceConnection(user, password, host, port)`, or — to keep secrets out of source control — with
+  `.FromNamedCollection("name")`, which references a named collection defined in server config
+  (`<named_collections>`); with neither, the dictionary loads as the passwordless `default` user. Scope:
+  ClickHouse-table-backed dictionaries only; external sources (MySQL/PostgreSQL/HTTP) remain excluded, and
+  scalar `dictGet(...)` lookups in queries over other tables are not yet translated.
 
 v0.2.0
 ---

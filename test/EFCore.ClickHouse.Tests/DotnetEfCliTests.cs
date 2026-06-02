@@ -4,9 +4,10 @@ using Xunit;
 namespace EFCore.ClickHouse.Tests;
 
 /// <summary>
-/// End-to-end tests that shell out to the real dotnet-ef CLI tool
-/// and verify the resulting database state against a real ClickHouse instance.
-/// These tests skip automatically if dotnet-ef is not installed.
+/// End-to-end tests that shell out to the real dotnet-ef CLI tool and verify the resulting database
+/// state against a real ClickHouse instance — the only path that exercises the full design-time
+/// pipeline (scaffolder → splitter → C# code-gen → compile → migrator). These tests skip (loudly)
+/// if dotnet-ef is not installed.
 /// </summary>
 public class DotnetEfCliTests : IAsyncLifetime
 {
@@ -49,10 +50,34 @@ public class DotnetEfCliTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Migrations_add_splits_into_ordered_forward_only_steps()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+
+        var stepFiles = StepMigrationFiles();
+        Assert.True(stepFiles.Length > 1,
+            $"Expected the migration to split into multiple step files; found {stepFiles.Length}.");
+
+        // Steps are suffixed _001, _002, … and sort in dependency order.
+        var suffixes = stepFiles.Select(f => Path.GetFileNameWithoutExtension(f)[^3..]).ToList();
+        Assert.Equal(suffixes.OrderBy(s => s, StringComparer.Ordinal).ToList(), suffixes);
+
+        // Every step is forward-only: its Down throws rather than attempting a rollback.
+        foreach (var file in stepFiles)
+            Assert.Contains("throw new ClickHouseDownMigrationNotSupportedException", await File.ReadAllTextAsync(file));
+
+        // Exactly one shared model snapshot is emitted for the whole set.
+        Assert.Single(Directory.GetFiles(_migrationsDir!, "*ModelSnapshot.cs"));
+    }
+
+    [Fact]
     public async Task Database_update_creates_correct_schema()
     {
         if (!_dotnetEfAvailable)
-            return; // dotnet-ef not installed — skip gracefully
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
 
         // Add migration and apply to real ClickHouse
         await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
@@ -62,10 +87,10 @@ public class DotnetEfCliTests : IAsyncLifetime
         using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
         await connection.OpenAsync();
 
-        // History table tracks the migration
-        var historyCount = await QueryScalar<ulong>(connection,
-            "SELECT count() FROM `__EFMigrationsHistory`");
-        Assert.Equal(1UL, historyCount);
+        // The split produces one history row per step, so a partial failure stays resumable.
+        var historyCount = await QueryScalar<ulong>(connection, "SELECT count() FROM `__EFMigrationsHistory`");
+        Assert.Equal((ulong)StepMigrationFiles().Length, historyCount);
+        Assert.True(historyCount > 1, "Expected the split migration to record multiple history rows.");
 
         // sensor_readings created with ReplacingMergeTree
         var sensorEngine = await QueryScalar<string>(connection,
@@ -97,13 +122,69 @@ public class DotnetEfCliTests : IAsyncLifetime
         var indexCount = await QueryScalar<ulong>(connection,
             "SELECT count() FROM system.data_skipping_indices WHERE database = currentDatabase() AND table = 'sensor_readings'");
         Assert.True(indexCount > 0, "Expected at least one data skipping index");
+
+        // The materialized view was created (and only because its source/target tables were ordered first).
+        var mvEngine = await QueryScalar<string>(connection,
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = 'hits_mv'");
+        Assert.Equal("MaterializedView", mvEngine);
+
+        // The dictionary was created (ordered after its source table).
+        var dictCount = await QueryScalar<ulong>(connection,
+            "SELECT count() FROM system.dictionaries WHERE database = currentDatabase() AND name = 'hits_dict'");
+        Assert.Equal(1UL, dictCount);
+    }
+
+    [Fact]
+    public async Task Generated_script_runs_as_one_multi_statement_batch()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+
+        var scriptPath = Path.Combine(_smokeProjectDir, "migrate.sql");
+        try
+        {
+            await RunDotnetEfSuccessfully("migrations", "script", "--output", scriptPath);
+            var script = await File.ReadAllTextAsync(scriptPath);
+
+            // The semicolon-termination fix: every DDL statement is terminated, so the statements don't
+            // run together when concatenated.
+            Assert.Contains(";", script);
+            Assert.Contains("CREATE TABLE", script, StringComparison.OrdinalIgnoreCase);
+
+            var csb = new global::ClickHouse.Driver.ADO.ClickHouseConnectionStringBuilder(_connectionString);
+
+            // Run the WHOLE script as a single batch via clickhouse-client --multiquery. If any statement
+            // were missing its terminator, adjacent statements would fuse and the batch would fail.
+            var (exitCode, stdout, stderr) = await SharedContainer.ExecAsync(
+                "clickhouse-client",
+                "--password", csb.Password,
+                "--database", csb.Database,
+                "--multiquery",
+                "--query", script);
+
+            Assert.True(exitCode == 0, $"Multi-statement script failed (exit {exitCode}):\n{stdout}\n{stderr}");
+
+            // Confirm the batch actually built the schema.
+            using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+            await connection.OpenAsync();
+            var sensorCount = await QueryScalar<ulong>(connection,
+                "SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'sensor_readings'");
+            Assert.Equal(1UL, sensorCount);
+        }
+        finally
+        {
+            if (File.Exists(scriptPath))
+                File.Delete(scriptPath);
+        }
     }
 
     [Fact]
     public async Task Idempotent_script_is_rejected()
     {
         if (!_dotnetEfAvailable)
-            return; // dotnet-ef not installed — skip gracefully
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
 
         await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
 
@@ -112,6 +193,14 @@ public class DotnetEfCliTests : IAsyncLifetime
         var output = result.StdOut + result.StdErr;
         Assert.Contains("does not support conditional SQL blocks", output);
     }
+
+    // Step migrations are the "*_NNN.cs" files (excluding their ".Designer.cs" companions and the snapshot).
+    private string[] StepMigrationFiles()
+        => Directory.GetFiles(_migrationsDir!, "*.cs")
+            .Where(f => !f.EndsWith(".Designer.cs", StringComparison.Ordinal)
+                     && !f.EndsWith("ModelSnapshot.cs", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToArray();
 
     private async Task RunDotnetEfSuccessfully(params string[] args)
     {

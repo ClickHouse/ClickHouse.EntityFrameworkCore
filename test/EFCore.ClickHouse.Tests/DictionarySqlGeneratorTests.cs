@@ -66,6 +66,40 @@ public class DictionarySqlGeneratorTests
     }
 
     [Fact]
+    public void CreateDictionary_emits_inline_source_credentials()
+    {
+        var op = SampleCreate();
+        op.SourceUser = "reader";
+        op.SourcePassword = "p@ss'word";
+        op.SourceHost = "ch-1.internal";
+        op.SourcePort = 9440;
+        var sql = Generate(op);
+
+        // Credentials precede TABLE/DB; the password is escaped as a ClickHouse string literal.
+        Assert.Contains("HOST 'ch-1.internal' PORT 9440 USER 'reader' PASSWORD 'p@ss\\'word' TABLE 'currencies' DB 'shop'", sql);
+    }
+
+    [Fact]
+    public void CreateDictionary_named_collection_emits_NAME_and_no_password()
+    {
+        var op = SampleCreate();
+        op.SourceNamedCollection = "ch_creds";
+        var sql = Generate(op);
+
+        Assert.Contains("SOURCE(CLICKHOUSE(NAME 'ch_creds' TABLE 'currencies' DB 'shop'))", sql);
+        Assert.DoesNotContain("PASSWORD", sql);
+    }
+
+    [Fact]
+    public void CreateDictionary_without_credentials_emits_bare_source()
+    {
+        var sql = Generate(SampleCreate());
+        Assert.Contains("SOURCE(CLICKHOUSE(TABLE 'currencies' DB 'shop'))", sql);
+        Assert.DoesNotContain("USER", sql);
+        Assert.DoesNotContain("NAME ", sql);
+    }
+
+    [Fact]
     public void DropDictionary_emits_drop_with_if_exists()
     {
         var sql = Generate(new ClickHouseDropDictionaryOperation { DictionaryName = "currency_dict", IfExists = true });

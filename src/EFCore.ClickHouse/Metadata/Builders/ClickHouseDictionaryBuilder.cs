@@ -45,6 +45,39 @@ public sealed class ClickHouseDictionaryBuilder<TDictionary> where TDictionary :
         return this;
     }
 
+    /// <summary>
+    /// Connection settings for the dictionary's <c>SOURCE(CLICKHOUSE(...))</c>. By default no
+    /// credentials are emitted and the dictionary loads as the <c>default</c> user with an empty
+    /// password — which fails to load on servers where <c>default</c> is password-protected. Set
+    /// <paramref name="user"/>/<paramref name="password"/> (and optionally <paramref name="host"/>/
+    /// <paramref name="port"/> for a remote source) so the dictionary can authenticate.
+    /// <para>The password is written verbatim into the migration DDL. To keep credentials out of
+    /// source control, prefer <see cref="FromNamedCollection"/>.</para>
+    /// </summary>
+    public ClickHouseDictionaryBuilder<TDictionary> WithSourceConnection(
+        string? user = null,
+        string? password = null,
+        string? host = null,
+        int? port = null)
+    {
+        DictionaryAnnotations.SetSourceConnection(_model, _name, host, port, user, password);
+        return this;
+    }
+
+    /// <summary>
+    /// Reference a ClickHouse named collection for the source's connection settings (host/port/user/
+    /// password), keeping credentials out of the migration — the DDL emits only
+    /// <c>SOURCE(CLICKHOUSE(NAME &lt;name&gt; ...))</c>. The named collection must already exist on the
+    /// server (defined under <c>&lt;named_collections&gt;</c> in config, or created out of band).
+    /// Any value passed to <see cref="WithSourceConnection"/> overrides the collection's field.
+    /// </summary>
+    public ClickHouseDictionaryBuilder<TDictionary> FromNamedCollection(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        DictionaryAnnotations.SetSourceNamedCollection(_model, _name, name);
+        return this;
+    }
+
     /// <summary>The dictionary's key column(s). Use a single member or an anonymous type for composite keys.</summary>
     public ClickHouseDictionaryBuilder<TDictionary> HasKey(Expression<Func<TDictionary, object?>> keyExpression)
     {
@@ -128,6 +161,18 @@ internal static class DictionaryAnnotations
     {
         model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionaryColumnNamesSuffix, columnNames);
         model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionaryColumnTypesSuffix, columnClrTypes);
+    }
+
+    public static void SetSourceNamedCollection(IMutableModel model, string name, string? collection)
+        => model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionarySourceNamedCollectionSuffix, collection);
+
+    public static void SetSourceConnection(
+        IMutableModel model, string name, string? host, int? port, string? user, string? password)
+    {
+        model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionarySourceHostSuffix, host);
+        model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionarySourcePortSuffix, port);
+        model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionarySourceUserSuffix, user);
+        model.SetOrRemoveAnnotation(Prefix(name) + ClickHouseAnnotationNames.DictionarySourcePasswordSuffix, password);
     }
 
     public static void SetKey(IMutableModel model, string name, string[] keyColumns)
