@@ -54,6 +54,11 @@ public static class ClickHouseAnnotationNames
     public const string DictionarySourceTypeSuffix = "SourceType"; // assembly-qualified CLR type of the source table entity
     public const string DictionaryColumnNamesSuffix = "ColumnNames";   // string[] — captured so column changes are diffable
     public const string DictionaryColumnTypesSuffix = "ColumnClrTypes"; // string[] — parallel to ColumnNames
+    public const string DictionarySourceNamedCollectionSuffix = "SourceNamedCollection"; // optional CLICKHOUSE source NAME (named collection)
+    public const string DictionarySourceHostSuffix = "SourceHost";       // optional CLICKHOUSE source HOST
+    public const string DictionarySourcePortSuffix = "SourcePort";       // optional CLICKHOUSE source PORT (int)
+    public const string DictionarySourceUserSuffix = "SourceUser";       // optional CLICKHOUSE source USER
+    public const string DictionarySourcePasswordSuffix = "SourcePassword"; // optional CLICKHOUSE source PASSWORD
     public const string DictionaryKeySuffix = "Key";            // string[] of key column names
     public const string DictionaryLayoutSuffix = "Layout";      // canonical LAYOUT name (e.g. "HASHED")
     public const string DictionaryLayoutParamsSuffix = "LayoutParams";

@@ -75,6 +75,16 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
     protected virtual void Generate(ClickHouseCreateMaterializedViewOperation operation, MigrationCommandListBuilder builder)
     {
+        // ClickHouse forbids combining an explicit target table with POPULATE
+        // ("you can't declare both 'TO [db].[table]' and 'POPULATE'"). This provider's views always
+        // write to a target table, so POPULATE is unsupported; backfill the target with a follow-up
+        // INSERT … SELECT instead.
+        if (operation.Populate)
+            throw new NotSupportedException(
+                $"Materialized view '{operation.ViewName}' sets Populate, but ClickHouse does not allow "
+                + "POPULATE together with a 'TO' target table. Remove Populate and backfill the target "
+                + "table with an INSERT … SELECT after the view is created.");
+
         builder.Append("CREATE MATERIALIZED VIEW ");
 
         if (operation.IfNotExists)
@@ -87,9 +97,6 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         builder.Append(" TO ");
         AppendQualifiedName(builder, operation.TargetDatabase, operation.TargetTable);
-
-        if (operation.Populate)
-            builder.Append(" POPULATE");
 
         builder.AppendLine();
         builder.Append("AS ").Append(operation.SelectQuery);
@@ -148,8 +155,24 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder.Append("PRIMARY KEY ");
         builder.AppendLine(string.Join(", ", operation.KeyColumns.Select(helper.DelimitIdentifier)));
 
-        // SOURCE — local ClickHouse table (no credentials)
-        builder.Append("SOURCE(CLICKHOUSE(TABLE ").Append(SqlStringLiteral(operation.SourceTable));
+        // SOURCE — a ClickHouse table. Connection settings are optional; when omitted the dictionary
+        // loads as the 'default' user with an empty password (only works where 'default' is passwordless).
+        builder.Append("SOURCE(CLICKHOUSE(");
+        // A named collection (defined in server config) supplies host/port/user/password; the inline
+        // settings below override its fields.
+        if (!string.IsNullOrWhiteSpace(operation.SourceNamedCollection))
+            builder.Append("NAME ").Append(SqlStringLiteral(operation.SourceNamedCollection)).Append(" ");
+        if (!string.IsNullOrWhiteSpace(operation.SourceHost))
+            builder.Append("HOST ").Append(SqlStringLiteral(operation.SourceHost)).Append(" ");
+        if (operation.SourcePort is { } port)
+            builder.Append("PORT ").Append(port.ToString()).Append(" ");
+        if (!string.IsNullOrWhiteSpace(operation.SourceUser))
+            builder.Append("USER ").Append(SqlStringLiteral(operation.SourceUser)).Append(" ");
+        // Intentionally uses != null (not IsNullOrWhiteSpace): an explicitly-configured empty password
+        // (PASSWORD '') is distinct from "no password configured".
+        if (operation.SourcePassword is not null)
+            builder.Append("PASSWORD ").Append(SqlStringLiteral(operation.SourcePassword)).Append(" ");
+        builder.Append("TABLE ").Append(SqlStringLiteral(operation.SourceTable));
         if (!string.IsNullOrWhiteSpace(operation.SourceDatabase))
             builder.Append(" DB ").Append(SqlStringLiteral(operation.SourceDatabase));
         builder.AppendLine("))");

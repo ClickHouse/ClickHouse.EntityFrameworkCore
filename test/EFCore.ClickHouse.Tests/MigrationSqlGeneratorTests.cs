@@ -1167,17 +1167,19 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
-    public void CreateMaterializedView_with_Populate()
+    public void CreateMaterializedView_with_Populate_and_target_throws()
     {
-        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        // ClickHouse rejects POPULATE alongside a 'TO' target table; this provider's views always have
+        // a target, so the generator surfaces a clear error rather than emitting invalid DDL.
+        var ex = Assert.Throws<NotSupportedException>(() => Generate(new ClickHouseCreateMaterializedViewOperation
         {
             ViewName = "mv_test",
             TargetTable = "target",
             SelectQuery = "SELECT * FROM source",
             Populate = true,
-        });
+        }));
 
-        Assert.Contains("TO `target` POPULATE", sql);
+        Assert.Contains("POPULATE", ex.Message);
     }
 
     [Fact]

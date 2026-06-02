@@ -122,6 +122,16 @@ public class ClickHouseCSharpMigrationOperationGenerator : CSharpMigrationOperat
             };
             if (operation.SourceDatabase != null)
                 args.Add($"sourceDatabase: {code.Literal(operation.SourceDatabase)}");
+            if (operation.SourceNamedCollection != null)
+                args.Add($"sourceNamedCollection: {code.Literal(operation.SourceNamedCollection)}");
+            if (operation.SourceHost != null)
+                args.Add($"sourceHost: {code.Literal(operation.SourceHost)}");
+            if (operation.SourcePort is { } sourcePort)
+                args.Add($"sourcePort: {code.Literal(sourcePort)}");
+            if (operation.SourceUser != null)
+                args.Add($"sourceUser: {code.Literal(operation.SourceUser)}");
+            if (operation.SourcePassword != null)
+                args.Add($"sourcePassword: {code.Literal(operation.SourcePassword)}");
             if (operation.LayoutParams != null)
                 args.Add($"layoutParams: {code.Literal(operation.LayoutParams)}");
             if (operation.LifetimeMin is { } min)

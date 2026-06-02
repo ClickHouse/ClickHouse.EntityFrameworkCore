@@ -35,6 +35,18 @@ public static class SharedContainer
             : _baseConnectionString + $";Database={dbName}";
     }
 
+    /// <summary>
+    /// Runs a command inside the shared container (e.g. <c>clickhouse-client --multiquery</c>) and
+    /// returns its exit code and output. Used to execute a whole <c>;</c>-terminated migration script
+    /// as one batch, which the HTTP driver path can't do.
+    /// </summary>
+    public static async Task<(long ExitCode, string Stdout, string Stderr)> ExecAsync(params string[] command)
+    {
+        await EnsureContainerAsync();
+        var result = await _container!.ExecAsync(command);
+        return (result.ExitCode ?? -1, result.Stdout, result.Stderr);
+    }
+
     private static async Task EnsureContainerAsync()
     {
         if (_baseConnectionString is not null)

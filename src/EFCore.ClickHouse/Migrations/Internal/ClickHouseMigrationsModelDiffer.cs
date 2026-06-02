@@ -253,6 +253,11 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
             KeyColumns = dict.KeyColumns,
             SourceTable = sourceTable,
             SourceDatabase = sourceEntity.GetSchema(),
+            SourceNamedCollection = dict.SourceNamedCollection,
+            SourceHost = dict.SourceHost,
+            SourcePort = dict.SourcePort,
+            SourceUser = dict.SourceUser,
+            SourcePassword = dict.SourcePassword,
             Layout = dict.Layout,
             LayoutParams = dict.LayoutParams,
             LifetimeMin = dict.LifetimeMin,
@@ -302,6 +307,11 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
     private static bool DictionariesEqual(DictionaryDefinition a, DictionaryDefinition b)
         => a.DictTypeName == b.DictTypeName
         && a.SourceTypeName == b.SourceTypeName
+        && a.SourceNamedCollection == b.SourceNamedCollection
+        && a.SourceHost == b.SourceHost
+        && a.SourcePort == b.SourcePort
+        && a.SourceUser == b.SourceUser
+        && a.SourcePassword == b.SourcePassword
         && a.ColumnNames.SequenceEqual(b.ColumnNames, StringComparer.Ordinal)
         && a.ColumnClrTypes.SequenceEqual(b.ColumnClrTypes, StringComparer.Ordinal)
         && a.KeyColumns.SequenceEqual(b.KeyColumns, StringComparer.Ordinal)
