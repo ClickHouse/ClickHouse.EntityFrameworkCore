@@ -24,6 +24,76 @@ public class ClickHouseModelValidator : RelationalModelValidator
 
         ValidateNoForeignKeys(model, logger);
         ValidateEngineConfiguration(model, logger);
+        ValidateMaterializedViews(model, logger);
+    }
+
+    private static void ValidateMaterializedViews(
+        IModel model,
+        IDiagnosticsLogger<DbLoggerCategory.Model.Validation> logger)
+    {
+        var views = model.GetMaterializedViews();
+        if (views.Count == 0)
+            return;
+
+        // Detect pending LINQ lambdas (set by .From<T>().Select(...)) so we don't reject those
+        // as "missing SelectSql" — they're translated lazily by the differ.
+        var viewsWithPendingLambda = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var annotation in model.GetAnnotations())
+        {
+            if (annotation.Name.StartsWith(ClickHouseAnnotationNames.MaterializedViewPrefix, StringComparison.Ordinal)
+                && annotation.Name.EndsWith(":" + ClickHouseAnnotationNames.MaterializedViewPendingLambdaSuffix, StringComparison.Ordinal))
+            {
+                var rest = annotation.Name[ClickHouseAnnotationNames.MaterializedViewPrefix.Length..];
+                var colonIdx = rest.IndexOf(':');
+                if (colonIdx > 0)
+                    viewsWithPendingLambda.Add(rest[..colonIdx]);
+            }
+        }
+
+        foreach (var view in views)
+        {
+            var targetType = Type.GetType(view.TargetTypeName);
+            if (targetType is null)
+            {
+                throw new InvalidOperationException(
+                    $"Materialized view '{view.Name}' references target type '{view.TargetTypeName}' that could not be resolved.");
+            }
+
+            var entityType = model.FindEntityType(targetType);
+            if (entityType is null)
+            {
+                throw new InvalidOperationException(
+                    $"Materialized view '{view.Name}' target type '{targetType.Name}' is not a registered entity in the model. " +
+                    "Call modelBuilder.Entity<T>() for the target type before defining the view.");
+            }
+
+            if (entityType.GetTableName() is null)
+            {
+                throw new InvalidOperationException(
+                    $"Materialized view '{view.Name}' target entity '{targetType.Name}' is not mapped to a table.");
+            }
+
+            if (view.SelectSql is null && !viewsWithPendingLambda.Contains(view.Name))
+            {
+                throw new InvalidOperationException(
+                    $"Materialized view '{view.Name}' has no SELECT body. Call .From<TSource>().Select(...) or .FromRaw(sql) on the builder.");
+            }
+
+            var targetEngine = entityType.GetEngine();
+            if (targetEngine is ClickHouseAnnotationNames.Memory
+                or ClickHouseAnnotationNames.Log
+                or ClickHouseAnnotationNames.TinyLog
+                or ClickHouseAnnotationNames.StripeLog)
+            {
+                logger.Logger.Log(
+                    LogLevel.Warning,
+                    "Materialized view '{ViewName}' targets entity '{EntityType}' which uses the '{Engine}' engine. " +
+                    "This engine is unsuitable as a materialized view destination — data may be lost on restart or aggregations may not work as expected.",
+                    view.Name,
+                    entityType.DisplayName(),
+                    targetEngine);
+            }
+        }
     }
 
     private static void ValidateNoForeignKeys(

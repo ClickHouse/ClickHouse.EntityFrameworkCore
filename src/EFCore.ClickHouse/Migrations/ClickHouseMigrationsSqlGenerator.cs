@@ -29,6 +29,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             case ClickHouseDropDatabaseOperation dropDb:
                 Generate(dropDb, builder);
                 return;
+            case ClickHouseCreateMaterializedViewOperation createMv:
+                Generate(createMv, builder);
+                return;
+            case ClickHouseDropMaterializedViewOperation dropMv:
+                Generate(dropMv, builder);
+                return;
             default:
                 base.Generate(operation, model, builder);
                 return;
@@ -49,6 +55,56 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append("DROP DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
         EndStatement(builder, suppressTransaction: true);
+    }
+
+    protected virtual void Generate(ClickHouseCreateMaterializedViewOperation operation, MigrationCommandListBuilder builder)
+    {
+        builder.Append("CREATE MATERIALIZED VIEW ");
+
+        if (operation.IfNotExists)
+            builder.Append("IF NOT EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.ViewName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        builder.Append(" TO ");
+        AppendQualifiedName(builder, operation.TargetDatabase, operation.TargetTable);
+
+        if (operation.Populate)
+            builder.Append(" POPULATE");
+
+        builder.AppendLine();
+        builder.Append("AS ").Append(operation.SelectQuery);
+
+        EndStatement(builder, suppressTransaction: true);
+    }
+
+    protected virtual void Generate(ClickHouseDropMaterializedViewOperation operation, MigrationCommandListBuilder builder)
+    {
+        builder.Append("DROP VIEW ");
+
+        if (operation.IfExists)
+            builder.Append("IF EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.ViewName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        EndStatement(builder, suppressTransaction: true);
+    }
+
+    private void AppendQualifiedName(MigrationCommandListBuilder builder, string? database, string name)
+    {
+        if (!string.IsNullOrWhiteSpace(database))
+        {
+            builder.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(database));
+            builder.Append(".");
+        }
+
+        builder.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(name));
     }
 
     // CREATE TABLE with ENGINE clause
