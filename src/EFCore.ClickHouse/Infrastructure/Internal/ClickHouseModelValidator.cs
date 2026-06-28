@@ -25,6 +25,64 @@ public class ClickHouseModelValidator : RelationalModelValidator
         ValidateNoForeignKeys(model, logger);
         ValidateEngineConfiguration(model, logger);
         ValidateMaterializedViews(model, logger);
+        ValidateProjections(model, logger);
+    }
+
+    private static void ValidateProjections(
+        IModel model,
+        IDiagnosticsLogger<DbLoggerCategory.Model.Validation> logger)
+    {
+        foreach (var entityType in model.GetEntityTypes())
+        {
+            var projections = entityType.GetProjections();
+            if (projections.Count == 0)
+                continue;
+
+            // Projections are a MergeTree-family feature. Plain MergeTree accepts ADD PROJECTION; the
+            // deduplicating/merging variants (Replacing/Summing/Collapsing/VersionedCollapsing/
+            // Aggregating/Graphite) reject it by default unless deduplicate_merge_projection_mode is set;
+            // non-MergeTree engines do not support projections at all.
+            var engine = entityType.GetEngine() ?? ClickHouseAnnotationNames.MergeTree;
+            var isMergeTreeFamily = engine.EndsWith("MergeTree", StringComparison.Ordinal);
+            var isPlainMergeTree = engine == ClickHouseAnnotationNames.MergeTree;
+
+            foreach (var projection in projections)
+            {
+                var pendingLambdaName = ClickHouseAnnotationNames.ProjectionPrefix + projection.Name + ":"
+                    + ClickHouseAnnotationNames.ProjectionPendingLambdaSuffix;
+                var hasPendingLambda = entityType.FindAnnotation(pendingLambdaName) is not null;
+
+                // A LINQ-defined projection has only the pending lambda (translated lazily by the
+                // differ); don't reject it as "missing SelectSql".
+                if (projection.SelectSql is null && !hasPendingLambda)
+                {
+                    throw new InvalidOperationException(
+                        $"Projection '{projection.Name}' on entity '{entityType.DisplayName()}' has no SELECT body. "
+                        + "Call .Select(...) or .FromRaw(...) on the builder.");
+                }
+
+                if (!isMergeTreeFamily)
+                {
+                    logger.Logger.Log(
+                        LogLevel.Warning,
+                        "Projection '{ProjectionName}' is declared on entity '{EntityType}' which uses the non-MergeTree '{Engine}' engine. "
+                        + "Projections are only supported on the MergeTree family and will fail to apply on this engine.",
+                        projection.Name,
+                        entityType.DisplayName(),
+                        engine);
+                }
+                else if (!isPlainMergeTree)
+                {
+                    logger.Logger.Log(
+                        LogLevel.Warning,
+                        "Projection '{ProjectionName}' is declared on entity '{EntityType}' which uses the deduplicating/merging '{Engine}' engine. "
+                        + "ClickHouse rejects ADD PROJECTION on such engines unless the server setting 'deduplicate_merge_projection_mode' is set to 'drop' or 'rebuild'.",
+                        projection.Name,
+                        entityType.DisplayName(),
+                        engine);
+                }
+            }
+        }
     }
 
     private static void ValidateMaterializedViews(

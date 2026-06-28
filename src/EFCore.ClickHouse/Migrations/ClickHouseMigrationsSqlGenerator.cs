@@ -51,6 +51,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             case ClickHouseDropDictionaryOperation dropDict:
                 Generate(dropDict, builder);
                 return;
+            case ClickHouseAddProjectionOperation addProjection:
+                Generate(addProjection, builder);
+                return;
+            case ClickHouseDropProjectionOperation dropProjection:
+                Generate(dropProjection, builder);
+                return;
             default:
                 base.Generate(operation, model, builder);
                 return;
@@ -205,6 +211,55 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.Append($" ON CLUSTER '{operation.Cluster}'");
 
         TerminateStatement(builder);
+    }
+
+    // Projections — ALTER TABLE … ADD / MATERIALIZE / DROP PROJECTION (MergeTree family only).
+    // ADD with Materialize emits two terminated statements from one operation (the ADD then a
+    // MATERIALIZE so existing parts are covered), mirroring the AlterColumn REMOVE emission.
+
+    protected virtual void Generate(ClickHouseAddProjectionOperation operation, MigrationCommandListBuilder builder)
+    {
+        AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
+        builder.Append(" ADD PROJECTION ");
+        if (operation.IfNotExists)
+            builder.Append("IF NOT EXISTS ");
+        builder
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName))
+            .Append(" (")
+            .Append(operation.SelectQuery)
+            .Append(")");
+        TerminateStatement(builder);
+
+        if (operation.Materialize)
+        {
+            AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
+            builder
+                .Append(" MATERIALIZE PROJECTION ")
+                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName));
+            TerminateStatement(builder);
+        }
+    }
+
+    protected virtual void Generate(ClickHouseDropProjectionOperation operation, MigrationCommandListBuilder builder)
+    {
+        AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
+        builder.Append(" DROP PROJECTION ");
+        if (operation.IfExists)
+            builder.Append("IF EXISTS ");
+        builder.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName));
+        TerminateStatement(builder);
+    }
+
+    // "ALTER TABLE [db.]t [ON CLUSTER 'c']" — shared prefix for the projection ALTER statements.
+    // Uses AppendQualifiedName (not DelimitIdentifier(name, schema)) because ClickHouse's SQL helper
+    // drops the schema argument — the database qualifier must be emitted explicitly, as the MV/dict
+    // generators do.
+    private void AppendAlterTablePrefix(MigrationCommandListBuilder builder, string table, string? schema, string? cluster)
+    {
+        builder.Append("ALTER TABLE ");
+        AppendQualifiedName(builder, schema, table);
+        if (!string.IsNullOrWhiteSpace(cluster))
+            builder.Append($" ON CLUSTER '{cluster}'");
     }
 
     // A single-quoted ClickHouse string literal (used for dictionary SOURCE parameters).
@@ -475,6 +530,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         var allKeys = oldAnnotations.Keys.Union(newAnnotations.Keys);
         foreach (var key in allKeys)
         {
+            // Projection annotations live on the entity type, so adding/removing a projection surfaces
+            // here as a table-annotation delta. They are realized as separate ADD/DROP PROJECTION
+            // operations by the ClickHouse differ, so they are NOT an unsupported table-metadata change.
+            if (key.StartsWith(ClickHouseAnnotationNames.ProjectionPrefix, StringComparison.Ordinal))
+                continue;
+
             oldAnnotations.TryGetValue(key, out var oldVal);
             newAnnotations.TryGetValue(key, out var newVal);
 

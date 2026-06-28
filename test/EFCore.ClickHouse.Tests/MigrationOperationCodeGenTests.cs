@@ -139,6 +139,63 @@ public class MigrationOperationCodeGenTests
     }
 
     [Fact]
+    public void AddProjection_minimal_emits_required_args_and_omits_default_materialize()
+    {
+        var code = Generate(new ClickHouseAddProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "p_by_cat",
+            SelectQuery = "SELECT Category, count() GROUP BY Category",
+        });
+
+        Assert.Contains("migrationBuilder.AddClickHouseProjection(", code);
+        Assert.Contains("table: \"events\"", code);
+        Assert.Contains("name: \"p_by_cat\"", code);
+        Assert.Contains("selectQuery: \"SELECT Category, count() GROUP BY Category\"", code);
+        // Materialize defaults to true → not emitted; other optionals omitted too.
+        Assert.DoesNotContain("materialize:", code);
+        Assert.DoesNotContain("schema:", code);
+        Assert.DoesNotContain("cluster:", code);
+        Assert.DoesNotContain("ifNotExists:", code);
+    }
+
+    [Fact]
+    public void AddProjection_full_emits_all_non_default_args()
+    {
+        var code = Generate(new ClickHouseAddProjectionOperation
+        {
+            Table = "events",
+            Schema = "analytics",
+            ProjectionName = "p",
+            SelectQuery = "SELECT a",
+            Cluster = "prod",
+            Materialize = false,
+            IfNotExists = true,
+        });
+
+        Assert.Contains("schema: \"analytics\"", code);
+        Assert.Contains("cluster: \"prod\"", code);
+        Assert.Contains("materialize: false", code);
+        Assert.Contains("ifNotExists: true", code);
+    }
+
+    [Fact]
+    public void DropProjection_emits_builder_call()
+    {
+        var code = Generate(new ClickHouseDropProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "p",
+            IfExists = true,
+        });
+
+        Assert.Contains("migrationBuilder.DropClickHouseProjection(", code);
+        Assert.Contains("table: \"events\"", code);
+        Assert.Contains("name: \"p\"", code);
+        Assert.Contains("ifExists: true", code);
+    }
+
+    [Fact]
     public void Builtin_operations_still_generate_via_base()
     {
         // The override must delegate unknown operations to the base generator.

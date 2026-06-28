@@ -1,5 +1,6 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
 using ClickHouse.EntityFrameworkCore.Metadata.Internal;
+using ClickHouse.EntityFrameworkCore.Migrations.Design;
 using ClickHouse.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -43,13 +44,19 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         var sourceDicts = (source?.Model.GetDictionaries() ?? []).ToDictionary(d => d.Name);
         var targetDicts = (target?.Model.GetDictionaries() ?? []).ToDictionary(d => d.Name);
 
-        if (sourceViews.Count == 0 && targetViews.Count == 0 && sourceDicts.Count == 0 && targetDicts.Count == 0)
+        // Projections are entity-scoped (attached to a table), unlike model-scoped views/dictionaries.
+        var sourceProjections = GetAllProjections(source?.Model);
+        var targetProjections = GetAllProjections(target?.Model);
+
+        if (sourceViews.Count == 0 && targetViews.Count == 0 && sourceDicts.Count == 0 && targetDicts.Count == 0
+            && sourceProjections.Count == 0 && targetProjections.Count == 0)
             return baseOps;
 
         // Translate any pending LINQ lambdas on the TARGET model. Model is locked at this point,
         // so we can't mutate annotations — we translate to local variables instead and pass the
         // result through to the create operations directly.
         var translatedTargets = ResolveTargetSqls(target?.Model, targetViews.Values);
+        var translatedProjections = ResolveTargetProjectionSqls(target?.Model, targetProjections);
 
         var dropOps = new List<MigrationOperation>();
         var createOps = new List<MigrationOperation>();
@@ -86,6 +93,30 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         {
             if (!sourceDicts.ContainsKey(name))
                 createOps.Add(BuildCreateDictionaryOperation(targetDict, target!.Model, orReplace: false));
+        }
+
+        // Projections: new → ADD (+ MATERIALIZE), removed → DROP, changed → DROP + ADD (no ALTER PROJECTION).
+        foreach (var (key, (sourceDef, _)) in sourceProjections)
+        {
+            if (!targetProjections.TryGetValue(key, out var targetEntry))
+            {
+                dropOps.Add(BuildDropProjectionOperation(key, sourceDef));
+            }
+            else
+            {
+                var resolvedTarget = ResolvedProjection(key, targetEntry.Def, translatedProjections);
+                if (!ProjectionsEqual(sourceDef, resolvedTarget))
+                {
+                    dropOps.Add(BuildDropProjectionOperation(key, sourceDef));
+                    createOps.Add(BuildAddProjectionOperation(key, resolvedTarget));
+                }
+            }
+        }
+
+        foreach (var (key, (targetDef, _)) in targetProjections)
+        {
+            if (!sourceProjections.ContainsKey(key))
+                createOps.Add(BuildAddProjectionOperation(key, ResolvedProjection(key, targetDef, translatedProjections)));
         }
 
         if (dropOps.Count == 0 && createOps.Count == 0)
@@ -155,6 +186,9 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
     }
 
     private static string TranslateToSql(DbContext context, PendingMaterializedViewQuery query)
+        => TranslateToSql(context, query.SourceTypes, query.Lambda, "Materialized view");
+
+    private static string TranslateToSql(DbContext context, Type[] sourceTypes, Delegate lambda, string objectKind)
     {
         var setMethod = typeof(DbContext).GetMethods()
             .First(m => m.Name == nameof(DbContext.Set)
@@ -162,14 +196,14 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
                 && m.GetGenericArguments().Length == 1
                 && m.GetParameters().Length == 0);
 
-        var queryables = new object[query.SourceTypes.Length];
-        for (var i = 0; i < query.SourceTypes.Length; i++)
+        var queryables = new object[sourceTypes.Length];
+        for (var i = 0; i < sourceTypes.Length; i++)
         {
-            queryables[i] = setMethod.MakeGenericMethod(query.SourceTypes[i]).Invoke(context, null)!;
+            queryables[i] = setMethod.MakeGenericMethod(sourceTypes[i]).Invoke(context, null)!;
         }
 
-        var result = (IQueryable?)query.Lambda.DynamicInvoke(queryables)
-            ?? throw new InvalidOperationException("Materialized view query lambda returned null.");
+        var result = (IQueryable?)lambda.DynamicInvoke(queryables)
+            ?? throw new InvalidOperationException($"{objectKind} query lambda returned null.");
 
         return result.ToQueryString();
     }
@@ -328,4 +362,109 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         var colonIdx = rest.IndexOf(':');
         return colonIdx < 0 ? rest : rest[..colonIdx];
     }
+
+    // ── Projections (entity-scoped) ────────────────────────────────────────────
+
+    private readonly record struct ProjectionKey(string Table, string? Schema, string Name);
+
+    // Gather every table-mapped entity type's projections, keyed by (table, schema, name).
+    private static Dictionary<ProjectionKey, (ProjectionDefinition Def, IReadOnlyEntityType Entity)> GetAllProjections(
+        IReadOnlyModel? model)
+    {
+        var result = new Dictionary<ProjectionKey, (ProjectionDefinition, IReadOnlyEntityType)>();
+        if (model is null)
+            return result;
+
+        foreach (var entityType in model.GetEntityTypes())
+        {
+            var table = entityType.GetTableName();
+            if (table is null)
+                continue;
+
+            var schema = entityType.GetSchema();
+            foreach (var projection in entityType.GetProjections())
+                result[new ProjectionKey(table, schema, projection.Name)] = (projection, entityType);
+        }
+
+        return result;
+    }
+
+    // Translate the pending LINQ lambda of any target projection that has no baked SelectSql yet,
+    // then strip its FROM clause / alias qualifiers so it fits a projection's FROM-less SELECT.
+    private static Dictionary<ProjectionKey, string> ResolveTargetProjectionSqls(
+        IReadOnlyModel? model,
+        Dictionary<ProjectionKey, (ProjectionDefinition Def, IReadOnlyEntityType Entity)> targetProjections)
+    {
+        var sqls = new Dictionary<ProjectionKey, string>();
+        if (model is null)
+            return sqls;
+
+        var needTranslation = targetProjections
+            .Where(kv => kv.Value.Def.SelectSql is null)
+            .ToList();
+        if (needTranslation.Count == 0)
+            return sqls;
+
+        DbContext? translationContext = null;
+        try
+        {
+            foreach (var (key, (def, entity)) in needTranslation)
+            {
+                var annotationName = ClickHouseAnnotationNames.ProjectionPrefix + def.Name + ":"
+                    + ClickHouseAnnotationNames.ProjectionPendingLambdaSuffix;
+                if (entity.FindAnnotation(annotationName)?.Value is not PendingProjectionQuery pending)
+                    continue;
+
+                translationContext ??= CreateTranslationContext(model);
+                var translated = TranslateToSql(translationContext, pending.SourceTypes, pending.Lambda, "Projection");
+                sqls[key] = ProjectionSqlRewriter.Rewrite(translated);
+            }
+        }
+        finally
+        {
+            translationContext?.Dispose();
+        }
+
+        return sqls;
+    }
+
+    private static ProjectionDefinition ResolvedProjection(
+        ProjectionKey key,
+        ProjectionDefinition def,
+        Dictionary<ProjectionKey, string> translatedSqls)
+        => def.SelectSql is not null || !translatedSqls.TryGetValue(key, out var sql)
+            ? def
+            : def with { SelectSql = sql };
+
+    private static ClickHouseAddProjectionOperation BuildAddProjectionOperation(ProjectionKey key, ProjectionDefinition def)
+    {
+        if (string.IsNullOrEmpty(def.SelectSql))
+            throw new InvalidOperationException(
+                $"Projection '{def.Name}' on table '{key.Table}' has no SELECT body. Call .Select(...) or .FromRaw(...).");
+
+        return new ClickHouseAddProjectionOperation
+        {
+            Table = key.Table,
+            Schema = key.Schema,
+            ProjectionName = def.Name,
+            SelectQuery = def.SelectSql,
+            Materialize = def.Materialize,
+            Cluster = def.Cluster,
+        };
+    }
+
+    private static ClickHouseDropProjectionOperation BuildDropProjectionOperation(ProjectionKey key, ProjectionDefinition def)
+        => new()
+        {
+            Table = key.Table,
+            Schema = key.Schema,
+            ProjectionName = def.Name,
+            Cluster = def.Cluster,
+            IfExists = true,
+        };
+
+    private static bool ProjectionsEqual(ProjectionDefinition a, ProjectionDefinition b)
+        => a.SelectSql == b.SelectSql
+        && a.Materialize == b.Materialize
+        && a.Cluster == b.Cluster;
 }

@@ -116,6 +116,24 @@ public static class ClickHouseEntityTypeBuilderExtensions
         => tableBuilder.HasVersionedCollapsingMergeTreeEngine(
             GetPropertyName(sign)!, GetPropertyName(version)!);
 
+    // ── Projections ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Begin defining a ClickHouse projection named <paramref name="projectionName"/> on this entity's
+    /// table — an inline, re-ordered or pre-aggregated copy of the table's data that the optimizer can
+    /// transparently use to speed up matching queries. Chain with <c>.Select(q =&gt; …)</c> for a
+    /// LINQ-defined body or <c>.FromRaw(sql)</c> for raw SQL. Projections require a MergeTree-family engine.
+    /// </summary>
+    public static ClickHouseProjectionBuilder<TEntity> HasProjection<TEntity>(
+        this EntityTypeBuilder<TEntity> entityTypeBuilder,
+        string projectionName)
+        where TEntity : class
+    {
+        ArgumentNullException.ThrowIfNull(entityTypeBuilder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectionName);
+        return new((IMutableEntityType)entityTypeBuilder.Metadata, projectionName);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static IMutableEntityType GetEntityType(TableBuilder tableBuilder)

@@ -44,6 +44,13 @@ public class SmokeDbContext : DbContext
         {
             b.HasKey(e => e.Id);
             b.ToTable("hits_source", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+
+            // A table-attached projection on a plain MergeTree table: scaffolding must order the
+            // ADD PROJECTION after the table create, and the FROM-less SELECT must round-trip through
+            // the snapshot unchanged. (ADD PROJECTION is rejected by ReplacingMergeTree/SummingMergeTree
+            // and other dedup/merge engines unless deduplicate_merge_projection_mode is configured.)
+            b.HasProjection("proj_by_value")
+                .FromRaw("SELECT Value, count() GROUP BY Value");
         });
 
         modelBuilder.Entity<HitsByHour>(b =>

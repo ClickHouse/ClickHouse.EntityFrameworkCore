@@ -12,17 +12,21 @@ internal enum MigrationPhase
 {
     // ── Tear-down (most dependent first) ───────────────────────────────
     DropIndexes = 1,
-    DropMaterializedViews = 2,
-    DropDictionaries = 3,
-    DropTables = 4,
-    DropDatabases = 5,
+    DropProjections = 2,
+    DropMaterializedViews = 3,
+    DropDictionaries = 4,
+    DropTables = 5,
+    DropDatabases = 6,
 
     // ── Build-up (least dependent first) ───────────────────────────────
-    CreateDatabases = 6,
-    CreateTables = 7,
-    AddColumns = 8,
-    CreateMaterializedViews = 9,
-    CreateDictionaries = 10,
-    AlterColumns = 11,
-    CreateIndexes = 12,
+    CreateDatabases = 7,
+    CreateTables = 8,
+    AddColumns = 9,
+    CreateMaterializedViews = 10,
+    CreateDictionaries = 11,
+    AlterColumns = 12,
+    // Projections and indexes are table-attached MergeTree sub-objects added via ALTER TABLE after
+    // the table and its columns exist; they come last.
+    CreateProjections = 13,
+    CreateIndexes = 14,
 }

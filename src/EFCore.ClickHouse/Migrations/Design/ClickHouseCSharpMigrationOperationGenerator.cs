@@ -50,6 +50,12 @@ public class ClickHouseCSharpMigrationOperationGenerator : CSharpMigrationOperat
             case ClickHouseDropDictionaryOperation dropDict:
                 Generate(dropDict, builder);
                 break;
+            case ClickHouseAddProjectionOperation addProjection:
+                Generate(addProjection, builder);
+                break;
+            case ClickHouseDropProjectionOperation dropProjection:
+                Generate(dropProjection, builder);
+                break;
             default:
                 base.Generate(operation, builder);
                 break;
@@ -160,6 +166,54 @@ public class ClickHouseCSharpMigrationOperationGenerator : CSharpMigrationOperat
             var args = new List<string> { $"name: {code.Literal(operation.DictionaryName)}" };
             if (operation.Database != null)
                 args.Add($"database: {code.Literal(operation.Database)}");
+            if (operation.Cluster != null)
+                args.Add($"cluster: {code.Literal(operation.Cluster)}");
+            if (operation.IfExists)
+                args.Add($"ifExists: {code.Literal(true)}");
+
+            AppendArgs(builder, args);
+        }
+    }
+
+    protected virtual void Generate(ClickHouseAddProjectionOperation operation, IndentedStringBuilder builder)
+    {
+        var code = Dependencies.CSharpHelper;
+        builder.AppendLine(".AddClickHouseProjection(");
+        using (builder.Indent())
+        {
+            var args = new List<string>
+            {
+                $"table: {code.Literal(operation.Table)}",
+                $"name: {code.Literal(operation.ProjectionName)}",
+                $"selectQuery: {code.Literal(operation.SelectQuery)}",
+            };
+            if (operation.Schema != null)
+                args.Add($"schema: {code.Literal(operation.Schema)}");
+            if (operation.Cluster != null)
+                args.Add($"cluster: {code.Literal(operation.Cluster)}");
+            // Materialize defaults to true in the builder — only emit when opted out.
+            if (!operation.Materialize)
+                args.Add($"materialize: {code.Literal(false)}");
+            if (operation.IfNotExists)
+                args.Add($"ifNotExists: {code.Literal(true)}");
+
+            AppendArgs(builder, args);
+        }
+    }
+
+    protected virtual void Generate(ClickHouseDropProjectionOperation operation, IndentedStringBuilder builder)
+    {
+        var code = Dependencies.CSharpHelper;
+        builder.AppendLine(".DropClickHouseProjection(");
+        using (builder.Indent())
+        {
+            var args = new List<string>
+            {
+                $"table: {code.Literal(operation.Table)}",
+                $"name: {code.Literal(operation.ProjectionName)}",
+            };
+            if (operation.Schema != null)
+                args.Add($"schema: {code.Literal(operation.Schema)}");
             if (operation.Cluster != null)
                 args.Add($"cluster: {code.Literal(operation.Cluster)}");
             if (operation.IfExists)

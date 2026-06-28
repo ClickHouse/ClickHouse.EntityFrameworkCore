@@ -55,6 +55,7 @@ public sealed class ClickHouseMigrationsSplitter
         // Tear-down: most dependent first. Materialized-view drops are reversed relative to
         // create order so a dependent view is dropped before what it reads.
         result.AddRange(phaseGroups[MigrationPhase.DropIndexes]);
+        result.AddRange(phaseGroups[MigrationPhase.DropProjections]);
         result.AddRange(SortByDependencies(phaseGroups[MigrationPhase.DropMaterializedViews], reverseForDrops: true));
         result.AddRange(phaseGroups[MigrationPhase.DropDictionaries]);
         result.AddRange(phaseGroups[MigrationPhase.DropTables]);
@@ -67,6 +68,7 @@ public sealed class ClickHouseMigrationsSplitter
         result.AddRange(SortByDependencies(phaseGroups[MigrationPhase.CreateMaterializedViews], reverseForDrops: false));
         result.AddRange(phaseGroups[MigrationPhase.CreateDictionaries]);
         result.AddRange(phaseGroups[MigrationPhase.AlterColumns]);
+        result.AddRange(phaseGroups[MigrationPhase.CreateProjections]);
         result.AddRange(phaseGroups[MigrationPhase.CreateIndexes]);
 
         return result;
@@ -75,6 +77,8 @@ public sealed class ClickHouseMigrationsSplitter
     private static MigrationPhase ClassifyOperation(MigrationOperation op) => op switch
     {
         DropIndexOperation => MigrationPhase.DropIndexes,
+        ClickHouseDropProjectionOperation => MigrationPhase.DropProjections,
+        ClickHouseAddProjectionOperation => MigrationPhase.CreateProjections,
         ClickHouseDropMaterializedViewOperation => MigrationPhase.DropMaterializedViews,
         DropTableOperation => MigrationPhase.DropTables,
         ClickHouseDropDatabaseOperation => MigrationPhase.DropDatabases,
@@ -205,6 +209,8 @@ public sealed class ClickHouseMigrationsSplitter
         ClickHouseDropDictionaryOperation o => $"Drop dictionary {o.DictionaryName}",
         ClickHouseCreateDatabaseOperation o => $"Create database {o.Name}",
         ClickHouseDropDatabaseOperation o => $"Drop database {o.Name}",
+        ClickHouseAddProjectionOperation o => $"Add projection {o.ProjectionName} on {o.Table}",
+        ClickHouseDropProjectionOperation o => $"Drop projection {o.ProjectionName} on {o.Table}",
         _ => op.GetType().Name,
     };
 }

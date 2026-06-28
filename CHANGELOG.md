@@ -48,6 +48,18 @@ v0.3.0
   (`<named_collections>`); with neither, the dictionary loads as the passwordless `default` user. Scope:
   ClickHouse-table-backed dictionaries only; external sources (MySQL/PostgreSQL/HTTP) remain excluded, and
   scalar `dictGet(...)` lookups in queries over other tables are not yet translated.
+* **Projections.** Declare a table-attached ClickHouse projection on the mapping entity with
+  `modelBuilder.Entity<T>().HasProjection("name").Select(q => …)` (LINQ over the parent table) or
+  `.FromRaw(sql)`, and it is scaffolded/applied as a migration. Adding a projection emits
+  `ALTER TABLE … ADD PROJECTION …` followed by `MATERIALIZE PROJECTION` so existing parts are covered
+  (opt out with `.WithoutMaterialize()`; target a cluster with `.OnCluster(...)`). LINQ bodies are
+  translated to SQL at differ time and their `FROM`/alias qualifiers stripped (a projection's SELECT is
+  FROM-less); only the `SELECT [+ GroupBy] [+ OrderBy]` shape is supported, so use `.FromRaw(...)` for
+  anything with WHERE/JOIN. There is no `ALTER PROJECTION`, so a changed projection migrates as DROP + ADD;
+  projections are created after their table (and dropped before it) by the splitter. This is the first
+  **entity-type-scoped** migratable ClickHouse object (views/dictionaries are model-scoped). Requires a
+  MergeTree-family engine; ClickHouse further rejects `ADD PROJECTION` on deduplicating/merging engines
+  (`ReplacingMergeTree`, `SummingMergeTree`, …) unless `deduplicate_merge_projection_mode` is configured.
 
 v0.2.0
 ---

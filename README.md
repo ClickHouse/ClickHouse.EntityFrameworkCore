@@ -238,7 +238,37 @@ dotnet ef database update
 - CREATE TABLE with full ENGINE clause (all engine types, ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS, codecs, comments, data-skipping indices)
 - ADD COLUMN, DROP COLUMN, MODIFY COLUMN, RENAME COLUMN, RENAME TABLE
 - DROP TABLE, CREATE/DROP INDEX (data-skipping)
+- ADD / MATERIALIZE / DROP PROJECTION (see [Projections](#projections))
+- Materialized views and dictionaries (model-level fluent API)
 - Custom `ClickHouseCreateDatabaseOperation` / `ClickHouseDropDatabaseOperation`
+
+#### Projections
+
+A [projection](https://clickhouse.com/docs/en/sql-reference/statements/alter/projection) is a table-attached, re-ordered or pre-aggregated copy of a table's data that ClickHouse's optimizer can transparently use to speed up matching queries. Declare one on the entity that maps to the table:
+
+```csharp
+modelBuilder.Entity<Event>(b =>
+{
+    b.HasKey(e => e.Id);
+    b.ToTable("events", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+
+    // LINQ over the parent table — the FROM clause is stripped automatically.
+    b.HasProjection("by_category")
+        .Select(q => q.GroupBy(e => e.Category)
+                      .Select(g => new { g.Key, Total = g.Sum(e => e.Amount) }));
+
+    // …or raw SQL (the SELECT list with optional GROUP BY / ORDER BY, no FROM):
+    b.HasProjection("by_date")
+        .FromRaw("SELECT EventDate, count() GROUP BY EventDate");
+});
+```
+
+Adding a projection emits `ALTER TABLE … ADD PROJECTION …` followed by `ALTER TABLE … MATERIALIZE PROJECTION …` so existing parts are covered. Chain `.WithoutMaterialize()` to skip the backfill (only newly-written parts are projected) or `.OnCluster("cluster")` to run the DDL `ON CLUSTER`.
+
+Notes and limitations:
+- Projections require a **MergeTree-family** engine. ClickHouse additionally rejects `ADD PROJECTION` on deduplicating/merging engines (`ReplacingMergeTree`, `SummingMergeTree`, `CollapsingMergeTree`, `AggregatingMergeTree`, …) unless the server setting `deduplicate_merge_projection_mode` is set to `drop` or `rebuild`.
+- The LINQ body supports only the `SELECT [+ GroupBy] [+ OrderBy]` shape (a projection's SELECT has no FROM/WHERE/JOIN); use `.FromRaw(...)` for anything more complex.
+- There is no `ALTER PROJECTION`; a changed projection is migrated as DROP + ADD.
 
 **ClickHouse limitations reflected in migrations:**
 - ALTER TABLE cannot change engine, ORDER BY, PARTITION BY, or other structural metadata — the provider throws `NotSupportedException` with a clear message

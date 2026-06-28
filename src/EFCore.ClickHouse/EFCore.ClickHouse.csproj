@@ -37,6 +37,11 @@
     <None Include="README.nuget.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Expose internal design-time helpers (e.g. ProjectionSqlRewriter) to the unit-test project. -->
+    <InternalsVisibleTo Include="EFCore.ClickHouse.Tests" />
+  </ItemGroup>
+
   <Target Name="SetPackageReleaseNotes" BeforeTargets="GenerateNuspec">
     <PropertyGroup>
       <PackageReleaseNotes>$([System.IO.File]::ReadAllText("$(MSBuildProjectDirectory)/../../RELEASENOTES.md"))</PackageReleaseNotes>

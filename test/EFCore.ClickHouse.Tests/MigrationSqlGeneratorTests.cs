@@ -1229,6 +1229,96 @@ public class MigrationSqlGeneratorTests
         Assert.Contains("ON CLUSTER 'my_cluster'", sql);
     }
 
+    // ── Projection operations ─────────────────────────────────────────────
+
+    [Fact]
+    public void AddProjection_emits_ADD_then_MATERIALIZE_by_default()
+    {
+        var commands = GenerateCommands(new ClickHouseAddProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "proj_by_date",
+            SelectQuery = "SELECT EventDate, count() GROUP BY EventDate",
+        });
+
+        Assert.Equal(2, commands.Count);
+        Assert.Contains("ALTER TABLE `events` ADD PROJECTION `proj_by_date` (SELECT EventDate, count() GROUP BY EventDate)", commands[0].CommandText);
+        Assert.Contains("ALTER TABLE `events` MATERIALIZE PROJECTION `proj_by_date`", commands[1].CommandText);
+    }
+
+    [Fact]
+    public void AddProjection_without_materialize_emits_single_statement()
+    {
+        var commands = GenerateCommands(new ClickHouseAddProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "proj_by_date",
+            SelectQuery = "SELECT EventDate GROUP BY EventDate",
+            Materialize = false,
+        });
+
+        Assert.Single(commands);
+        Assert.Contains("ADD PROJECTION `proj_by_date`", commands[0].CommandText);
+        Assert.DoesNotContain("MATERIALIZE", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void AddProjection_with_IfNotExists()
+    {
+        var sql = Generate(new ClickHouseAddProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "p",
+            SelectQuery = "SELECT a",
+            Materialize = false,
+            IfNotExists = true,
+        });
+
+        Assert.Contains("ADD PROJECTION IF NOT EXISTS `p`", sql);
+    }
+
+    [Fact]
+    public void AddProjection_with_schema_and_OnCluster()
+    {
+        var sql = Generate(new ClickHouseAddProjectionOperation
+        {
+            Table = "events",
+            Schema = "analytics",
+            ProjectionName = "p",
+            SelectQuery = "SELECT a",
+            Cluster = "prod",
+        });
+
+        Assert.Contains("ALTER TABLE `analytics`.`events` ON CLUSTER 'prod' ADD PROJECTION `p`", sql);
+        Assert.Contains("ALTER TABLE `analytics`.`events` ON CLUSTER 'prod' MATERIALIZE PROJECTION `p`", sql);
+    }
+
+    [Fact]
+    public void DropProjection_with_IfExists()
+    {
+        var sql = Generate(new ClickHouseDropProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "p",
+            IfExists = true,
+        });
+
+        Assert.Contains("ALTER TABLE `events` DROP PROJECTION IF EXISTS `p`", sql);
+    }
+
+    [Fact]
+    public void DropProjection_with_OnCluster()
+    {
+        var sql = Generate(new ClickHouseDropProjectionOperation
+        {
+            Table = "events",
+            ProjectionName = "p",
+            Cluster = "prod",
+        });
+
+        Assert.Contains("ALTER TABLE `events` ON CLUSTER 'prod' DROP PROJECTION `p`", sql);
+    }
+
     // ── Statement termination ─────────────────────────────────────────────
     // Every emitted statement must end with the terminator (`;`). The base EndStatement only ends
     // the command — the terminator is the caller's responsibility — so a missing one would only show
@@ -1261,6 +1351,9 @@ public class MigrationSqlGeneratorTests
         yield return [new ClickHouseDropDatabaseOperation { Name = "db" }];
         yield return [new ClickHouseCreateMaterializedViewOperation { ViewName = "mv", TargetTable = "t", SelectQuery = "SELECT * FROM s" }];
         yield return [new ClickHouseDropMaterializedViewOperation { ViewName = "mv" }];
+        yield return [new ClickHouseAddProjectionOperation { Table = "t", ProjectionName = "p", SelectQuery = "SELECT a GROUP BY a" }];
+        yield return [new ClickHouseAddProjectionOperation { Table = "t", ProjectionName = "p", SelectQuery = "SELECT a", Materialize = false }];
+        yield return [new ClickHouseDropProjectionOperation { Table = "t", ProjectionName = "p" }];
     }
 
     [Theory]

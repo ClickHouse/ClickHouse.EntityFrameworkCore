@@ -132,4 +132,48 @@ public static class ClickHouseMigrationBuilderExtensions
         builder.Operations.Add(operation);
         return new OperationBuilder<ClickHouseDropDictionaryOperation>(operation);
     }
+
+    public static OperationBuilder<ClickHouseAddProjectionOperation> AddClickHouseProjection(
+        this MigrationBuilder builder,
+        string table,
+        string name,
+        string selectQuery,
+        string? schema = null,
+        string? cluster = null,
+        bool materialize = true,
+        bool ifNotExists = false)
+    {
+        var operation = new ClickHouseAddProjectionOperation
+        {
+            Table = table,
+            Schema = schema,
+            ProjectionName = name,
+            SelectQuery = selectQuery,
+            Cluster = cluster,
+            Materialize = materialize,
+            IfNotExists = ifNotExists,
+        };
+        builder.Operations.Add(operation);
+        return new OperationBuilder<ClickHouseAddProjectionOperation>(operation);
+    }
+
+    public static OperationBuilder<ClickHouseDropProjectionOperation> DropClickHouseProjection(
+        this MigrationBuilder builder,
+        string table,
+        string name,
+        string? schema = null,
+        string? cluster = null,
+        bool ifExists = false)
+    {
+        var operation = new ClickHouseDropProjectionOperation
+        {
+            Table = table,
+            Schema = schema,
+            ProjectionName = name,
+            Cluster = cluster,
+            IfExists = ifExists,
+        };
+        builder.Operations.Add(operation);
+        return new OperationBuilder<ClickHouseDropProjectionOperation>(operation);
+    }
 }
