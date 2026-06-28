@@ -1,4 +1,5 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
+using ClickHouse.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 
@@ -36,6 +37,30 @@ public class SmokeDbContext : DbContext
             b.HasKey(e => e.Id);
             b.ToTable("audit_logs", t => t.HasMemoryEngine());
         });
+
+        // A materialized view over a source/target pair, so scaffolding must order the table
+        // creates ahead of the view create when splitting into step migrations.
+        modelBuilder.Entity<HitsSource>(b =>
+        {
+            b.HasKey(e => e.Id);
+            b.ToTable("hits_source", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+        });
+
+        modelBuilder.Entity<HitsByHour>(b =>
+        {
+            b.HasKey(e => e.Bucket);
+            b.ToTable("hits_by_hour", t => t.HasSummingMergeTreeEngine("Hits").WithOrderBy("Bucket"));
+        });
+
+        modelBuilder.HasMaterializedView<HitsByHour>("hits_mv")
+            .FromRaw("SELECT Id AS Bucket, Value AS Hits FROM hits_source");
+
+        // A dictionary over the hits_source table — scaffolding must order it after the table create.
+        modelBuilder.HasDictionary<HitsSource>("hits_dict")
+            .FromTable<HitsSource>()
+            .HasKey(h => h.Id)
+            .Layout(ClickHouseDictionaryLayout.Hashed)
+            .Lifetime(60);
     }
 }
 
@@ -52,6 +77,18 @@ public class AuditLog
 {
     public long Id { get; set; }
     public string Message { get; set; } = string.Empty;
+}
+
+public class HitsSource
+{
+    public long Id { get; set; }
+    public long Value { get; set; }
+}
+
+public class HitsByHour
+{
+    public long Bucket { get; set; }
+    public long Hits { get; set; }
 }
 
 public class SmokeDbContextFactory : IDesignTimeDbContextFactory<SmokeDbContext>

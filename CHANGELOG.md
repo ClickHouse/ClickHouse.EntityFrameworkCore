@@ -20,6 +20,35 @@ v0.3.0
 * Preserve `LowCardinality(...)` and `Nullable(...)` wrappers from `HasColumnType(...)` in generated migration DDL. Previously the wrapper was stripped during type-mapping resolution, so the migration emitted the inner type. ([#18](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/18))
 * Preserve explicit `HasColumnType(...)` text whenever the resolved mapping's canonical store type differs from the user's input — fixes `Enum8(...)` and `AggregateFunction(...)` columns silently emitting `String` in generated DDL. Also covers `Enum16`, `SimpleAggregateFunction`, `Nested`, and the parameter-bearing forms (`Decimal128(S)`, `Json(...)` with type hints, etc.). ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24))
 
+### Migrations
+* **Materialized views are now scaffoldable.** A custom `CSharpMigrationOperationGenerator` renders the provider's
+  custom operations (`CreateClickHouseMaterializedView`/`DropClickHouseMaterializedView` and the database create/drop
+  operations) into migration code, so `dotnet ef migrations add` works for models that declare `HasMaterializedView(...)`.
+  Because the provider's views always write to a `TO` target table, `POPULATE` (which ClickHouse forbids alongside `TO`)
+  is rejected with a descriptive `NotSupportedException`; backfill the target with an `INSERT … SELECT` after creation.
+* **Dependency-ordered, single-operation step migrations.** Because ClickHouse has no transactions, a multi-operation
+  `migrations add` is now scaffolded as a sequence of single-operation step files (`<name>_001`, `<name>_002`, …), each
+  with its own history row, so a partial failure is resumable (already-applied steps stay recorded). Operations are
+  ordered so every object exists before it is referenced — databases and tables are created before the materialized
+  views that read them, and drops run before creates — via a phase-based splitter with a topological sort over
+  materialized-view dependencies (with cycle detection). The generated step migrations are **forward-only**: their
+  `Down` methods throw `ClickHouseDownMigrationNotSupportedException`. Single-operation migrations are unaffected.
+* **Dictionaries.** Declare a ClickHouse dictionary in the model with
+  `modelBuilder.HasDictionary<TDict>("name").FromTable<TSource>().HasKey(...).Layout(...).Lifetime(...)`
+  and it is scaffolded/applied as a migration (`CREATE DICTIONARY` / `DROP DICTIONARY`). The dictionary's
+  columns are the properties of `TDict`; the source is a ClickHouse table (`SOURCE(CLICKHOUSE(...))`).
+  Changes re-apply atomically via `CREATE OR REPLACE DICTIONARY` (ClickHouse has no `ALTER DICTIONARY`),
+  and dictionaries are ordered after their source tables (and dropped before them) by the splitter.
+  A declared dictionary is also **queryable like a keyless `DbSet`**: its type is mapped as a view over
+  the dictionary, so `context.Set<TDict>().Where(...)` runs `SELECT … FROM <dict>` (and it is never
+  migrated as a table). Because a `SOURCE(CLICKHOUSE(...))` dictionary loads by reconnecting to the server,
+  on a password-protected server it needs credentials: configure them inline with
+  `.WithSourceConnection(user, password, host, port)`, or — to keep secrets out of source control — with
+  `.FromNamedCollection("name")`, which references a named collection defined in server config
+  (`<named_collections>`); with neither, the dictionary loads as the passwordless `default` user. Scope:
+  ClickHouse-table-backed dictionaries only; external sources (MySQL/PostgreSQL/HTTP) remain excluded, and
+  scalar `dictGet(...)` lookups in queries over other tables are not yet translated.
+
 v0.2.0
 ---
 ### Table engine and DDL

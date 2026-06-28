@@ -1088,11 +1088,220 @@ public class MigrationSqlGeneratorTests
         }
     }
 
+    // ── Materialized view operations ──────────────────────────────────────
+
+    [Fact]
+    public void CreateMaterializedView_generates_minimal_DDL()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_hourly_hits",
+            TargetTable = "hourly_hits",
+            SelectQuery = "SELECT toStartOfHour(ts) AS hour, count() AS hits FROM raw_hits GROUP BY hour",
+        });
+
+        Assert.Contains("CREATE MATERIALIZED VIEW `mv_hourly_hits` TO `hourly_hits`", sql);
+        Assert.Contains("AS SELECT toStartOfHour(ts) AS hour, count() AS hits FROM raw_hits GROUP BY hour", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_IfNotExists()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            IfNotExists = true,
+        });
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS `mv_test`", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_database_qualified_names()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            Database = "analytics",
+            TargetDatabase = "analytics",
+        });
+
+        Assert.Contains("`analytics`.`mv_test`", sql);
+        Assert.Contains("TO `analytics`.`target`", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_OnCluster()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            Cluster = "my_cluster",
+        });
+
+        Assert.Contains("ON CLUSTER 'my_cluster'", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_all_options()
+    {
+        var sql = Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_hourly",
+            TargetTable = "hourly_agg",
+            SelectQuery = "SELECT toStartOfHour(ts) AS hour, count() AS cnt FROM events GROUP BY hour",
+            Database = "analytics",
+            TargetDatabase = "reporting",
+            Cluster = "prod",
+            IfNotExists = true,
+        });
+
+        Assert.Contains("CREATE MATERIALIZED VIEW IF NOT EXISTS `analytics`.`mv_hourly` ON CLUSTER 'prod' TO `reporting`.`hourly_agg`", sql);
+        Assert.Contains("AS SELECT toStartOfHour(ts) AS hour, count() AS cnt FROM events GROUP BY hour", sql);
+    }
+
+    [Fact]
+    public void CreateMaterializedView_with_Populate_and_target_throws()
+    {
+        // ClickHouse rejects POPULATE alongside a 'TO' target table; this provider's views always have
+        // a target, so the generator surfaces a clear error rather than emitting invalid DDL.
+        var ex = Assert.Throws<NotSupportedException>(() => Generate(new ClickHouseCreateMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            TargetTable = "target",
+            SelectQuery = "SELECT * FROM source",
+            Populate = true,
+        }));
+
+        Assert.Contains("POPULATE", ex.Message);
+    }
+
+    [Fact]
+    public void DropMaterializedView_generates_DROP_VIEW()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_hourly_hits",
+        });
+
+        Assert.Contains("DROP VIEW `mv_hourly_hits`", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_with_IfExists()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            IfExists = true,
+        });
+
+        Assert.Contains("DROP VIEW IF EXISTS `mv_test`", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_with_database_qualified_name()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            Database = "analytics",
+        });
+
+        Assert.Contains("DROP VIEW `analytics`.`mv_test`", sql);
+    }
+
+    [Fact]
+    public void DropMaterializedView_with_OnCluster()
+    {
+        var sql = Generate(new ClickHouseDropMaterializedViewOperation
+        {
+            ViewName = "mv_test",
+            Cluster = "my_cluster",
+        });
+
+        Assert.Contains("ON CLUSTER 'my_cluster'", sql);
+    }
+
+    // ── Statement termination ─────────────────────────────────────────────
+    // Every emitted statement must end with the terminator (`;`). The base EndStatement only ends
+    // the command — the terminator is the caller's responsibility — so a missing one would only show
+    // up when statements are concatenated (e.g. `dotnet ef migrations script`), where they'd run
+    // together. These assert each produced command is individually terminated.
+
+    public static IEnumerable<object[]> TerminatedOperations()
+    {
+        var createTable = new CreateTableOperation { Name = "t" };
+        createTable.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.MergeTree);
+        createTable.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+        createTable.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        yield return [createTable];
+
+        yield return [new AddColumnOperation { Table = "t", Name = "C", ColumnType = "String", ClrType = typeof(string) }];
+        yield return [new DropColumnOperation { Table = "t", Name = "C" }];
+        yield return [new AlterColumnOperation { Table = "t", Name = "C", ColumnType = "Int64", ClrType = typeof(long) }];
+        yield return [new RenameColumnOperation { Table = "t", Name = "a", NewName = "b" }];
+        yield return [new RenameTableOperation { Name = "a", NewName = "b" }];
+
+        var createIndex = new CreateIndexOperation { Name = "idx", Table = "t", Columns = ["C"] };
+        createIndex.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexType, "minmax");
+        yield return [createIndex];
+
+        var dropIndex = new DropIndexOperation { Table = "t", Name = "idx" };
+        dropIndex.AddAnnotation(ClickHouseAnnotationNames.SkippingIndexType, "minmax");
+        yield return [dropIndex];
+
+        yield return [new ClickHouseCreateDatabaseOperation { Name = "db" }];
+        yield return [new ClickHouseDropDatabaseOperation { Name = "db" }];
+        yield return [new ClickHouseCreateMaterializedViewOperation { ViewName = "mv", TargetTable = "t", SelectQuery = "SELECT * FROM s" }];
+        yield return [new ClickHouseDropMaterializedViewOperation { ViewName = "mv" }];
+    }
+
+    [Theory]
+    [MemberData(nameof(TerminatedOperations))]
+    public void Each_generated_statement_is_terminated(MigrationOperation operation)
+    {
+        var commands = GenerateCommands(operation);
+        Assert.NotEmpty(commands);
+        Assert.All(commands, c =>
+            Assert.EndsWith(";", c.CommandText.TrimEnd()));
+    }
+
+    [Fact]
+    public void AlterColumn_removing_annotation_terminates_both_modify_and_remove()
+    {
+        // This operation emits two statements (MODIFY COLUMN + REMOVE CODEC); both must be terminated.
+        var op = new AlterColumnOperation
+        {
+            Table = "t", Name = "C", ColumnType = "String", ClrType = typeof(string)
+        };
+        op.OldColumn.AddAnnotation(ClickHouseAnnotationNames.ColumnCodec, "ZSTD");
+
+        var commands = GenerateCommands(op);
+        Assert.Equal(2, commands.Count);
+        Assert.All(commands, c => Assert.EndsWith(";", c.CommandText.TrimEnd()));
+    }
+
     private string GenerateCreateTable(Action<CreateTableOperation> configure)
     {
         var operation = new CreateTableOperation { Name = "test_table" };
         configure(operation);
         return Generate(operation);
+    }
+
+    private static IReadOnlyList<MigrationCommand> GenerateCommands(params MigrationOperation[] operations)
+    {
+        var optionsBuilder = new DbContextOptionsBuilder()
+            .UseClickHouse("Host=localhost;Database=test");
+
+        using var context = new DbContext(optionsBuilder.Options);
+        return context.GetService<IMigrationsSqlGenerator>().Generate(operations);
     }
 
     private string Generate(params MigrationOperation[] operations)
