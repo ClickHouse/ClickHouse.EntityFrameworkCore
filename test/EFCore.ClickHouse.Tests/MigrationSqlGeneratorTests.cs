@@ -1244,6 +1244,8 @@ public class MigrationSqlGeneratorTests
         Assert.Equal(2, commands.Count);
         Assert.Contains("ALTER TABLE `events` ADD PROJECTION `proj_by_date` (SELECT EventDate, count() GROUP BY EventDate)", commands[0].CommandText);
         Assert.Contains("ALTER TABLE `events` MATERIALIZE PROJECTION `proj_by_date`", commands[1].CommandText);
+        // The materialize must be synchronous so a later drop/recreate doesn't race the mutation.
+        Assert.Contains("SETTINGS mutations_sync = 1", commands[1].CommandText);
     }
 
     [Fact]

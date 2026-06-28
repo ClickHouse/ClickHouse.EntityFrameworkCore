@@ -235,7 +235,13 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
             builder
                 .Append(" MATERIALIZE PROJECTION ")
-                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName));
+                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName))
+                // MATERIALIZE PROJECTION is an asynchronous mutation; without this the migration
+                // returns before the backfill finishes, so a later DROP/MATERIALIZE on the same
+                // projection (e.g. a change scaffolded as drop+add) races the in-flight mutation and
+                // fails with "Cannot drop projection … affected by mutation … not finished yet".
+                // mutations_sync = 1 makes the statement wait for the mutation on the local replica.
+                .Append(" SETTINGS mutations_sync = 1");
             TerminateStatement(builder);
         }
     }
