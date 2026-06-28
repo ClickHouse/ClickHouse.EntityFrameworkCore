@@ -14,14 +14,13 @@ public class ClickHouseAnnotationCodeGenerator : AnnotationCodeGenerator
 
     // The snapshot generator (CSharpSnapshotGenerator) filters annotations ONLY through
     // FilterIgnoredAnnotations — it never calls RemoveAnnotationsHandledByConventions — so the
-    // IsHandledByConvention overrides below do not reach the snapshot path. A LINQ-defined
-    // materialized view stashes a transient pending-lambda annotation holding a non-serializable
-    // delegate (translated at differ time); it must be dropped here or the snapshot generator throws
-    // trying to emit the delegate via HasAnnotation.
+    // IsHandledByConvention overrides below do not reach the snapshot path. The pending-LINQ-lambda
+    // annotations (materialized views on the model, projections on entity types) hold a
+    // non-serializable delegate that is translated at differ time, so they must be dropped here or
+    // the snapshot generator throws trying to emit the delegate via HasAnnotation. Filter them out
+    // for every annotatable the snapshot walks (model, entity types, …).
     public override IEnumerable<IAnnotation> FilterIgnoredAnnotations(IEnumerable<IAnnotation> annotations)
-        => base.FilterIgnoredAnnotations(annotations)
-            .Where(a => !a.Name.EndsWith(
-                ":" + ClickHouseAnnotationNames.MaterializedViewPendingLambdaSuffix, StringComparison.Ordinal));
+        => base.FilterIgnoredAnnotations(annotations).Where(a => !IsTransientPendingLambda(a.Name));
 
     protected override bool IsHandledByConvention(IModel model, IAnnotation annotation)
     {

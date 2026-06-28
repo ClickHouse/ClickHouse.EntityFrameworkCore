@@ -24,7 +24,12 @@ public class ClickHouseAnnotationProvider : RelationalAnnotationProvider
 
         foreach (var annotation in entityType.GetAnnotations())
         {
-            if (annotation.Name.StartsWith(ClickHouseAnnotationNames.Prefix, StringComparison.Ordinal))
+            // Engine/order-by/etc. belong on the table operation, but projection annotations do not:
+            // projections become their own ClickHouseAddProjectionOperation (the differ reads them
+            // straight off the entity type). Copying them onto the CreateTableOperation pollutes it —
+            // and the transient pending-lambda value is a delegate the C# code generator can't emit.
+            if (annotation.Name.StartsWith(ClickHouseAnnotationNames.Prefix, StringComparison.Ordinal)
+                && !annotation.Name.StartsWith(ClickHouseAnnotationNames.ProjectionPrefix, StringComparison.Ordinal))
                 yield return annotation;
         }
     }

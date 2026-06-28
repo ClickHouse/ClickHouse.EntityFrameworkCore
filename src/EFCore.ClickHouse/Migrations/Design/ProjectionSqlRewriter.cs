@@ -51,6 +51,12 @@ internal static partial class ProjectionSqlRewriter
             result = Regex.Replace(result, $"\\b{escaped}\\.", "", RegexOptions.CultureInvariant);
         }
 
+        // ClickHouse projection ORDER BY does not accept the SQL NULLS FIRST / NULLS LAST modifiers
+        // that EF Core appends to each translated ORDER BY term (`ORDER BY x NULLS FIRST` → syntax
+        // error in projection DDL). Strip them — null ordering is not meaningful for a projection's
+        // physical sort order.
+        result = Regex.Replace(result, @"\s+NULLS\s+(?:FIRST|LAST)", "", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
         // Collapse the whitespace left where the FROM clause was removed.
         return CollapseWhitespace(result).Trim();
     }

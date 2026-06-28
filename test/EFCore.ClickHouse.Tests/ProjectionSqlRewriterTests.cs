@@ -53,6 +53,19 @@ public class ProjectionSqlRewriterTests
     }
 
     [Theory]
+    [InlineData("SELECT `e`.`Url` AS `Url` FROM `events` AS `e` ORDER BY `e`.`Url` NULLS FIRST", "ORDER BY `Url`")]
+    [InlineData("SELECT `e`.`Url` AS `Url` FROM `events` AS `e` ORDER BY `e`.`Url` NULLS LAST", "ORDER BY `Url`")]
+    public void Strips_NULLS_FIRST_or_LAST_which_ClickHouse_projections_reject(string sql, string expected)
+    {
+        // EF Core appends NULLS FIRST/LAST to translated ORDER BY terms, but a ClickHouse projection's
+        // ORDER BY rejects those modifiers (syntax error in projection DDL), so the rewriter drops them.
+        var result = ProjectionSqlRewriter.Rewrite(sql);
+
+        Assert.DoesNotContain("NULLS", result, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(expected, result);
+    }
+
+    [Theory]
     [InlineData("SELECT `e`.`Id` AS `Id` FROM `events` AS `e` WHERE `e`.`Id` > 0", "WHERE")]
     [InlineData("SELECT `e`.`Id` FROM `events` AS `e` INNER JOIN `other` AS `o` ON `e`.`Id` = `o`.`Id`", "JOIN")]
     public void Rejects_constructs_a_projection_cannot_express(string sql, string expectedInMessage)
