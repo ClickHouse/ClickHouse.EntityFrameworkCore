@@ -67,6 +67,18 @@ public static class ClickHouseAnnotationNames
     public const string DictionaryClusterSuffix = "Cluster";
     public const string DictionaryDatabaseSuffix = "Database";
 
+    // Projection annotations — stored on IEntityType (table-scoped, unlike model-scoped views and
+    // dictionaries) as prefix-based per-projection annotations of the form
+    // "ClickHouse:Projection:{name}:{suffix}".
+    public const string ProjectionPrefix = Prefix + "Projection:";
+    public const string ProjectionSelectSqlSuffix = "SelectSql";
+    public const string ProjectionMaterializeSuffix = "Materialize"; // stored only when opted out (false); absent ⇒ default true
+    public const string ProjectionClusterSuffix = "Cluster";
+
+    // Transient (non-snapshotted) annotation carrying the unresolved LINQ lambda for a projection —
+    // translated at migration-differ time and excluded from the snapshot, exactly like the MV lambda.
+    public const string ProjectionPendingLambdaSuffix = "PendingLambda";
+
     // Engine name constants
     public const string MergeTree = "MergeTree";
     public const string ReplacingMergeTree = "ReplacingMergeTree";

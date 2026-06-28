@@ -132,6 +132,30 @@ public class DotnetEfCliTests : IAsyncLifetime
         var dictCount = await QueryScalar<ulong>(connection,
             "SELECT count() FROM system.dictionaries WHERE database = currentDatabase() AND name = 'hits_dict'");
         Assert.Equal(1UL, dictCount);
+
+        // The projection was added to hits_source (ordered after the table create).
+        var projectionCount = await QueryScalar<ulong>(connection,
+            "SELECT count() FROM system.projections WHERE database = currentDatabase() AND table = 'hits_source' AND name = 'proj_by_value'");
+        Assert.Equal(1UL, projectionCount);
+    }
+
+    [Fact]
+    public async Task Projection_definition_is_baked_into_the_model_snapshot()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+
+        var snapshot = Directory.GetFiles(_migrationsDir!, "*ModelSnapshot.cs").Single();
+        var snapshotCode = await File.ReadAllTextAsync(snapshot);
+
+        // The FromRaw projection's SELECT is serialized into the snapshot as a plain annotation, so the
+        // projection round-trips on subsequent diffs. The transient LINQ lambda annotation is dropped by
+        // ClickHouseAnnotationCodeGenerator, so scaffolding never crashes trying to emit a delegate.
+        Assert.Contains("ClickHouse:Projection:proj_by_value:SelectSql", snapshotCode);
+        Assert.Contains("SELECT Value, count() GROUP BY Value", snapshotCode);
+        Assert.DoesNotContain("PendingLambda", snapshotCode);
     }
 
     [Fact]

@@ -14,6 +14,9 @@ public class ClickHouseAnnotationCodeGenerator : AnnotationCodeGenerator
 
     protected override bool IsHandledByConvention(IModel model, IAnnotation annotation)
     {
+        if (IsTransientPendingLambda(annotation.Name))
+            return true;
+
         if (annotation.Name.StartsWith(ClickHouseAnnotationNames.Prefix, StringComparison.Ordinal))
             return false;
 
@@ -22,11 +25,22 @@ public class ClickHouseAnnotationCodeGenerator : AnnotationCodeGenerator
 
     protected override bool IsHandledByConvention(IEntityType entityType, IAnnotation annotation)
     {
+        if (IsTransientPendingLambda(annotation.Name))
+            return true;
+
         if (annotation.Name.StartsWith(ClickHouseAnnotationNames.Prefix, StringComparison.Ordinal))
             return false;
 
         return base.IsHandledByConvention(entityType, annotation);
     }
+
+    // The pending-LINQ-lambda annotations (materialized views on the model, projections on entity
+    // types) hold a non-serializable delegate that is translated at differ time. Report them as
+    // handled-by-convention so the snapshot generator drops them instead of trying to emit the
+    // delegate via HasAnnotation (which would throw in CSharpHelper). Both suffixes are "PendingLambda".
+    private static bool IsTransientPendingLambda(string annotationName)
+        => annotationName.StartsWith(ClickHouseAnnotationNames.Prefix, StringComparison.Ordinal)
+        && annotationName.EndsWith(":" + ClickHouseAnnotationNames.ProjectionPendingLambdaSuffix, StringComparison.Ordinal);
 
     protected override bool IsHandledByConvention(IProperty property, IAnnotation annotation)
     {

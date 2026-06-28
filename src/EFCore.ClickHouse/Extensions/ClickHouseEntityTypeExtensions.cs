@@ -3,6 +3,17 @@ using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace ClickHouse.EntityFrameworkCore.Extensions;
 
+/// <summary>
+/// A resolved projection definition extracted from an entity type's annotations. A projection is a
+/// table-attached, re-ordered or pre-aggregated copy of the parent table's data that the optimizer
+/// can transparently use to speed up matching queries.
+/// </summary>
+public sealed record ProjectionDefinition(
+    string Name,
+    string? SelectSql,
+    bool Materialize,
+    string? Cluster);
+
 public static class ClickHouseEntityTypeExtensions
 {
     // Engine
@@ -129,4 +140,75 @@ public static class ClickHouseEntityTypeExtensions
 
     public static void SetSetting(this IMutableEntityType entityType, string settingName, string? value)
         => entityType.SetOrRemoveAnnotation(ClickHouseAnnotationNames.SettingPrefix + settingName, value);
+
+    // Projections (table-scoped) — stored as prefix-based per-projection annotations of the form
+    // "ClickHouse:Projection:{name}:{suffix}". Defined via EntityTypeBuilder<T>.HasProjection(name).
+
+    public static IReadOnlyList<ProjectionDefinition> GetProjections(this IReadOnlyEntityType entityType)
+    {
+        var byName = new Dictionary<string, Dictionary<string, object?>>(StringComparer.Ordinal);
+
+        foreach (var annotation in entityType.GetAnnotations())
+        {
+            if (!annotation.Name.StartsWith(ClickHouseAnnotationNames.ProjectionPrefix, StringComparison.Ordinal))
+                continue;
+
+            var rest = annotation.Name[ClickHouseAnnotationNames.ProjectionPrefix.Length..];
+            var colonIdx = rest.IndexOf(':');
+            if (colonIdx <= 0)
+                continue;
+
+            var name = rest[..colonIdx];
+            var suffix = rest[(colonIdx + 1)..];
+
+            // Register the projection name even if only the transient lambda is present (a LINQ-only
+            // projection has no other annotation yet), but never store the lambda itself as a prop.
+            if (!byName.TryGetValue(name, out var props))
+            {
+                props = new Dictionary<string, object?>(StringComparer.Ordinal);
+                byName[name] = props;
+            }
+
+            if (suffix == ClickHouseAnnotationNames.ProjectionPendingLambdaSuffix)
+                continue;
+
+            props[suffix] = annotation.Value;
+        }
+
+        var result = new List<ProjectionDefinition>(byName.Count);
+        foreach (var (name, props) in byName)
+        {
+            result.Add(new ProjectionDefinition(
+                Name: name,
+                SelectSql: props.GetValueOrDefault(ClickHouseAnnotationNames.ProjectionSelectSqlSuffix) as string,
+                // Absent ⇒ default true; stored only when explicitly opted out via WithoutMaterialize().
+                Materialize: props.GetValueOrDefault(ClickHouseAnnotationNames.ProjectionMaterializeSuffix) is not false,
+                Cluster: props.GetValueOrDefault(ClickHouseAnnotationNames.ProjectionClusterSuffix) as string));
+        }
+
+        return result;
+    }
+
+    public static void SetProjection(this IMutableEntityType entityType, ProjectionDefinition definition)
+    {
+        var prefix = ClickHouseAnnotationNames.ProjectionPrefix + definition.Name + ":";
+
+        entityType.SetOrRemoveAnnotation(prefix + ClickHouseAnnotationNames.ProjectionSelectSqlSuffix, definition.SelectSql);
+        entityType.SetOrRemoveAnnotation(prefix + ClickHouseAnnotationNames.ProjectionMaterializeSuffix,
+            definition.Materialize ? null : (object)false);
+        entityType.SetOrRemoveAnnotation(prefix + ClickHouseAnnotationNames.ProjectionClusterSuffix, definition.Cluster);
+    }
+
+    public static void RemoveProjection(this IMutableEntityType entityType, string projectionName)
+    {
+        var prefix = ClickHouseAnnotationNames.ProjectionPrefix + projectionName + ":";
+
+        var toRemove = entityType.GetAnnotations()
+            .Where(a => a.Name.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(a => a.Name)
+            .ToList();
+
+        foreach (var name in toRemove)
+            entityType.RemoveAnnotation(name);
+    }
 }

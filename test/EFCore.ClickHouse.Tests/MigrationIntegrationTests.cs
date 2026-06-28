@@ -1072,6 +1072,256 @@ public class MigrationIntegrationTests : IAsyncLifetime
     // POPULATE is intentionally not exposed at the model level. Use INSERT INTO target SELECT ...
     // FROM source in a follow-up migration if backfill is needed.
 
+    // ── Projection operations ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task AddProjection_materializes_existing_parts_then_DropProjection_removes_it()
+    {
+        await ExecuteRawAsync(
+            "DROP TABLE IF EXISTS proj_events",
+            "CREATE TABLE proj_events (Id UInt64, Category String, Amount UInt64) ENGINE = MergeTree() ORDER BY Id");
+
+        // Insert rows BEFORE the projection exists so the auto-MATERIALIZE has to backfill existing parts.
+        await ExecuteRawAsync(
+            "INSERT INTO proj_events VALUES (1, 'a', 10), (2, 'b', 5), (3, 'a', 7)");
+
+        await ApplyMigrationAsync(new ClickHouseAddProjectionOperation
+        {
+            Table = "proj_events",
+            ProjectionName = "proj_by_category",
+            SelectQuery = "SELECT Category, sum(Amount) GROUP BY Category",
+        });
+
+        // The projection is part of the table definition…
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_events'");
+        Assert.Contains("PROJECTION", createSql!);
+        Assert.Contains("proj_by_category", createSql!);
+
+        // …and the auto-MATERIALIZE backfilled the pre-existing part (so projection parts are active).
+        var activeProjectionParts = await QueryScalarRaw(
+            "SELECT count() FROM system.projection_parts "
+            + "WHERE database = currentDatabase() AND table = 'proj_events' AND name = 'proj_by_category' AND active");
+        Assert.NotEqual("0", activeProjectionParts);
+
+        // Aggregation results are correct (category 'a' → 10 + 7).
+        var totalA = await QueryScalarRaw("SELECT sum(Amount) FROM proj_events WHERE Category = 'a'");
+        Assert.Equal("17", totalA);
+
+        await ApplyMigrationAsync(new ClickHouseDropProjectionOperation
+        {
+            Table = "proj_events",
+            ProjectionName = "proj_by_category",
+            IfExists = true,
+        });
+
+        var createSqlAfter = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_events'");
+        Assert.DoesNotContain("proj_by_category", createSqlAfter!);
+
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_events");
+    }
+
+    [Fact]
+    public async Task AddProjection_without_materialize_adds_definition_but_no_parts()
+    {
+        await ExecuteRawAsync(
+            "DROP TABLE IF EXISTS proj_nomat",
+            "CREATE TABLE proj_nomat (Id UInt64, Category String) ENGINE = MergeTree() ORDER BY Id",
+            "INSERT INTO proj_nomat VALUES (1, 'a'), (2, 'b')");
+
+        await ApplyMigrationAsync(new ClickHouseAddProjectionOperation
+        {
+            Table = "proj_nomat",
+            ProjectionName = "proj_cat",
+            SelectQuery = "SELECT Category ORDER BY Category",
+            Materialize = false,
+        });
+
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_nomat'");
+        Assert.Contains("proj_cat", createSql!);
+
+        // Without MATERIALIZE the existing part is not projected yet.
+        var activeProjectionParts = await QueryScalarRaw(
+            "SELECT count() FROM system.projection_parts "
+            + "WHERE database = currentDatabase() AND table = 'proj_nomat' AND name = 'proj_cat' AND active");
+        Assert.Equal("0", activeProjectionParts);
+
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_nomat");
+    }
+
+    [Fact]
+    public async Task ModelLevel_FromRaw_projection_creates_via_differ()
+    {
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_model_events");
+
+        Action<ModelBuilder> mapTable = b =>
+            b.Entity<ProjEvent>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("proj_model_events", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+
+        // Baseline: the table only.
+        await using var baseCtx = CreateContext(mapTable);
+        var emptyModel = CreateContext(_ => { }).GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var baseModel = baseCtx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            baseCtx.GetService<IMigrationsModelDiffer>().GetDifferences(emptyModel, baseModel), baseCtx);
+
+        // Add the projection (table already exists → diff emits only ADD PROJECTION).
+        await using var ctx = CreateContext(b =>
+        {
+            mapTable(b);
+            b.Entity<ProjEvent>().HasProjection("proj_cat")
+                .FromRaw("SELECT Category, sum(Amount) GROUP BY Category");
+        });
+
+        var currModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var ops = ctx.GetService<IMigrationsModelDiffer>().GetDifferences(baseModel, currModel);
+        Assert.Contains(ops, o => o is ClickHouseAddProjectionOperation);
+        await ApplyOperationsAsync(ops, ctx);
+
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_model_events'");
+        Assert.Contains("proj_cat", createSql!);
+
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_model_events");
+    }
+
+    [Fact]
+    public async Task ModelLevel_LINQ_projection_translates_strips_FROM_and_applies()
+    {
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_linq_events");
+
+        Action<ModelBuilder> mapTable = b =>
+            b.Entity<ProjEvent>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("proj_linq_events", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+
+        await using var baseCtx = CreateContext(mapTable);
+        var emptyModel = CreateContext(_ => { }).GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var baseModel = baseCtx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            baseCtx.GetService<IMigrationsModelDiffer>().GetDifferences(emptyModel, baseModel), baseCtx);
+
+        // LINQ-defined projection: translated to SQL and FROM-stripped at differ time.
+        await using var ctx = CreateContext(b =>
+        {
+            mapTable(b);
+            b.Entity<ProjEvent>().HasProjection("proj_linq")
+                .Select(q => q.GroupBy(e => e.Category)
+                    .Select(g => new { Category = g.Key, Total = g.Sum(e => e.Amount) }));
+        });
+
+        var currModel = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var ops = ctx.GetService<IMigrationsModelDiffer>().GetDifferences(baseModel, currModel);
+
+        var add = Assert.Single(ops.OfType<ClickHouseAddProjectionOperation>());
+        Assert.DoesNotContain("FROM", add.SelectQuery, StringComparison.OrdinalIgnoreCase);
+
+        // The generated ADD PROJECTION DDL must be valid ClickHouse — applying it would throw otherwise.
+        await ApplyOperationsAsync(ops, ctx);
+
+        var createSql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_linq_events'");
+        Assert.Contains("proj_linq", createSql!);
+        Assert.Contains("GROUP BY", createSql!, StringComparison.OrdinalIgnoreCase);
+
+        // Data flows through and the projection serves the aggregate.
+        await ExecuteRawAsync("INSERT INTO proj_linq_events VALUES (1, 'a', 10), (2, 'a', 5), (3, 'b', 7)");
+        var totalA = await QueryScalarRaw("SELECT sum(Amount) FROM proj_linq_events WHERE Category = 'a'");
+        Assert.Equal("15", totalA);
+
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_linq_events");
+    }
+
+    [Fact]
+    public async Task ModelLevel_changing_projection_drops_and_recreates_over_existing_parts()
+    {
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_change_events");
+
+        Action<ModelBuilder> mapTable = b =>
+            b.Entity<ProjEvent>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("proj_change_events", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+
+        // Baseline table only.
+        await using var baseCtx = CreateContext(mapTable);
+        var emptyModel = CreateContext(_ => { }).GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var tableOnlyModel = baseCtx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            baseCtx.GetService<IMigrationsModelDiffer>().GetDifferences(emptyModel, tableOnlyModel), baseCtx);
+
+        // Insert rows BEFORE any projection exists so every (re)materialize must backfill existing parts.
+        await ExecuteRawAsync("INSERT INTO proj_change_events VALUES (1, 'a', 10), (2, 'a', 5), (3, 'b', 7)");
+
+        // v1 projection: sum(Amount) per Category.
+        await using var v1Ctx = CreateContext(b =>
+        {
+            mapTable(b);
+            b.Entity<ProjEvent>().HasProjection("proj_agg")
+                .FromRaw("SELECT Category, sum(Amount) GROUP BY Category");
+        });
+        var v1Model = v1Ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        await ApplyOperationsAsync(
+            v1Ctx.GetService<IMigrationsModelDiffer>().GetDifferences(tableOnlyModel, v1Model), v1Ctx);
+
+        var v1Sql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_change_events'");
+        Assert.Contains("sum(", v1Sql!, StringComparison.OrdinalIgnoreCase);
+
+        // v2: same projection name, different body → differ must emit DROP then ADD (no ALTER PROJECTION in ClickHouse).
+        await using var v2Ctx = CreateContext(b =>
+        {
+            mapTable(b);
+            b.Entity<ProjEvent>().HasProjection("proj_agg")
+                .FromRaw("SELECT Category, max(Amount) GROUP BY Category");
+        });
+        var v2Model = v2Ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var ops = v2Ctx.GetService<IMigrationsModelDiffer>().GetDifferences(v1Model, v2Model).ToList();
+
+        var drop = Assert.Single(ops.OfType<ClickHouseDropProjectionOperation>());
+        var add = Assert.Single(ops.OfType<ClickHouseAddProjectionOperation>());
+        Assert.Equal("proj_agg", drop.ProjectionName);
+        Assert.Equal("proj_agg", add.ProjectionName);
+        // DROP must precede ADD, otherwise ClickHouse rejects the duplicate projection name.
+        Assert.True(ops.IndexOf(drop) < ops.IndexOf(add), "DROP PROJECTION must be ordered before ADD PROJECTION");
+
+        // Apply the replacement against a table that already has a materialized projection over existing parts.
+        await ApplyOperationsAsync(ops, v2Ctx);
+
+        // The new definition replaced the old one…
+        var v2Sql = await QueryScalarRaw(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'proj_change_events'");
+        Assert.Contains("max(", v2Sql!, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sum(", v2Sql!, StringComparison.OrdinalIgnoreCase);
+
+        // …and the rebuilt projection backfilled the pre-existing part (active projection parts exist).
+        var activeParts = await QueryScalarRaw(
+            "SELECT count() FROM system.projection_parts "
+            + "WHERE database = currentDatabase() AND table = 'proj_change_events' AND name = 'proj_agg' AND active");
+        Assert.NotEqual("0", activeParts);
+
+        // Results are correct through the new projection (category 'a' → max(10, 5) = 10).
+        var maxA = await QueryScalarRaw("SELECT max(Amount) FROM proj_change_events WHERE Category = 'a'");
+        Assert.Equal("10", maxA);
+
+        await ExecuteRawAsync("DROP TABLE IF EXISTS proj_change_events");
+    }
+
+    public class ProjEvent
+    {
+        public long Id { get; set; }
+        public string Category { get; set; } = "";
+        public long Amount { get; set; }
+    }
+
     public class MvSource
     {
         public long Id { get; set; }
