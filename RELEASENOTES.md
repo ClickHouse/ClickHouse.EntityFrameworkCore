@@ -16,6 +16,14 @@ v0.3.0
   * **Scope** — Tier 3 helpers fire when their result is consumed by a scalar follow-up (`First()`, `Count()`, `Contains(x)`, …) or another array-producing helper. Projecting a slice/reverse/sort result directly as a collection (`Select(e => e.Arr.Skip(1).ToArray())`) is not yet supported.
 * **`Nullable(T)` elements in composite types** now round-trip end-to-end for `Array(Nullable(T))`, `Tuple(Nullable(T), …)`, `Map(K, Nullable(V))`, and `Variant(Nullable(T), …)`. Previously the resolver stripped the `Nullable(...)` wrapper and built composites whose CLR type used `T` instead of `Nullable<T>` for value-type elements, breaking `int?[]` / `(int?, string)` / `Dictionary<string, int?>` materialization. Element nullability also flows through `arrayElement` so `Where(e => e.NullableInts.First() == null)` filters correctly.
 
+### Migrations
+* **Projections.** Declare a table-attached ClickHouse projection on the mapping entity with
+  `modelBuilder.Entity<T>().HasProjection("name").Select(q => …)` or `.FromRaw(sql)`. It scaffolds and applies as a
+  migration: `ALTER TABLE … ADD PROJECTION …` followed by `MATERIALIZE PROJECTION` so existing parts are covered
+  (opt out with `.WithoutMaterialize()`, target a cluster with `.OnCluster(...)`). LINQ bodies are translated and their
+  FROM clause stripped at migration time. Requires a MergeTree-family engine; ClickHouse rejects `ADD PROJECTION` on
+  deduplicating engines (`ReplacingMergeTree`, `SummingMergeTree`, …) unless `deduplicate_merge_projection_mode` is set.
+
 ### Bug fixes
 * `HasColumnType("Enum8(...)")`, `HasColumnType("AggregateFunction(...)")`, and similar parameterized or aliased store types are now preserved verbatim in generated migration DDL. Previously these silently emitted `String` because the resolver canonicalized to a generic fallback mapping. ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24)) (Thanks to @Felixzed!)
 

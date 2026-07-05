@@ -1,4 +1,5 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
+using ClickHouse.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 
@@ -16,6 +17,13 @@ public class SmokeDbContext : DbContext
         modelBuilder.Entity<SensorReading>(b =>
         {
             b.HasKey(e => e.Id);
+
+            // Model "V2" adds one extra column, so the CLI tests can scaffold a second,
+            // incremental migration whose delta is a single operation (the AddColumn) — the
+            // scaffolder path that diffs against an existing model snapshot.
+            if (Environment.GetEnvironmentVariable("SMOKE_MODEL_V2") == "1")
+                b.Property<string>("Notes");
+
             b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
             b.Property(e => e.Timestamp)
                 .HasColumnComment("Reading timestamp");
@@ -36,6 +44,37 @@ public class SmokeDbContext : DbContext
             b.HasKey(e => e.Id);
             b.ToTable("audit_logs", t => t.HasMemoryEngine());
         });
+
+        // A materialized view over a source/target pair, so scaffolding must order the table
+        // creates ahead of the view create when splitting into step migrations.
+        modelBuilder.Entity<HitsSource>(b =>
+        {
+            b.HasKey(e => e.Id);
+            b.ToTable("hits_source", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+
+            // A table-attached projection on a plain MergeTree table: scaffolding must order the
+            // ADD PROJECTION after the table create, and the FROM-less SELECT must round-trip through
+            // the snapshot unchanged. (ADD PROJECTION is rejected by ReplacingMergeTree/SummingMergeTree
+            // and other dedup/merge engines unless deduplicate_merge_projection_mode is configured.)
+            b.HasProjection("proj_by_value")
+                .FromRaw("SELECT Value, count() GROUP BY Value");
+        });
+
+        modelBuilder.Entity<HitsByHour>(b =>
+        {
+            b.HasKey(e => e.Bucket);
+            b.ToTable("hits_by_hour", t => t.HasSummingMergeTreeEngine("Hits").WithOrderBy("Bucket"));
+        });
+
+        modelBuilder.HasMaterializedView<HitsByHour>("hits_mv")
+            .FromRaw("SELECT Id AS Bucket, Value AS Hits FROM hits_source");
+
+        // A dictionary over the hits_source table — scaffolding must order it after the table create.
+        modelBuilder.HasDictionary<HitsSource>("hits_dict")
+            .FromTable<HitsSource>()
+            .HasKey(h => h.Id)
+            .Layout(ClickHouseDictionaryLayout.Hashed)
+            .Lifetime(60);
     }
 }
 
@@ -52,6 +91,18 @@ public class AuditLog
 {
     public long Id { get; set; }
     public string Message { get; set; } = string.Empty;
+}
+
+public class HitsSource
+{
+    public long Id { get; set; }
+    public long Value { get; set; }
+}
+
+public class HitsByHour
+{
+    public long Bucket { get; set; }
+    public long Hits { get; set; }
 }
 
 public class SmokeDbContextFactory : IDesignTimeDbContextFactory<SmokeDbContext>
