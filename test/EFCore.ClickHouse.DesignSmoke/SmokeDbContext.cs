@@ -24,6 +24,11 @@ public class SmokeDbContext : DbContext
             if (Environment.GetEnvironmentVariable("SMOKE_MODEL_V2") == "1")
                 b.Property<string>("Notes");
 
+            // Model "rename" maps the SensorId property to a differently-named column, so the differ
+            // infers a column rename — used by the CLI tests that drive the interactive rename prompt.
+            b.Property(e => e.SensorId)
+                .HasColumnName(Environment.GetEnvironmentVariable("SMOKE_MODEL_RENAME") == "1" ? "DeviceId" : "SensorId");
+
             b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
             b.Property(e => e.Timestamp)
                 .HasColumnComment("Reading timestamp");

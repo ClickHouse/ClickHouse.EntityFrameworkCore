@@ -163,49 +163,16 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         if (pendingAnnotations.Count == 0)
             return sqls;
 
-        using var translationContext = CreateTranslationContext(model);
+        using var translationContext = ClickHousePendingQueryTranslator.CreateTranslationContext(model);
 
         foreach (var annotation in pendingAnnotations)
         {
             var viewName = ExtractViewName(annotation.Name);
             var query = (PendingMaterializedViewQuery)annotation.Value!;
-            sqls[viewName] = TranslateToSql(translationContext, query);
+            sqls[viewName] = ClickHousePendingQueryTranslator.TranslateMaterializedViewSql(translationContext, query);
         }
 
         return sqls;
-    }
-
-    private static DbContext CreateTranslationContext(IReadOnlyModel model)
-    {
-        var options = new DbContextOptionsBuilder()
-            .UseClickHouse("Host=localhost;Database=mv-translate")
-            .UseModel((IModel)model)
-            .Options;
-
-        return new DbContext(options);
-    }
-
-    private static string TranslateToSql(DbContext context, PendingMaterializedViewQuery query)
-        => TranslateToSql(context, query.SourceTypes, query.Lambda, "Materialized view");
-
-    private static string TranslateToSql(DbContext context, Type[] sourceTypes, Delegate lambda, string objectKind)
-    {
-        var setMethod = typeof(DbContext).GetMethods()
-            .First(m => m.Name == nameof(DbContext.Set)
-                && m.IsGenericMethod
-                && m.GetGenericArguments().Length == 1
-                && m.GetParameters().Length == 0);
-
-        var queryables = new object[sourceTypes.Length];
-        for (var i = 0; i < sourceTypes.Length; i++)
-        {
-            queryables[i] = setMethod.MakeGenericMethod(sourceTypes[i]).Invoke(context, null)!;
-        }
-
-        var result = (IQueryable?)lambda.DynamicInvoke(queryables)
-            ?? throw new InvalidOperationException($"{objectKind} query lambda returned null.");
-
-        return result.ToQueryString();
     }
 
     private static ClickHouseCreateMaterializedViewOperation BuildCreateOperation(
@@ -249,11 +216,29 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         };
 
     private static bool ViewsEqual(MaterializedViewDefinition a, MaterializedViewDefinition b)
-        => a.TargetTypeName == b.TargetTypeName
+        // Identity is the physical target table the view writes to (TO clause), not the CLR type —
+        // renaming the target entity's table must trigger a drop+recreate. Fall back to a
+        // version-insensitive type-name compare only when the table couldn't be resolved on both
+        // sides (so an assembly-version bump alone never reports a spurious change).
+        => TargetIdentityEqual(a, b)
         && a.SelectSql == b.SelectSql
         && a.Populate == b.Populate
         && a.Cluster == b.Cluster
         && a.Database == b.Database;
+
+    private static bool TargetIdentityEqual(MaterializedViewDefinition a, MaterializedViewDefinition b)
+        => a.TargetTable is not null && b.TargetTable is not null
+            ? string.Equals(a.TargetTable, b.TargetTable, StringComparison.Ordinal)
+                && string.Equals(a.TargetSchema, b.TargetSchema, StringComparison.Ordinal)
+            : TypeNamesEqual(a.TargetTypeName, b.TargetTypeName);
+
+    // Compares two assembly-qualified type names ignoring the assembly Version — a version bump with
+    // no real model change must not read as a difference.
+    private static bool TypeNamesEqual(string? a, string? b)
+        => string.Equals(StripAssemblyVersion(a), StripAssemblyVersion(b), StringComparison.Ordinal);
+
+    private static string? StripAssemblyVersion(string? typeName)
+        => typeName is null ? null : System.Text.RegularExpressions.Regex.Replace(typeName, @",\s*Version=\d+(\.\d+)*", "");
 
     private ClickHouseCreateDictionaryOperation BuildCreateDictionaryOperation(
         DictionaryDefinition dict,
@@ -339,15 +324,18 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
     }
 
     private static bool DictionariesEqual(DictionaryDefinition a, DictionaryDefinition b)
-        => a.DictTypeName == b.DictTypeName
-        && a.SourceTypeName == b.SourceTypeName
+        // Identity is the physical source table (SOURCE ... TABLE '...'), not the CLR type — renaming
+        // the source entity's table must trigger a CREATE OR REPLACE. The dictionary's own columns
+        // are captured by ColumnNames/ColumnClrTypes, so the DictType/SourceType CLR strings carry no
+        // identity of their own and (being assembly-qualified) would otherwise churn on a version bump.
+        => SourceIdentityEqual(a, b)
         && a.SourceNamedCollection == b.SourceNamedCollection
         && a.SourceHost == b.SourceHost
         && a.SourcePort == b.SourcePort
         && a.SourceUser == b.SourceUser
         && a.SourcePassword == b.SourcePassword
         && a.ColumnNames.SequenceEqual(b.ColumnNames, StringComparer.Ordinal)
-        && a.ColumnClrTypes.SequenceEqual(b.ColumnClrTypes, StringComparer.Ordinal)
+        && ColumnTypesEqual(a.ColumnClrTypes, b.ColumnClrTypes)
         && a.KeyColumns.SequenceEqual(b.KeyColumns, StringComparer.Ordinal)
         && a.Layout == b.Layout
         && a.LayoutParams == b.LayoutParams
@@ -355,6 +343,24 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
         && a.LifetimeMax == b.LifetimeMax
         && a.Cluster == b.Cluster
         && a.Database == b.Database;
+
+    private static bool SourceIdentityEqual(DictionaryDefinition a, DictionaryDefinition b)
+        => a.SourceTable is not null && b.SourceTable is not null
+            ? string.Equals(a.SourceTable, b.SourceTable, StringComparison.Ordinal)
+                && string.Equals(a.SourceSchema, b.SourceSchema, StringComparison.Ordinal)
+            : TypeNamesEqual(a.SourceTypeName, b.SourceTypeName);
+
+    // Column CLR types are stored as assembly-qualified names; compare them ignoring the assembly
+    // version so a genuine type change is still detected but a version bump is not.
+    private static bool ColumnTypesEqual(IReadOnlyList<string> a, IReadOnlyList<string> b)
+    {
+        if (a.Count != b.Count)
+            return false;
+        for (var i = 0; i < a.Count; i++)
+            if (!TypeNamesEqual(a[i], b[i]))
+                return false;
+        return true;
+    }
 
     private static string ExtractViewName(string annotationName)
     {
@@ -415,9 +421,8 @@ public class ClickHouseMigrationsModelDiffer : MigrationsModelDiffer
                 if (entity.FindAnnotation(annotationName)?.Value is not PendingProjectionQuery pending)
                     continue;
 
-                translationContext ??= CreateTranslationContext(model);
-                var translated = TranslateToSql(translationContext, pending.SourceTypes, pending.Lambda, "Projection");
-                sqls[key] = ProjectionSqlRewriter.Rewrite(translated);
+                translationContext ??= ClickHousePendingQueryTranslator.CreateTranslationContext(model);
+                sqls[key] = ClickHousePendingQueryTranslator.TranslateProjectionSql(translationContext, pending);
             }
         }
         finally

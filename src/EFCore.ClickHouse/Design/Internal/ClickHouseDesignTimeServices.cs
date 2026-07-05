@@ -27,6 +27,12 @@ public class ClickHouseDesignTimeServices : IDesignTimeServices
         serviceCollection.Replace(
             ServiceDescriptor.Scoped<ICSharpMigrationOperationGenerator, ClickHouseCSharpMigrationOperationGenerator>());
 
+        // Bake LINQ-defined materialized-view / projection SELECT SQL into the model snapshot so
+        // subsequent `migrations add` calls don't re-diff them as changed. One replacement covers
+        // both the snapshot and each migration's Designer BuildTargetModel.
+        serviceCollection.Replace(
+            ServiceDescriptor.Singleton<ICSharpSnapshotGenerator, ClickHouseCSharpSnapshotGenerator>());
+
         // Split `migrations add` into dependency-ordered, single-operation step files. The core
         // services above register the default MigrationsScaffolder, so replace it with ours.
         serviceCollection.AddScoped<ClickHouseMigrationsSplitter>();

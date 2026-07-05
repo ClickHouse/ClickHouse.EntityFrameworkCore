@@ -20,13 +20,17 @@ internal enum MigrationPhase
 
     // ── Build-up (least dependent first) ───────────────────────────────
     CreateDatabases = 7,
-    CreateTables = 8,
-    AddColumns = 9,
-    CreateMaterializedViews = 10,
-    CreateDictionaries = 11,
-    AlterColumns = 12,
+    // Renames act on pre-existing objects and must run before anything new references the old or
+    // new name — in particular before a materialized view or dictionary created in the same
+    // migration whose SELECT/SOURCE targets the renamed table.
+    Renames = 8,
+    CreateTables = 9,
+    AddColumns = 10,
+    CreateMaterializedViews = 11,
+    CreateDictionaries = 12,
+    AlterColumns = 13,
     // Projections and indexes are table-attached MergeTree sub-objects added via ALTER TABLE after
     // the table and its columns exist; they come last.
-    CreateProjections = 13,
-    CreateIndexes = 14,
+    CreateProjections = 14,
+    CreateIndexes = 15,
 }

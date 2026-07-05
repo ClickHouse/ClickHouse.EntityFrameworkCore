@@ -33,6 +33,12 @@ v0.3.0
   views that read them, and drops run before creates — via a phase-based splitter with a topological sort over
   materialized-view dependencies (with cycle detection). The generated step migrations are **forward-only**: their
   `Down` methods throw `ClickHouseDownMigrationNotSupportedException`. Single-operation migrations are unaffected.
+* **Interactive rename confirmation.** When `migrations add` infers a column or table rename (which preserves data),
+  the scaffolder prints the affected table's before/after columns — highlighting the renamed column and naming the
+  snapshot it came from — and asks whether to keep it as a rename. Answering `n` to a column rename re-expresses it as
+  an explicit `DropColumn` + `AddColumn` (dropping the old column, with a data-loss warning). The prompt only blocks in
+  an interactive terminal; non-interactive runs (CI, IDE tooling, redirected stdin) keep EF's rename inference and never
+  block.
 * **Dictionaries.** Declare a ClickHouse dictionary in the model with
   `modelBuilder.HasDictionary<TDict>("name").FromTable<TSource>().HasKey(...).Layout(...).Lifetime(...)`
   and it is scaffolded/applied as a migration (`CREATE DICTIONARY` / `DROP DICTIONARY`). The dictionary's

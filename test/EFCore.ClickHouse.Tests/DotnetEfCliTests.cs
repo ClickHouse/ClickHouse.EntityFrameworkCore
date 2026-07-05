@@ -171,6 +171,34 @@ public class DotnetEfCliTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Migrations_remove_then_add_rescaffolds_the_removed_step()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        // Regression (2026-07-05 review, finding 2): each step's Designer metadata used to be
+        // generated from the FINAL model, so `migrations remove` peeled only the last step file and
+        // "reverted" the snapshot to the previous step's TargetModel — which was already the final
+        // model. The next add then diffed final-vs-final, scaffolded an empty migration, and the
+        // removed step's DDL was silently lost. Each step now carries its own TargetModel.
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+        Assert.True(StepMigrationFiles().Length > 1, "Expected the initial migration to split into steps.");
+
+        await RunDotnetEfSuccessfully("migrations", "remove");
+        await RunDotnetEfSuccessfully("migrations", "add", "Rescaffold");
+
+        // The re-add must scaffold the operation the removed step carried, so its Up is non-empty.
+        var rescaffold = Directory.GetFiles(_migrationsDir!, "*_Rescaffold*.cs")
+            .Where(f => !f.EndsWith(".Designer.cs", StringComparison.Ordinal))
+            .ToArray();
+        var code = string.Join("\n", await Task.WhenAll(rescaffold.Select(f => File.ReadAllTextAsync(f))));
+        var upStart = code.IndexOf("void Up(", StringComparison.Ordinal);
+        var downStart = code.IndexOf("void Down(", StringComparison.Ordinal);
+        Assert.True(upStart >= 0 && downStart > upStart, "Expected a scaffolded Rescaffold migration.");
+        Assert.Contains("migrationBuilder.", code[upStart..downStart]);
+    }
+
+    [Fact]
     public async Task Projection_definition_is_baked_into_the_model_snapshot()
     {
         if (!_dotnetEfAvailable)
@@ -249,6 +277,51 @@ public class DotnetEfCliTests : IAsyncLifetime
         Assert.Contains("does not support conditional SQL blocks", output);
     }
 
+    [Fact]
+    public async Task Rename_confirmed_at_prompt_scaffolds_RenameColumn()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        // The scaffolder shows the inferred rename and prompts; answering "y" keeps it as a
+        // data-preserving RenameColumn (the single-op fallback path).
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+
+        var renameEnv = new Dictionary<string, string> { ["SMOKE_MODEL_RENAME"] = "1" };
+        var result = await RunDotnetEfWithStdin("y\n", renameEnv, "migrations", "add", "RenameSensor");
+        Assert.True(result.ExitCode == 0, $"add RenameSensor failed:\n{result.StdOut}\n{result.StdErr}");
+
+        Assert.Contains("Possible column rename", result.StdOut + result.StdErr);
+        var code = ReadMigrationCode("RenameSensor");
+        Assert.Contains("RenameColumn", code);
+        Assert.DoesNotContain("DropColumn", code);
+    }
+
+    [Fact]
+    public async Task Rename_rejected_at_prompt_scaffolds_drop_and_add()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        // Answering "n" re-expresses the inferred rename as an explicit DropColumn + AddColumn.
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+
+        var renameEnv = new Dictionary<string, string> { ["SMOKE_MODEL_RENAME"] = "1" };
+        var result = await RunDotnetEfWithStdin("n\n", renameEnv, "migrations", "add", "RenameSensor");
+        Assert.True(result.ExitCode == 0, $"add RenameSensor failed:\n{result.StdOut}\n{result.StdErr}");
+
+        var code = ReadMigrationCode("RenameSensor");
+        Assert.Contains("AddColumn", code);
+        Assert.Contains("DropColumn", code);
+        Assert.DoesNotContain("RenameColumn", code);
+    }
+
+    // Concatenates the Up code of every (step) migration file whose id contains the given name.
+    private string ReadMigrationCode(string migrationName)
+        => string.Concat(Directory.GetFiles(_migrationsDir!, $"*{migrationName}*.cs")
+            .Where(f => !f.EndsWith(".Designer.cs", StringComparison.Ordinal))
+            .Select(File.ReadAllText));
+
     // Step migrations are the "*_NNN.cs" files (excluding their ".Designer.cs" companions and the snapshot).
     private string[] StepMigrationFiles()
         => Directory.GetFiles(_migrationsDir!, "*.cs")
@@ -294,6 +367,37 @@ public class DotnetEfCliTests : IAsyncLifetime
             psi.ArgumentList.Add(arg);
 
         using var process = Process.Start(psi)!;
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        return new DotnetEfResult(process.ExitCode, stdout, stderr);
+    }
+
+    // Runs dotnet-ef with a redirected stdin so the interactive rename prompt can be answered.
+    private async Task<DotnetEfResult> RunDotnetEfWithStdin(
+        string stdinInput, IReadOnlyDictionary<string, string>? extraEnv, params string[] args)
+    {
+        var allArgs = new List<string>(args) { "--project", _smokeProjectDir, "--startup-project", _smokeProjectDir };
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "dotnet-ef",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            WorkingDirectory = _smokeProjectDir
+        };
+        psi.Environment["CLICKHOUSE_CONNECTION_STRING"] = _connectionString;
+        foreach (var (key, value) in extraEnv ?? Enumerable.Empty<KeyValuePair<string, string>>())
+            psi.Environment[key] = value;
+        foreach (var arg in allArgs)
+            psi.ArgumentList.Add(arg);
+
+        using var process = Process.Start(psi)!;
+        await process.StandardInput.WriteAsync(stdinInput);
+        process.StandardInput.Close();
         var stdout = await process.StandardOutput.ReadToEndAsync();
         var stderr = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();

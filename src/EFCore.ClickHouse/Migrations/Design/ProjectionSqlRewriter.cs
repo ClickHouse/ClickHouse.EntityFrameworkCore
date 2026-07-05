@@ -46,16 +46,17 @@ internal static partial class ProjectionSqlRewriter
         if (!string.IsNullOrEmpty(alias))
         {
             var escaped = Regex.Escape(alias);
-            // Backtick-qualified ("`a`.") then bare ("a.") references.
-            result = Regex.Replace(result, $"`{escaped}`\\.", "", RegexOptions.CultureInvariant);
-            result = Regex.Replace(result, $"\\b{escaped}\\.", "", RegexOptions.CultureInvariant);
+            // Backtick-qualified ("`a`.") then bare ("a.") references. Strip only outside string
+            // literals so a literal like 'e.g. high' (with the table alias `e`) is not corrupted.
+            result = ReplaceOutsideStringLiterals(result, $"`{escaped}`\\.", "");
+            result = ReplaceOutsideStringLiterals(result, $"\\b{escaped}\\.", "");
         }
 
         // ClickHouse projection ORDER BY does not accept the SQL NULLS FIRST / NULLS LAST modifiers
         // that EF Core appends to each translated ORDER BY term (`ORDER BY x NULLS FIRST` → syntax
         // error in projection DDL). Strip them — null ordering is not meaningful for a projection's
-        // physical sort order.
-        result = Regex.Replace(result, @"\s+NULLS\s+(?:FIRST|LAST)", "", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        // physical sort order. Again only outside literals.
+        result = ReplaceOutsideStringLiterals(result, @"\s+NULLS\s+(?:FIRST|LAST)", "", RegexOptions.IgnoreCase);
 
         // Collapse the whitespace left where the FROM clause was removed.
         return CollapseWhitespace(result).Trim();
@@ -70,4 +71,54 @@ internal static partial class ProjectionSqlRewriter
 
     private static string CollapseWhitespace(string sql)
         => Regex.Replace(sql, @"\s+", " ", RegexOptions.CultureInvariant);
+
+    // Applies a regex replacement to the parts of the SQL that are NOT inside a single-quoted string
+    // literal, leaving literal text untouched. ClickHouse escapes an embedded quote by doubling it
+    // ('' — the SQL standard) or with a backslash (\'); both are handled so the split tracks the true
+    // literal boundaries and never treats an escaped quote as a terminator.
+    private static string ReplaceOutsideStringLiterals(
+        string sql, string pattern, string replacement, RegexOptions options = RegexOptions.None)
+    {
+        var regex = new Regex(pattern, options | RegexOptions.CultureInvariant);
+        var builder = new System.Text.StringBuilder(sql.Length);
+        var i = 0;
+        while (i < sql.Length)
+        {
+            var quote = sql.IndexOf('\'', i);
+            if (quote < 0)
+            {
+                builder.Append(regex.Replace(sql[i..], replacement));
+                break;
+            }
+
+            // Rewrite the code segment before the literal, then copy the literal verbatim.
+            builder.Append(regex.Replace(sql[i..quote], replacement));
+
+            var j = quote + 1;
+            while (j < sql.Length)
+            {
+                if (sql[j] == '\\' && j + 1 < sql.Length)
+                {
+                    j += 2; // backslash-escaped character (e.g. \')
+                    continue;
+                }
+                if (sql[j] == '\'')
+                {
+                    if (j + 1 < sql.Length && sql[j + 1] == '\'')
+                    {
+                        j += 2; // doubled '' escape stays inside the literal
+                        continue;
+                    }
+                    j++; // closing quote
+                    break;
+                }
+                j++;
+            }
+
+            builder.Append(sql, quote, j - quote);
+            i = j;
+        }
+
+        return builder.ToString();
+    }
 }

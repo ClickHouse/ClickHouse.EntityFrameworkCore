@@ -63,6 +63,9 @@ public sealed class ClickHouseMigrationsSplitter
 
         // Build-up: least dependent first. Tables exist before the views and dictionaries that read them.
         result.AddRange(phaseGroups[MigrationPhase.CreateDatabases]);
+        // Renames run before any create that references the renamed name (e.g. a materialized view
+        // whose SELECT reads a just-renamed table), so the create sees the new name already in place.
+        result.AddRange(phaseGroups[MigrationPhase.Renames]);
         result.AddRange(phaseGroups[MigrationPhase.CreateTables]);
         result.AddRange(phaseGroups[MigrationPhase.AddColumns]);
         result.AddRange(SortByDependencies(phaseGroups[MigrationPhase.CreateMaterializedViews], reverseForDrops: false));
@@ -88,8 +91,8 @@ public sealed class ClickHouseMigrationsSplitter
         ClickHouseCreateMaterializedViewOperation => MigrationPhase.CreateMaterializedViews,
         ClickHouseDropDictionaryOperation => MigrationPhase.DropDictionaries,
         ClickHouseCreateDictionaryOperation => MigrationPhase.CreateDictionaries,
-        AlterColumnOperation or DropColumnOperation or RenameColumnOperation
-            or RenameTableOperation or RenameIndexOperation => MigrationPhase.AlterColumns,
+        RenameColumnOperation or RenameTableOperation or RenameIndexOperation => MigrationPhase.Renames,
+        AlterColumnOperation or DropColumnOperation => MigrationPhase.AlterColumns,
         CreateIndexOperation => MigrationPhase.CreateIndexes,
         // Data/SQL operations and anything unrecognized land after creates so they can rely on
         // tables/views existing, without preceding column alterations.
@@ -110,16 +113,19 @@ public sealed class ClickHouseMigrationsSplitter
         if (operations.Count == 0)
             return operations;
 
-        // Map each produced table name to the operations (by local node index) that produce it.
+        // Map each produced name to the operations (by local node index) that produce it. A
+        // materialized-view create produces BOTH its TO target table and its own view name, so a
+        // second view whose SELECT reads the first one — either by target table or by view name —
+        // still forms a dependency edge.
         var producedBy = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < operations.Count; i++)
         {
-            var name = GetProducedName(operations[i].Op);
-            if (name is null)
-                continue;
-            if (!producedBy.TryGetValue(name, out var producers))
-                producedBy[name] = producers = [];
-            producers.Add(i);
+            foreach (var name in GetProducedNames(operations[i].Op))
+            {
+                if (!producedBy.TryGetValue(name, out var producers))
+                    producedBy[name] = producers = [];
+                producers.Add(i);
+            }
         }
 
         var adjacency = new List<HashSet<int>>(operations.Count);
@@ -160,7 +166,7 @@ public sealed class ClickHouseMigrationsSplitter
         {
             var members = string.Join(", ", Enumerable.Range(0, operations.Count)
                 .Where(i => inDegree[i] > 0)
-                .Select(i => GetProducedName(operations[i].Op) ?? "<unknown>")
+                .Select(i => GetProducedNames(operations[i].Op).FirstOrDefault() ?? "<unknown>")
                 .OrderBy(s => s, StringComparer.Ordinal));
             throw new InvalidOperationException(
                 $"Circular dependency detected between materialized view operations: {members}. " +
@@ -174,13 +180,14 @@ public sealed class ClickHouseMigrationsSplitter
         return sorted;
     }
 
-    // The table an operation produces (and that others may read). Materialized-view creates produce
-    // their TO target; drops are keyed by view name (drops carry no SELECT, so they form no edges).
-    private static string? GetProducedName(MigrationOperation op) => op switch
+    // The names an operation produces (and that others may read). A materialized-view create
+    // produces its TO target table AND its own view name — a downstream SELECT may reference either.
+    // Drops are keyed by view name (drops carry no SELECT, so they form no edges).
+    private static IEnumerable<string> GetProducedNames(MigrationOperation op) => op switch
     {
-        ClickHouseCreateMaterializedViewOperation mv => NormalizeName(mv.TargetTable),
-        ClickHouseDropMaterializedViewOperation mv => NormalizeName(mv.ViewName),
-        _ => null,
+        ClickHouseCreateMaterializedViewOperation mv => [NormalizeName(mv.TargetTable), NormalizeName(mv.ViewName)],
+        ClickHouseDropMaterializedViewOperation mv => [NormalizeName(mv.ViewName)],
+        _ => [],
     };
 
     // The tables an operation reads. Only materialized-view creates expose a SELECT to parse.
