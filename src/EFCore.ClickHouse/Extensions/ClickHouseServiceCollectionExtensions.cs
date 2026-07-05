@@ -41,6 +41,7 @@ public static class ClickHouseServiceCollectionExtensions
             .TryAdd<IMigrationsSqlGenerator, ClickHouseMigrationsSqlGenerator>()
             .TryAdd<IHistoryRepository, ClickHouseHistoryRepository>()
             .TryAdd<IMigrationsAnnotationProvider, ClickHouseMigrationsAnnotationProvider>()
+            .TryAdd<IMigrationsModelDiffer, ClickHouseMigrationsModelDiffer>()
             .TryAdd<IQueryableMethodTranslatingExpressionVisitorFactory, ClickHouseQueryableMethodTranslatingExpressionVisitorFactory>()
             .TryAdd<IMethodCallTranslatorProvider, ClickHouseMethodCallTranslatorProvider>()
             .TryAdd<IAggregateMethodCallTranslatorProvider, ClickHouseAggregateMethodCallTranslatorProvider>()
