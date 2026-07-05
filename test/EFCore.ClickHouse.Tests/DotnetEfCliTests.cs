@@ -140,6 +140,37 @@ public class DotnetEfCliTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Incremental_migrations_add_scaffolds_only_the_delta()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully (CI installs it, so coverage is real there)
+
+        // First add establishes the model snapshot; the second diffs against it. The V2 delta is a
+        // single AddColumn, which takes the scaffolder's single-operation fallback path — the path
+        // that once re-processed the snapshot and silently diffed against a null source model,
+        // scaffolding the whole schema as CreateTable instead of the delta.
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+
+        var modelV2 = new Dictionary<string, string> { ["SMOKE_MODEL_V2"] = "1" };
+        await RunDotnetEfSuccessfully(modelV2, "migrations", "add", "AddNotes");
+
+        var addNotesFile = Assert.Single(Directory.GetFiles(_migrationsDir!, "*_AddNotes.cs")
+            .Where(f => !f.EndsWith(".Designer.cs", StringComparison.Ordinal)));
+        var code = await File.ReadAllTextAsync(addNotesFile);
+        Assert.Contains("AddColumn", code);
+        Assert.DoesNotContain("CreateTable", code);
+
+        // Apply both and confirm the column landed on the real table.
+        await RunDotnetEfSuccessfully(modelV2, "database", "update");
+
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await connection.OpenAsync();
+        var notesCount = await QueryScalar<ulong>(connection,
+            "SELECT count() FROM system.columns WHERE database = currentDatabase() AND table = 'sensor_readings' AND name = 'Notes'");
+        Assert.Equal(1UL, notesCount);
+    }
+
+    [Fact]
     public async Task Projection_definition_is_baked_into_the_model_snapshot()
     {
         if (!_dotnetEfAvailable)
@@ -226,14 +257,20 @@ public class DotnetEfCliTests : IAsyncLifetime
             .OrderBy(f => f, StringComparer.Ordinal)
             .ToArray();
 
-    private async Task RunDotnetEfSuccessfully(params string[] args)
+    private Task RunDotnetEfSuccessfully(params string[] args)
+        => RunDotnetEfSuccessfully(extraEnv: null, args);
+
+    private async Task RunDotnetEfSuccessfully(IReadOnlyDictionary<string, string>? extraEnv, params string[] args)
     {
-        var result = await RunDotnetEf(args);
+        var result = await RunDotnetEf(extraEnv, args);
         Assert.True(result.ExitCode == 0,
             $"dotnet-ef {string.Join(' ', args)} failed (exit {result.ExitCode}):\n{result.StdOut}\n{result.StdErr}");
     }
 
-    private async Task<DotnetEfResult> RunDotnetEf(params string[] args)
+    private Task<DotnetEfResult> RunDotnetEf(params string[] args)
+        => RunDotnetEf(extraEnv: null, args);
+
+    private async Task<DotnetEfResult> RunDotnetEf(IReadOnlyDictionary<string, string>? extraEnv, params string[] args)
     {
         var allArgs = new List<string>(args)
         {
@@ -250,6 +287,8 @@ public class DotnetEfCliTests : IAsyncLifetime
             WorkingDirectory = _smokeProjectDir
         };
         psi.Environment["CLICKHOUSE_CONNECTION_STRING"] = _connectionString;
+        foreach (var (key, value) in extraEnv ?? Enumerable.Empty<KeyValuePair<string, string>>())
+            psi.Environment[key] = value;
 
         foreach (var arg in allArgs)
             psi.ArgumentList.Add(arg);

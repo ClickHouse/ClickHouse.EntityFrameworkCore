@@ -17,6 +17,13 @@ public class SmokeDbContext : DbContext
         modelBuilder.Entity<SensorReading>(b =>
         {
             b.HasKey(e => e.Id);
+
+            // Model "V2" adds one extra column, so the CLI tests can scaffold a second,
+            // incremental migration whose delta is a single operation (the AddColumn) — the
+            // scaffolder path that diffs against an existing model snapshot.
+            if (Environment.GetEnvironmentVariable("SMOKE_MODEL_V2") == "1")
+                b.Property<string>("Notes");
+
             b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
             b.Property(e => e.Timestamp)
                 .HasColumnComment("Reading timestamp");

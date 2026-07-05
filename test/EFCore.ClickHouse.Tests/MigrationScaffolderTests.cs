@@ -78,6 +78,24 @@ public class MigrationScaffolderTests
     }
 
     [Fact]
+    public void Single_operation_migration_diffs_against_existing_snapshot()
+    {
+        // A single-operation diff takes the base-scaffolder fallback path, which re-processes the
+        // assembly's model snapshot for its own diff. Processing the snapshot's cached model twice
+        // used to leave the second diff with a null source model, scaffolding the whole schema as
+        // CreateTable instead of the actual one-operation delta (here: a column rename).
+        using var context = new RenameContext();
+        var scaffolder = ResolveScaffolder(context);
+
+        var migration = scaffolder.ScaffoldMigration("RenameAToB", rootNamespace: "TestRoot", subNamespace: "Migrations");
+
+        // Not split into steps: the delta really was a single operation.
+        Assert.DoesNotMatch(@"_\d{3}$", migration.MigrationId);
+        Assert.Contains("RenameColumn", migration.MigrationCode);
+        Assert.DoesNotContain("CreateTable", migration.MigrationCode);
+    }
+
+    [Fact]
     public void Generated_step_Down_throws_forward_only_exception()
     {
         // The scaffolded Down is forward-only; constructing the exception it throws carries the step id.
@@ -123,6 +141,50 @@ public class MigrationScaffolderTests
                 .Layout(ClickHouseDictionaryLayout.Hashed)
                 .Lifetime(60);
         }
+    }
+
+    private sealed class RenameContext : DbContext
+    {
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Database=scaffold_test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+            => modelBuilder.Entity<RenameItem>(b =>
+            {
+                b.HasKey(e => e.Id);
+                b.Property(e => e.A).HasColumnName("B"); // column was "A" in the snapshot below
+                b.ToTable("rename_items", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+    }
+
+    // Stands in for the compiled snapshot a real project accumulates in its migrations assembly;
+    // IMigrationsAssembly discovers it via the [DbContext] attribute. Mirrors RenameContext's
+    // model except the renamed column, so the diff is exactly one RenameColumnOperation.
+    [Microsoft.EntityFrameworkCore.Infrastructure.DbContext(typeof(RenameContext))]
+    public class RenameContextModelSnapshot : Microsoft.EntityFrameworkCore.Infrastructure.ModelSnapshot
+    {
+        protected override void BuildModel(ModelBuilder modelBuilder)
+        {
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.2");
+
+            modelBuilder.Entity("EFCore.ClickHouse.Tests.MigrationScaffolderTests+RenameItem", b =>
+            {
+                b.Property<long>("Id").HasColumnType("Int64");
+                b.Property<long>("A").HasColumnType("Int64");
+                b.HasKey("Id");
+                b.ToTable("rename_items", (string)null);
+
+                b
+                    .HasAnnotation("ClickHouse:Engine", "MergeTree")
+                    .HasAnnotation("ClickHouse:OrderBy", new[] { "Id" });
+            });
+        }
+    }
+
+    private class RenameItem
+    {
+        public long Id { get; set; }
+        public long A { get; set; }
     }
 
     private class HitsSource
