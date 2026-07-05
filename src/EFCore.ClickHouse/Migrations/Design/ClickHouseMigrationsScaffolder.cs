@@ -178,10 +178,17 @@ public class ClickHouseMigrationsScaffolder : MigrationsScaffolder
         // The model snapshot for THIS context is the diff baseline. Use the assembly's own snapshot
         // rather than scanning types for a "*ModelSnapshot" (which would pick the wrong one in a
         // multi-DbContext project). Process upgrades an older snapshot to the current shape first.
+        // SnapshotModelProcessor.Process finalizes the snapshot's cached mutable model in place,
+        // and finalizing it a second time returns null. The single-operation fallback path calls
+        // base.ScaffoldMigration, which re-processes the assembly's snapshot for its own diff —
+        // so this pre-diff must run on a fresh snapshot instance and leave the cached one
+        // untouched, or base silently diffs against a null source model and scaffolds the whole
+        // schema as new.
         var snapshot = _migrationsAssembly.ModelSnapshot;
         var lastModel = snapshot is null
             ? null
-            : Dependencies.SnapshotModelProcessor.Process(snapshot.Model).GetRelationalModel();
+            : Dependencies.SnapshotModelProcessor.Process(
+                ((ModelSnapshot)Activator.CreateInstance(snapshot.GetType(), nonPublic: true)!).Model).GetRelationalModel();
 
         return _modelDiffer.GetDifferences(lastModel, _model.GetRelationalModel());
     }
