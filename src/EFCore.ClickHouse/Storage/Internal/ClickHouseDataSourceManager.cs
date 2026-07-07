@@ -29,7 +29,8 @@ public class ClickHouseDataSourceManager : IDisposable, IAsyncDisposable
         if (_dataSources.TryGetValue(effectiveConnectionString, out var existing))
             return existing;
 
-        var newDataSource = new ClickHouseDataSource(effectiveConnectionString);
+        var newDataSource = new ClickHouseDataSource(
+            ClickHouseClientIdentity.CreateSettings(effectiveConnectionString));
         var added = _dataSources.GetOrAdd(effectiveConnectionString, newDataSource);
 
         if (!ReferenceEquals(added, newDataSource))
