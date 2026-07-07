@@ -17,6 +17,16 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void EndStatement(MigrationCommandListBuilder builder, bool suppressTransaction = true)
         => base.EndStatement(builder, suppressTransaction: true);
 
+    // Appends the statement terminator and finalizes the command. The base EndStatement only ends
+    // the command; the terminator must be appended by the caller (the built-in operations do this
+    // too). Every custom override below routes through this so each emitted statement is terminated
+    // — without it, the concatenated `migrations script` output runs statements together.
+    private void TerminateStatement(MigrationCommandListBuilder builder)
+    {
+        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
+        EndStatement(builder);
+    }
+
     // Custom operation dispatch
 
     protected override void Generate(MigrationOperation operation, IModel? model, MigrationCommandListBuilder builder)
@@ -29,6 +39,24 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             case ClickHouseDropDatabaseOperation dropDb:
                 Generate(dropDb, builder);
                 return;
+            case ClickHouseCreateMaterializedViewOperation createMv:
+                Generate(createMv, builder);
+                return;
+            case ClickHouseDropMaterializedViewOperation dropMv:
+                Generate(dropMv, builder);
+                return;
+            case ClickHouseCreateDictionaryOperation createDict:
+                Generate(createDict, builder);
+                return;
+            case ClickHouseDropDictionaryOperation dropDict:
+                Generate(dropDict, builder);
+                return;
+            case ClickHouseAddProjectionOperation addProjection:
+                Generate(addProjection, builder);
+                return;
+            case ClickHouseDropProjectionOperation dropProjection:
+                Generate(dropProjection, builder);
+                return;
             default:
                 base.Generate(operation, model, builder);
                 return;
@@ -40,7 +68,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder
             .Append("CREATE DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
-        EndStatement(builder, suppressTransaction: true);
+        TerminateStatement(builder);
     }
 
     protected virtual void Generate(ClickHouseDropDatabaseOperation operation, MigrationCommandListBuilder builder)
@@ -48,7 +76,211 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder
             .Append("DROP DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
-        EndStatement(builder, suppressTransaction: true);
+        TerminateStatement(builder);
+    }
+
+    protected virtual void Generate(ClickHouseCreateMaterializedViewOperation operation, MigrationCommandListBuilder builder)
+    {
+        // ClickHouse forbids combining an explicit target table with POPULATE
+        // ("you can't declare both 'TO [db].[table]' and 'POPULATE'"). This provider's views always
+        // write to a target table, so POPULATE is unsupported; backfill the target with a follow-up
+        // INSERT … SELECT instead.
+        if (operation.Populate)
+            throw new NotSupportedException(
+                $"Materialized view '{operation.ViewName}' sets Populate, but ClickHouse does not allow "
+                + "POPULATE together with a 'TO' target table. Remove Populate and backfill the target "
+                + "table with an INSERT … SELECT after the view is created.");
+
+        builder.Append("CREATE MATERIALIZED VIEW ");
+
+        if (operation.IfNotExists)
+            builder.Append("IF NOT EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.ViewName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        builder.Append(" TO ");
+        AppendQualifiedName(builder, operation.TargetDatabase, operation.TargetTable);
+
+        builder.AppendLine();
+        builder.Append("AS ").Append(operation.SelectQuery);
+
+        TerminateStatement(builder);
+    }
+
+    protected virtual void Generate(ClickHouseDropMaterializedViewOperation operation, MigrationCommandListBuilder builder)
+    {
+        builder.Append("DROP VIEW ");
+
+        if (operation.IfExists)
+            builder.Append("IF EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.ViewName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        TerminateStatement(builder);
+    }
+
+    protected virtual void Generate(ClickHouseCreateDictionaryOperation operation, MigrationCommandListBuilder builder)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+
+        builder.Append(operation.OrReplace ? "CREATE OR REPLACE DICTIONARY " : "CREATE DICTIONARY ");
+
+        if (operation.IfNotExists && !operation.OrReplace)
+            builder.Append("IF NOT EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.DictionaryName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        // Column list
+        builder.AppendLine();
+        builder.AppendLine("(");
+        using (builder.Indent())
+        {
+            for (var i = 0; i < operation.Columns.Count; i++)
+            {
+                var col = operation.Columns[i];
+                builder.Append(helper.DelimitIdentifier(col.Name)).Append(" ").Append(col.Type);
+                if (!string.IsNullOrWhiteSpace(col.Default))
+                    builder.Append(" DEFAULT ").Append(col.Default);
+                if (i < operation.Columns.Count - 1)
+                    builder.Append(",");
+                builder.AppendLine();
+            }
+        }
+        builder.AppendLine(")");
+
+        // PRIMARY KEY
+        builder.Append("PRIMARY KEY ");
+        builder.AppendLine(string.Join(", ", operation.KeyColumns.Select(helper.DelimitIdentifier)));
+
+        // SOURCE — a ClickHouse table. Connection settings are optional; when omitted the dictionary
+        // loads as the 'default' user with an empty password (only works where 'default' is passwordless).
+        builder.Append("SOURCE(CLICKHOUSE(");
+        // A named collection (defined in server config) supplies host/port/user/password; the inline
+        // settings below override its fields.
+        if (!string.IsNullOrWhiteSpace(operation.SourceNamedCollection))
+            builder.Append("NAME ").Append(SqlStringLiteral(operation.SourceNamedCollection)).Append(" ");
+        if (!string.IsNullOrWhiteSpace(operation.SourceHost))
+            builder.Append("HOST ").Append(SqlStringLiteral(operation.SourceHost)).Append(" ");
+        if (operation.SourcePort is { } port)
+            builder.Append("PORT ").Append(port.ToString()).Append(" ");
+        if (!string.IsNullOrWhiteSpace(operation.SourceUser))
+            builder.Append("USER ").Append(SqlStringLiteral(operation.SourceUser)).Append(" ");
+        // Intentionally uses != null (not IsNullOrWhiteSpace): an explicitly-configured empty password
+        // (PASSWORD '') is distinct from "no password configured".
+        if (operation.SourcePassword is not null)
+            builder.Append("PASSWORD ").Append(SqlStringLiteral(operation.SourcePassword)).Append(" ");
+        builder.Append("TABLE ").Append(SqlStringLiteral(operation.SourceTable));
+        if (!string.IsNullOrWhiteSpace(operation.SourceDatabase))
+            builder.Append(" DB ").Append(SqlStringLiteral(operation.SourceDatabase));
+        builder.AppendLine("))");
+
+        // LAYOUT
+        builder.Append("LAYOUT(").Append(operation.Layout).Append("(");
+        if (!string.IsNullOrWhiteSpace(operation.LayoutParams))
+            builder.Append(operation.LayoutParams);
+        builder.AppendLine("))");
+
+        // LIFETIME
+        if (operation.LifetimeMin is { } min && operation.LifetimeMax is { } max)
+            builder.Append($"LIFETIME(MIN {min} MAX {max})");
+        else if (operation.LifetimeMax is { } maxOnly)
+            builder.Append($"LIFETIME({maxOnly})");
+
+        TerminateStatement(builder);
+    }
+
+    protected virtual void Generate(ClickHouseDropDictionaryOperation operation, MigrationCommandListBuilder builder)
+    {
+        builder.Append("DROP DICTIONARY ");
+
+        if (operation.IfExists)
+            builder.Append("IF EXISTS ");
+
+        AppendQualifiedName(builder, operation.Database, operation.DictionaryName);
+
+        if (!string.IsNullOrWhiteSpace(operation.Cluster))
+            builder.Append($" ON CLUSTER '{operation.Cluster}'");
+
+        TerminateStatement(builder);
+    }
+
+    // Projections — ALTER TABLE … ADD / MATERIALIZE / DROP PROJECTION (MergeTree family only).
+    // ADD with Materialize emits two terminated statements from one operation (the ADD then a
+    // MATERIALIZE so existing parts are covered), mirroring the AlterColumn REMOVE emission.
+
+    protected virtual void Generate(ClickHouseAddProjectionOperation operation, MigrationCommandListBuilder builder)
+    {
+        AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
+        builder.Append(" ADD PROJECTION ");
+        if (operation.IfNotExists)
+            builder.Append("IF NOT EXISTS ");
+        builder
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName))
+            .Append(" (")
+            .Append(operation.SelectQuery)
+            .Append(")");
+        TerminateStatement(builder);
+
+        if (operation.Materialize)
+        {
+            AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
+            builder
+                .Append(" MATERIALIZE PROJECTION ")
+                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName))
+                // MATERIALIZE PROJECTION is an asynchronous mutation; without this the migration
+                // returns before the backfill finishes, so a later DROP/MATERIALIZE on the same
+                // projection (e.g. a change scaffolded as drop+add) races the in-flight mutation and
+                // fails with "Cannot drop projection … affected by mutation … not finished yet".
+                // mutations_sync = 1 makes the statement wait for the mutation on the local replica.
+                .Append(" SETTINGS mutations_sync = 1");
+            TerminateStatement(builder);
+        }
+    }
+
+    protected virtual void Generate(ClickHouseDropProjectionOperation operation, MigrationCommandListBuilder builder)
+    {
+        AppendAlterTablePrefix(builder, operation.Table, operation.Schema, operation.Cluster);
+        builder.Append(" DROP PROJECTION ");
+        if (operation.IfExists)
+            builder.Append("IF EXISTS ");
+        builder.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.ProjectionName));
+        TerminateStatement(builder);
+    }
+
+    // "ALTER TABLE [db.]t [ON CLUSTER 'c']" — shared prefix for the projection ALTER statements.
+    // Uses AppendQualifiedName (not DelimitIdentifier(name, schema)) because ClickHouse's SQL helper
+    // drops the schema argument — the database qualifier must be emitted explicitly, as the MV/dict
+    // generators do.
+    private void AppendAlterTablePrefix(MigrationCommandListBuilder builder, string table, string? schema, string? cluster)
+    {
+        builder.Append("ALTER TABLE ");
+        AppendQualifiedName(builder, schema, table);
+        if (!string.IsNullOrWhiteSpace(cluster))
+            builder.Append($" ON CLUSTER '{cluster}'");
+    }
+
+    // A single-quoted ClickHouse string literal (used for dictionary SOURCE parameters).
+    private static string SqlStringLiteral(string value)
+        => "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'";
+
+    private void AppendQualifiedName(MigrationCommandListBuilder builder, string? database, string name)
+    {
+        if (!string.IsNullOrWhiteSpace(database))
+        {
+            builder.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(database));
+            builder.Append(".");
+        }
+
+        builder.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(name));
     }
 
     // CREATE TABLE with ENGINE clause
@@ -63,8 +295,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         GenerateEngineClause(operation, builder);
 
-        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // Column definition: ClickHouse nullable wrapping, codec, TTL, comment
@@ -180,7 +411,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" ADD COLUMN ");
 
         ColumnDefinition(operation, model, builder);
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -195,7 +426,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" DROP COLUMN ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -209,7 +440,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" MODIFY COLUMN ");
 
         ColumnDefinition(operation.Schema, operation.Table, operation.Name, operation, model, builder);
-        EndStatement(builder);
+        TerminateStatement(builder);
 
         // Emit REMOVE statements for column annotations that were present on the old column but not the new one.
         // ClickHouse requires explicit REMOVE CODEC / REMOVE TTL / REMOVE COMMENT — a bare MODIFY COLUMN
@@ -252,7 +483,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
                 .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
                 .Append(" ")
                 .Append(keyword);
-            EndStatement(builder);
+            TerminateStatement(builder);
         }
     }
 
@@ -269,7 +500,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" TO ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -283,7 +514,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" TO ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName!, operation.NewSchema));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // ALTER TABLE — reject ClickHouse metadata changes (engine, ORDER BY, etc. are immutable)
@@ -305,6 +536,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         var allKeys = oldAnnotations.Keys.Union(newAnnotations.Keys);
         foreach (var key in allKeys)
         {
+            // Projection annotations live on the entity type, so adding/removing a projection surfaces
+            // here as a table-annotation delta. They are realized as separate ADD/DROP PROJECTION
+            // operations by the ClickHouse differ, so they are NOT an unsupported table-metadata change.
+            if (key.StartsWith(ClickHouseAnnotationNames.ProjectionPrefix, StringComparison.Ordinal))
+                continue;
+
             oldAnnotations.TryGetValue(key, out var oldVal);
             newAnnotations.TryGetValue(key, out var newVal);
 
@@ -366,7 +603,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.Append($"({indexParams})");
 
         builder.Append($" GRANULARITY {granularity}");
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -387,7 +624,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" DROP INDEX ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // Unsupported operations
