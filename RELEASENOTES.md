@@ -1,3 +1,8 @@
+v0.3.1 (Unreleased)
+---
+### Bug fixes
+* Summing a `double` or `float` column (`.SumAsync(x => x.Value)`) no longer throws `InvalidCastException`. Two ClickHouse-specific mismatches were biting: EF Core hands the float literal generator a boxed `Int32` `0` as the empty-result fallback, and ClickHouse widens `sum(Float32)` to `Float64` so the driver couldn't read it back as a `float`. Both the literal generation and the `Float32` read path now convert instead of hard-casting. ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46)) (Thanks to @HotTotem!)
+
 v0.3.0
 ---
 ### Advanced queries
@@ -18,7 +23,6 @@ v0.3.0
 
 ### Bug fixes
 * `HasColumnType("Enum8(...)")`, `HasColumnType("AggregateFunction(...)")`, and similar parameterized or aliased store types are now preserved verbatim in generated migration DDL. Previously these silently emitted `String` because the resolver canonicalized to a generic fallback mapping. ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24)) (Thanks to @Felixzed!)
-* Summing a `double` or `float` column (`.SumAsync(x => x.Value)`) no longer throws `InvalidCastException`. Two ClickHouse-specific mismatches were biting: EF Core hands the float literal generator a boxed `Int32` `0` as the empty-result fallback, and ClickHouse widens `sum(Float32)` to `Float64` so the driver couldn't read it back as a `float`. Both the literal generation and the `Float32` read path now convert instead of hard-casting. ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46)) (Thanks to @HotTotem!)
 
 v0.2.0
 ---

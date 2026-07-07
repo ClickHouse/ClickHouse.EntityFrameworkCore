@@ -1,3 +1,8 @@
+v0.3.1 (Unreleased)
+---
+### Bug fixes
+* `Sum`/`SumAsync` over a `double` or `float` column no longer throws `InvalidCastException`. EF Core wraps a top-level aggregate so the empty case returns `0`, supplying that fallback as a boxed `Int32` carrying the `Float64`/`Float32` mapping; the literal generators now convert rather than unbox. The `Float32` read path also converts, since ClickHouse widens `sum(Float32)` to `Float64` (which the driver's `GetFloat()` refuses to downcast). ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46))
+
 v0.3.0
 ---
 ### Advanced queries
@@ -19,7 +24,6 @@ v0.3.0
 ### Bug fixes
 * Preserve `LowCardinality(...)` and `Nullable(...)` wrappers from `HasColumnType(...)` in generated migration DDL. Previously the wrapper was stripped during type-mapping resolution, so the migration emitted the inner type. ([#18](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/18))
 * Preserve explicit `HasColumnType(...)` text whenever the resolved mapping's canonical store type differs from the user's input — fixes `Enum8(...)` and `AggregateFunction(...)` columns silently emitting `String` in generated DDL. Also covers `Enum16`, `SimpleAggregateFunction`, `Nested`, and the parameter-bearing forms (`Decimal128(S)`, `Json(...)` with type hints, etc.). ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24))
-* `Sum`/`SumAsync` over a `double` or `float` column no longer throws `InvalidCastException`. EF Core wraps a top-level aggregate so the empty case returns `0`, supplying that fallback as a boxed `Int32` carrying the `Float64`/`Float32` mapping; the literal generators now convert rather than unbox. The `Float32` read path also converts, since ClickHouse widens `sum(Float32)` to `Float64` (which the driver's `GetFloat()` refuses to downcast). ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46))
 
 v0.2.0
 ---
