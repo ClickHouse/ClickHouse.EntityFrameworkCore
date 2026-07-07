@@ -52,17 +52,21 @@ public class ClickHouseQuerySqlGeneratorTests : IClassFixture<ClickHouseFixture>
     }
 
     [Fact]
-    public void InlineCollection_Contains_DoesNotTranslateToHas()
+    public void CapturedCollection_Contains_TranslatesToArrayParameter()
     {
         using var ctx = new TestDbContext(_fixture.ConnectionString);
 
+        // A captured collection used with Contains binds as a single native Array(T) parameter
+        // (issue #39) rather than expanding to one parameter per element.
         var ids = new long[] { 2, 4, 6 };
 
         var sql = ctx.TestEntities
             .Where(e => ids.Contains(e.Id))
             .ToQueryString();
 
-        Assert.DoesNotContain("has(", sql);
+        Assert.Contains("has({", sql);
+        Assert.Contains(":Array(Int64)}", sql);
+        Assert.DoesNotContain(" IN (", sql);
     }
 
     [Fact]

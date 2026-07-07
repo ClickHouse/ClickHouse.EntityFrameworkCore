@@ -1,5 +1,8 @@
-v0.3.1 (Unreleased)
+v0.4.0 (Unreleased)
 ---
+### Advanced queries
+* **Large `Contains` filters no longer blow the parameter limit.** Querying with a captured collection — `Where(x => ids.Contains(x.Id))` — now sends the whole list as a single ClickHouse array parameter (`has({ids:Array(Int64)}, …)`) instead of one parameter per element. Big `IN`-style filters that previously failed once the list grew past the server's parameter ceiling now work, and the generated SQL stays small and reusable across list sizes. For a specific query you can still opt out: `EF.Constant(ids)` inlines the values as literals and `EF.MultipleParameters(ids)` keeps the old one-parameter-per-element behavior. The array shortcut applies to integer, floating-point, `decimal`, `bool`, `string`, and `Guid` values; nullable columns, enums, date/time values, and collections used in joins keep their existing translation. (Very large lists — hundreds of thousands of elements — may hit ClickHouse's default 128 KiB parameter-value limit; raise `http_max_field_value_size` if you need that.) ([#39](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/39))
+
 ### Bug fixes
 * Summing a `double` or `float` column (`.SumAsync(x => x.Value)`) no longer throws `InvalidCastException`. Two ClickHouse-specific mismatches were biting: EF Core hands the float literal generator a boxed `Int32` `0` as the empty-result fallback, and ClickHouse widens `sum(Float32)` to `Float64` so the driver couldn't read it back as a `float`. Both the literal generation and the `Float32` read path now convert instead of hard-casting. ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46)) (Thanks to @HotTotem!)
 
