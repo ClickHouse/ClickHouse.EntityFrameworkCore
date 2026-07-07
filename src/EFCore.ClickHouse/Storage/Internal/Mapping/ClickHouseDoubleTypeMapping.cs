@@ -20,7 +20,10 @@ public class ClickHouseDoubleTypeMapping : RelationalTypeMapping
 
     protected override string GenerateNonNullSqlLiteral(object value)
     {
-        var d = (double)value;
+        // EF Core can hand us a boxed value whose runtime type differs from double
+        // (e.g. an Int32 0 from SUM's COALESCE(SUM(x), 0) rewrite), so convert
+        // rather than unbox to avoid an InvalidCastException.
+        var d = Convert.ToDouble(value, CultureInfo.InvariantCulture);
         return d switch
         {
             double.NaN => "CAST('NaN' AS Float64)",
