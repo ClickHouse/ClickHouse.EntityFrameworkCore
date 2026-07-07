@@ -66,6 +66,18 @@ public class TypeMappingLiteralTests
         Assert.Equal("NULL", literal);
     }
 
+    [Fact]
+    public void Float_BoxedInt32_GeneratesNumericLiteral()
+    {
+        // Regression test for #46: EF Core rewrites SUM as COALESCE(SUM(x), 0)
+        // and hands the Float32 mapping a boxed Int32 zero. Unboxing directly
+        // to float would throw InvalidCastException.
+        var mapping = new ClickHouseFloatTypeMapping();
+        var literal = mapping.GenerateSqlLiteral((object)0);
+        Assert.Equal("0", literal);
+        Assert.DoesNotContain("CAST", literal);
+    }
+
     // --- Float64 (ClickHouseDoubleTypeMapping) ---
 
     [Fact]
@@ -115,6 +127,18 @@ public class TypeMappingLiteralTests
         var mapping = new ClickHouseDoubleTypeMapping();
         var literal = mapping.GenerateSqlLiteral(null);
         Assert.Equal("NULL", literal);
+    }
+
+    [Fact]
+    public void Double_BoxedInt32_GeneratesNumericLiteral()
+    {
+        // Regression test for #46: EF Core rewrites SUM as COALESCE(SUM(x), 0)
+        // and hands the Float64 mapping a boxed Int32 zero. Unboxing directly
+        // to double would throw InvalidCastException.
+        var mapping = new ClickHouseDoubleTypeMapping();
+        var literal = mapping.GenerateSqlLiteral((object)0);
+        Assert.Equal("0", literal);
+        Assert.DoesNotContain("CAST", literal);
     }
 
     // --- BigInteger (ClickHouseBigIntegerTypeMapping) ---

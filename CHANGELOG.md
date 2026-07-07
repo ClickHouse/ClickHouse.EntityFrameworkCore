@@ -1,3 +1,8 @@
+v0.3.1 (Unreleased)
+---
+### Bug fixes
+* `Sum`/`SumAsync` over a `double` or `float` column no longer throws `InvalidCastException`. EF Core wraps a top-level aggregate so the empty case returns `0`, supplying that fallback as a boxed `Int32` carrying the `Float64`/`Float32` mapping; the literal generators now convert rather than unbox. The `Float32` read path also converts, since ClickHouse widens `sum(Float32)` to `Float64` (which the driver's `GetFloat()` refuses to downcast). ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46))
+
 v0.3.0
 ---
 ### Advanced queries

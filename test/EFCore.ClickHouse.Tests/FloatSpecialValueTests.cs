@@ -215,6 +215,62 @@ public class FloatSpecialValueTests : IClassFixture<FloatSpecialFixture>
     }
 
     [Fact]
+    public async Task Sum_OverFloat64_ReturnsCorrectTotal()
+    {
+        // Regression test for #46: a top-level Sum over a non-nullable Float64
+        // column is translated as sum(...) wrapped so the empty case returns 0.
+        // EF Core supplies that fallback 0 as a boxed Int32 carrying the Float64
+        // mapping, which previously threw InvalidCastException in
+        // ClickHouseDoubleTypeMapping.GenerateNonNullSqlLiteral.
+        await using var ctx = new FloatSpecialDbContext(_fixture.ConnectionString);
+
+        // Rows 4,5,6 are finite: 0.0 + 2.718281828459045 + (-1.5) = 1.218281828459045
+        var total = await ctx.FloatSpecials
+            .Where(e => e.Id >= 4)
+            .SumAsync(e => e.ValFloat64);
+
+        Assert.Equal(1.218281828459045, total, 1e-10);
+    }
+
+    [Fact]
+    public async Task Sum_OverFloat64_NoMatchingRows_ReturnsZero()
+    {
+        // The exact shape reported in #46: a predicate that matches no rows.
+        await using var ctx = new FloatSpecialDbContext(_fixture.ConnectionString);
+
+        var total = await ctx.FloatSpecials
+            .Where(e => e.Id > 1000)
+            .SumAsync(e => e.ValFloat64);
+
+        Assert.Equal(0.0, total);
+    }
+
+    [Fact]
+    public async Task Sum_OverFloat32_ReturnsCorrectTotal()
+    {
+        await using var ctx = new FloatSpecialDbContext(_fixture.ConnectionString);
+
+        // Rows 4,5,6 are finite: 0.0 + 3.14 + (-1.5) = 1.64
+        var total = await ctx.FloatSpecials
+            .Where(e => e.Id >= 4)
+            .SumAsync(e => e.ValFloat32);
+
+        Assert.Equal(1.64f, total, 0.001f);
+    }
+
+    [Fact]
+    public async Task Sum_OverFloat32_NoMatchingRows_ReturnsZero()
+    {
+        await using var ctx = new FloatSpecialDbContext(_fixture.ConnectionString);
+
+        var total = await ctx.FloatSpecials
+            .Where(e => e.Id > 1000)
+            .SumAsync(e => e.ValFloat32);
+
+        Assert.Equal(0.0f, total);
+    }
+
+    [Fact]
     public async Task OrderBy_SpecialValuesSort()
     {
         await using var ctx = new FloatSpecialDbContext(_fixture.ConnectionString);

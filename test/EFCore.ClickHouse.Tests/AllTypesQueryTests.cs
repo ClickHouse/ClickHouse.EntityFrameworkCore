@@ -361,6 +361,77 @@ public class AllTypesQueryTests : IClassFixture<AllTypesFixture>
         Assert.Equal(3, count); // rows 3, 4, 5 have positive decimals
     }
 
+    // The following aggregate tests guard against the #46 class of bug — EF Core
+    // wraps a top-level Sum so the empty case returns 0, handing the column's type
+    // mapping a boxed Int32 fallback. #46 was Float64/Float32; these cover the
+    // adjacent decimal and integer paths and the ClickHouse aggregate-widening
+    // read path (sum(Decimal(18,4)) -> Decimal128, sum(Int32) -> Int64).
+
+    [Fact]
+    public async Task Sum_OverDecimal_ReturnsCorrectTotal()
+    {
+        await using var ctx = new AllTypesDbContext(_fixture.ConnectionString);
+
+        // Rows 4,5: 0.0001 + 42.0000 = 42.0001
+        var total = await ctx.AllTypes
+            .Where(e => e.Id >= 4)
+            .SumAsync(e => e.ValDecimal);
+
+        Assert.Equal(42.0001m, total);
+    }
+
+    [Fact]
+    public async Task Sum_OverDecimal_NoMatchingRows_ReturnsZero()
+    {
+        await using var ctx = new AllTypesDbContext(_fixture.ConnectionString);
+
+        var total = await ctx.AllTypes
+            .Where(e => e.Id > 1000)
+            .SumAsync(e => e.ValDecimal);
+
+        Assert.Equal(0m, total);
+    }
+
+    [Fact]
+    public async Task Sum_OverInt32_WidensToInt64AndReads()
+    {
+        await using var ctx = new AllTypesDbContext(_fixture.ConnectionString);
+
+        // ClickHouse widens sum(Int32) to Int64; the integer mapping reads it back.
+        // Rows 4,5: -1 + 42 = 41
+        var total = await ctx.AllTypes
+            .Where(e => e.Id >= 4)
+            .SumAsync(e => e.ValInt32);
+
+        Assert.Equal(41, total);
+    }
+
+    [Fact]
+    public async Task Sum_OverInt64_NoMatchingRows_ReturnsZero()
+    {
+        await using var ctx = new AllTypesDbContext(_fixture.ConnectionString);
+
+        var total = await ctx.AllTypes
+            .Where(e => e.Id > 1000)
+            .SumAsync(e => e.ValInt64);
+
+        Assert.Equal(0L, total);
+    }
+
+    [Fact]
+    public async Task Average_OverInt32_ReturnsDouble()
+    {
+        await using var ctx = new AllTypesDbContext(_fixture.ConnectionString);
+
+        // ClickHouse avg over any numeric type returns Float64, materialized as double.
+        // Rows 4,5: (-1 + 42) / 2 = 20.5
+        var avg = await ctx.AllTypes
+            .Where(e => e.Id >= 4)
+            .AverageAsync(e => e.ValInt32);
+
+        Assert.Equal(20.5, avg, 1e-10);
+    }
+
     [Fact]
     public async Task Where_EmptyString()
     {
