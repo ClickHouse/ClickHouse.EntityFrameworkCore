@@ -37,9 +37,10 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     protected override DbConnection CreateDbConnection()
         => _dataSource?.CreateConnection()
            ?? new ClickHouseConnection(
-               _joinNullSemanticsDisabled
-                   ? ConnectionString!
-                   : ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!));
+               ClickHouseClientIdentity.CreateSettings(
+                   _joinNullSemanticsDisabled
+                       ? ConnectionString!
+                       : ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!)));
 
     protected override bool SupportsAmbientTransactions => false;
 
