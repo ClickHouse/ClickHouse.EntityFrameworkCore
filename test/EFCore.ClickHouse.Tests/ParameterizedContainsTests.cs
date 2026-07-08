@@ -1,3 +1,5 @@
+using System.Net;
+using System.Numerics;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -16,6 +18,9 @@ public class ParamContainsEntity
     public decimal DecimalVal { get; set; }
     public bool BoolVal { get; set; }
     public int? NullableInt { get; set; }
+    public DateOnly DateOnlyVal { get; set; }
+    public BigInteger BigVal { get; set; }
+    public IPAddress IpVal { get; set; } = IPAddress.Loopback;
 }
 
 public class ParamContainsDbContext : DbContext
@@ -47,6 +52,9 @@ public class ParamContainsDbContext : DbContext
             entity.Property(e => e.DecimalVal).HasColumnName("decimal_val").HasColumnType("Decimal(18, 4)");
             entity.Property(e => e.BoolVal).HasColumnName("bool_val").HasColumnType("Bool");
             entity.Property(e => e.NullableInt).HasColumnName("nullable_int").HasColumnType("Nullable(Int32)");
+            entity.Property(e => e.DateOnlyVal).HasColumnName("date_only_val").HasColumnType("Date32");
+            entity.Property(e => e.BigVal).HasColumnName("big_val").HasColumnType("Int128");
+            entity.Property(e => e.IpVal).HasColumnName("ip_val").HasColumnType("IPv4");
         });
     }
 }
@@ -77,7 +85,10 @@ public class ParamContainsFixture : IAsyncLifetime
                 date_val DateTime,
                 decimal_val Decimal(18, 4),
                 bool_val Bool,
-                nullable_int Nullable(Int32)
+                nullable_int Nullable(Int32),
+                date_only_val Date32,
+                big_val Int128,
+                ip_val IPv4
             ) ENGINE = MergeTree()
             ORDER BY id
             """;
@@ -86,9 +97,9 @@ public class ParamContainsFixture : IAsyncLifetime
         using var insertCmd = connection.CreateCommand();
         insertCmd.CommandText = $"""
             INSERT INTO param_contains VALUES
-            (1, 10, 'alpha', toUUID('{Guid1}'), 'Red',   '2021-01-01 00:00:00', 1.5,  true,  100),
-            (2, 20, 'beta',  toUUID('{Guid2}'), 'Green', '2022-02-02 00:00:00', 2.5,  false, NULL),
-            (3, 30, 'gamma', toUUID('{Guid3}'), 'Blue',  '2023-03-03 00:00:00', 3.5,  true,  300)
+            (1, 10, 'alpha', toUUID('{Guid1}'), 'Red',   '2021-01-01 00:00:00', 1.5,  true,  100,  '2021-01-01', 111, '10.0.0.1'),
+            (2, 20, 'beta',  toUUID('{Guid2}'), 'Green', '2022-02-02 00:00:00', 2.5,  false, NULL, '2022-02-02', 222, '10.0.0.2'),
+            (3, 30, 'gamma', toUUID('{Guid3}'), 'Blue',  '2023-03-03 00:00:00', 3.5,  true,  300,  '2023-03-03', 333, '10.0.0.3')
             """;
         await insertCmd.ExecuteNonQueryAsync();
     }
@@ -168,16 +179,52 @@ public class ParameterizedContainsTests : IClassFixture<ParamContainsFixture>
     }
 
     [Fact]
-    public async Task DateTime_Collection_FallsBackToPerElementExpansion()
+    public async Task DateTime_Collection_TranslatesAndMatches()
     {
         await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
         var dates = new[] { new DateTime(2021, 1, 1), new DateTime(2023, 3, 3) };
 
-        // DateTime is excluded from the array-parameter path: the driver serializes DateTime array
-        // elements without the quoting ClickHouse needs, so Array(DateTime) parameters fail to parse.
-        // It falls back to the per-element expansion, which serializes each value correctly.
         var query = ctx.Entities.Where(e => dates.Contains(e.DateVal));
-        Assert.DoesNotContain("has({", query.ToQueryString());
+        Assert.Contains(":Array(DateTime)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task DateOnly_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var dates = new[] { new DateOnly(2021, 1, 1), new DateOnly(2023, 3, 3) };
+
+        var query = ctx.Entities.Where(e => dates.Contains(e.DateOnlyVal));
+        Assert.Contains(":Array(Date32)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task BigInteger_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new BigInteger[] { 111, 333 };
+
+        var query = ctx.Entities.Where(e => vals.Contains(e.BigVal));
+        Assert.Contains(":Array(Int128)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task IPAddress_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ips = new[] { IPAddress.Parse("10.0.0.1"), IPAddress.Parse("10.0.0.3") };
+
+        var query = ctx.Entities.Where(e => ips.Contains(e.IpVal));
+        Assert.Contains(":Array(IPv4)}", query.ToQueryString());
 
         var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
         Assert.Equal([1L, 3L], rows);

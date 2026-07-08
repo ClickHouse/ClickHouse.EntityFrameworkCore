@@ -10,18 +10,22 @@ namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 
 public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
 {
-    // Element CLR types whose collections the ClickHouse driver serializes correctly as a single bound
-    // array parameter value. Restricted to natively-serializable scalars — integers, floating point,
-    // decimal, bool, string, and Guid (→ UUID). Temporal types (DateTime, DateTimeOffset, DateOnly,
-    // TimeOnly, TimeSpan) are deliberately excluded: the driver emits their array elements without the
-    // quoting ClickHouse needs, so `Array(DateTime)` parameters fail to parse. Anything not listed here
-    // falls back to EF Core's per-element expansion, which serializes each element on its own.
+    // Element CLR types whose collections ClickHouse.Driver serializes correctly as a single bound
+    // array parameter value (verified empirically against the pinned driver). Anything not listed here
+    // falls back to EF Core's per-element expansion, which serializes each element on its own — so an
+    // unlisted or newly-mapped type stays correct (just unoptimized) rather than failing at runtime.
+    //   • DateTime covers DateTime/DateTime64; DateOnly covers Date/Date32; BigInteger covers
+    //     Int128/Int256/UInt128/UInt256; IPAddress covers IPv4/IPv6.
+    //   • TimeSpan (Time/Time64) is deliberately excluded: the driver emits its array elements without
+    //     the quoting ClickHouse needs, so `Array(Time)` parameters fail to parse (CANNOT_READ_ARRAY).
     private static readonly HashSet<Type> ArrayParameterElementTypes =
     [
         typeof(byte), typeof(sbyte), typeof(short), typeof(ushort),
         typeof(int), typeof(uint), typeof(long), typeof(ulong),
         typeof(float), typeof(double), typeof(decimal),
         typeof(bool), typeof(string), typeof(Guid),
+        typeof(DateTime), typeof(DateOnly),
+        typeof(System.Numerics.BigInteger), typeof(System.Net.IPAddress),
     ];
 
     public ClickHouseSqlNullabilityProcessor(
@@ -96,7 +100,7 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         //  - the element needs a value converter (e.g. a CLR enum → Enum8) → the whole collection is
         //    handed to the driver un-converted, which it can't serialize;
         //  - the element CLR type isn't one the driver serializes correctly inside an array (see
-        //    ArrayParameterElementTypes — notably temporal types are excluded).
+        //    ArrayParameterElementTypes — notably TimeSpan/Time is excluded).
         // The base expansion serializes each element individually, so all these cases still work.
         if (itemNullable
             || elementMapping is null
