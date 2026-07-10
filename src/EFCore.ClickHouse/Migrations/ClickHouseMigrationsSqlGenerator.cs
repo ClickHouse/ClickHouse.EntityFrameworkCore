@@ -38,7 +38,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
     protected virtual void Generate(ClickHouseCreateDatabaseOperation operation, MigrationCommandListBuilder builder)
     {
         builder
-            .Append("CREATE DATABASE ")
+            .Append("CREATE DATABASE IF NOT EXISTS ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
         EndStatement(builder, suppressTransaction: true);
     }

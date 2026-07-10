@@ -231,10 +231,10 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
-    public void EnsureSchema_generates_CREATE_DATABASE()
+    public void EnsureSchema_generates_idempotent_CREATE_DATABASE()
     {
         var sql = Generate(new EnsureSchemaOperation { Name = "dbo" });
-        Assert.Contains("CREATE DATABASE `dbo`", sql);
+        Assert.Contains("CREATE DATABASE IF NOT EXISTS `dbo`", sql);
     }
 
     [Fact]
@@ -801,10 +801,10 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
-    public void CreateDatabase_generates_CREATE_DATABASE()
+    public void CreateDatabase_generates_idempotent_CREATE_DATABASE()
     {
         var sql = Generate(new ClickHouseCreateDatabaseOperation { Name = "my_db" });
-        Assert.Contains("CREATE DATABASE `my_db`", sql);
+        Assert.Contains("CREATE DATABASE IF NOT EXISTS `my_db`", sql);
     }
 
     [Fact]
