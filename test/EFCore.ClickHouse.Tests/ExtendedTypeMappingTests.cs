@@ -2582,15 +2582,13 @@ public class TypeMappingSourceStoreTypeTests
 {
     /// <summary>
     /// Verifies that explicit HasColumnType(...) text is preserved on the resolved
-    /// mapping's StoreType, even when the resolver normalizes/parses to discover
-    /// CLR semantics.
+    /// mapping's StoreType for non-nullability wrappers.
     /// </summary>
     [Theory]
-    [InlineData("Nullable(Int32)")]
-    [InlineData("Nullable(String)")]
+    [InlineData("Int32")]
+    [InlineData("String")]
     [InlineData("LowCardinality(String)")]
-    [InlineData("LowCardinality(Nullable(String))")]
-    [InlineData("Nullable(Float64)")]
+    [InlineData("Float64")]
     [InlineData("Enum8('a'=1,'b'=2)")]
     [InlineData("Dynamic(max_types=16)")]
     [InlineData("Json(max_dynamic_paths=256, max_dynamic_types=8, a.b UInt32, SKIP a.e)")]
@@ -2601,6 +2599,31 @@ public class TypeMappingSourceStoreTypeTests
         var mapping = source.FindMapping(typeof(object), storeType);
         Assert.NotNull(mapping);
         Assert.Equal(storeType, mapping.StoreType);
+    }
+
+    [Theory]
+    [InlineData(typeof(string), "LowCardinality(Nullable(String))", "LowCardinality(String)")]
+    [InlineData(typeof(int), "LowCardinality(Nullable(Int32))", "LowCardinality(Int32)")]
+    [InlineData(typeof(double), "LowCardinality(Nullable(Float64))", "LowCardinality(Float64)")]
+    [InlineData(typeof(DateTime), "LowCardinality(Nullable(DateTime))", "LowCardinality(DateTime)")]
+    [InlineData(typeof(decimal), "LowCardinality(Nullable(Decimal(18, 4)))", "LowCardinality(Decimal(18, 4))")]
+    [InlineData(typeof(Guid), "LowCardinality(Nullable(UUID))", "LowCardinality(UUID)")]
+    [InlineData(typeof(string), "Nullable(String)", "String")]
+    [InlineData(typeof(int), "Nullable(Int32)", "Int32")]
+    [InlineData(typeof(double), "Nullable(Float64)", "Float64")]
+    [InlineData(typeof(DateTime), "Nullable(DateTime)", "DateTime")]
+    [InlineData(typeof(decimal), "Nullable(Decimal(18, 4))", "Decimal(18, 4)")]
+    [InlineData(typeof(string), "Nullable(Enum8('a'=1,'b'=2))", "Enum8('a'=1,'b'=2)")]
+    public void FindMapping_NormalizesTopLevelNullableStoreTypes(
+        Type clrType,
+        string storeType,
+        string expectedStoreType)
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(clrType, storeType);
+
+        Assert.NotNull(mapping);
+        Assert.Equal(expectedStoreType, mapping.StoreType);
     }
 
     [Theory]
@@ -2661,12 +2684,12 @@ public class TypeMappingSourceStoreTypeTests
     }
 
     [Fact]
-    public void FindMapping_PreservesNullableDecimalWrapper()
+    public void FindMapping_NormalizesNullableDecimalWrapper()
     {
         var source = GetTypeMappingSource();
         var mapping = source.FindMapping(typeof(decimal?), "Nullable(Decimal(18, 4))");
         Assert.NotNull(mapping);
-        Assert.Equal("Nullable(Decimal(18, 4))", mapping.StoreType);
+        Assert.Equal("Decimal(18, 4)", mapping.StoreType);
     }
 
     // The store-type parser must respect single-quoted string literals when
@@ -2729,6 +2752,19 @@ public class TypeMappingSourceStoreTypeTests
         var source = GetTypeMappingSource();
         var mapping = source.FindMapping(typeof(object), storeType);
         Assert.NotNull(mapping);
+    }
+
+    [Theory]
+    [MemberData(nameof(ClickHouseCompositeTypeTestCases.NullableSubtypeCases), MemberType = typeof(ClickHouseCompositeTypeTestCases))]
+    public void FindMapping_CompositeTypesWithNullableSubtypes_PreservesNestedType(
+        string storeType,
+        string expectedStoreType)
+    {
+        var source = GetTypeMappingSource();
+        var mapping = source.FindMapping(typeof(object), storeType);
+
+        Assert.NotNull(mapping);
+        Assert.Equal(expectedStoreType, mapping.StoreType);
     }
 
     [Fact]

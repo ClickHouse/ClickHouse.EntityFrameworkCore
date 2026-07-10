@@ -953,12 +953,52 @@ public class MigrationSqlGeneratorTests
         => AssertColumnTypePreserved<LowCardinalityStringContext>("LowCardinality(String)");
 
     [Fact]
-    public void HasColumnType_LowCardinality_NullableString_preserved_in_CreateTable_DDL()
-        => AssertColumnTypePreserved<LowCardinalityNullableContext>("LowCardinality(Nullable(String))");
+    public void HasColumnType_LowCardinality_NullableString_uses_property_nullability()
+    {
+        using var ctx = new LowCardinalityNullableContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var pathColumn = createTable.Columns.Single(c => c.Name == "Path");
+        Assert.Equal("LowCardinality(String)", pathColumn.ColumnType);
+        Assert.True(pathColumn.IsNullable);
+
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+        var sql = string.Join("\n", generator.Generate(operations).Select(c => c.CommandText));
+        Assert.Contains("`Path` LowCardinality(String)", sql);
+        Assert.DoesNotContain("Nullable(LowCardinality", sql);
+        Assert.DoesNotContain("LowCardinality(Nullable", sql);
+    }
 
     [Fact]
-    public void HasColumnType_Nullable_String_preserved_in_CreateTable_DDL()
-        => AssertColumnTypePreserved<NullableStringContext>("Nullable(String)");
+    public void HasColumnType_Nullable_String_uses_nullable_migration_metadata()
+    {
+        using var ctx = new NullableStringContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var pathColumn = createTable.Columns.Single(c => c.Name == "Path");
+        Assert.Equal("String", pathColumn.ColumnType);
+        Assert.True(pathColumn.IsNullable);
+    }
+
+    [Fact]
+    public void HasColumnType_Nullable_Enum_uses_nullable_migration_metadata()
+    {
+        using var ctx = new NullableEnumContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var languageColumn = createTable.Columns.Single(c => c.Name == "Language");
+        Assert.Equal("Enum8('a'=1,'b'=2)", languageColumn.ColumnType);
+        Assert.True(languageColumn.IsNullable);
+    }
 
     [Fact]
     public void HasColumnType_Array_LowCardinality_element_preserved_in_CreateTable_DDL()
@@ -1065,11 +1105,53 @@ public class MigrationSqlGeneratorTests
     private sealed class LowCardinalityNullableContext : LowCardinalityContextBase
     {
         protected override string ColumnType => "LowCardinality(Nullable(String))";
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullablePageView>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType(ColumnType);
+                e.ToTable("page_views", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
     }
 
     private sealed class NullableStringContext : LowCardinalityContextBase
     {
         protected override string ColumnType => "Nullable(String)";
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullablePageView>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType(ColumnType);
+                e.ToTable("page_views", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
+    }
+
+    private sealed class NullableEnumContext : DbContext
+    {
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Database=test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullableEnumEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Language).HasColumnType("Nullable(Enum8('a'=1,'b'=2))");
+                e.ToTable("languages", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
+    }
+
+    private sealed class NullableEnumEntity
+    {
+        public int Id { get; set; }
+        public string? Language { get; set; }
     }
 
     private sealed class AggregateFunctionContext : LowCardinalityContextBase
