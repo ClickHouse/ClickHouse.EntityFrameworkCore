@@ -2,6 +2,7 @@ v0.3.1 (Unreleased)
 ---
 ### Bug fixes
 * `Sum`/`SumAsync` over a `double` or `float` column no longer throws `InvalidCastException`. EF Core wraps a top-level aggregate so the empty case returns `0`, supplying that fallback as a boxed `Int32` carrying the `Float64`/`Float32` mapping; the literal generators now convert rather than unbox. The `Float32` read path also converts, since ClickHouse widens `sum(Float32)` to `Float64` (which the driver's `GetFloat()` refuses to downcast). ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46))
+* **Schema-to-database migration mapping**: migration `schema` values are now treated as ClickHouse database names.
 
 v0.3.0
 ---
@@ -20,7 +21,6 @@ v0.3.0
   * **Ordering / reversal / deduplication** — `Reverse()` → `arrayReverse(array)`; `Distinct()` → `arrayDistinct(array)`; `OrderBy(x => x)` / `OrderByDescending(x => x)` → `arraySort(array)` / `arrayReverseSort(array)` (identity-lambda elision). Non-identity key selectors emit the higher-order form `arraySort(x -> f(x), array)`.
   * **Scope** — Tier 3 helpers are supported when their result is consumed by a scalar follow-up (`First()`, `Count()`, `Contains(x)`, …) or another array-producing helper. Projecting a slice/reverse/sort result directly as a collection (`Select(e => e.Arr.Skip(1).ToArray())`) goes through EF Core's `QueryableMethodTranslatingExpressionVisitor` and is not yet supported; use a scalar-follow-up or `EF.Functions` indirection in the meantime.
 * **`Nullable(T)` element threading through composite types**: `Array(Nullable(T))`, `Tuple(Nullable(T), …)`, `Map(K, Nullable(V))`, and `Variant(Nullable(T), …)` properties now round-trip correctly when the CLR-side type carries `Nullable<T>` for value-type elements (e.g. `int?[]`, `(int?, string)`, `Dictionary<string, int?>`). EF Core's scalar-column convention is to strip `Nullable(...)` in `FindMapping` and carry nullability on `IProperty.IsNullable`; that has no equivalent annotation channel for composite elements, so previously the composite's CLR type was built from the unwrapped `T` element type and materialization failed (`Int32[]` → `Nullable<Int32>[]` coercion error). A new `ClickHouseNullableElementMapping` wrapper and `FindComponentMapping` resolver thread `Nullable<T>` through to the composite mapping's CLR type for value-type elements; reference types and bare `LowCardinality(T)` pass through unchanged. Element-access translations (`First`, `ElementAt`, …) declare `arrayElement` as nullable when the element store type is `Nullable(...)`, so outer `IS NULL` predicates aren't folded away.
-* **Schema-to-database migration mapping**: migration `schema` values are now treated as ClickHouse database names.
 
 ### Bug fixes
 * Preserve `LowCardinality(...)` and `Nullable(...)` wrappers from `HasColumnType(...)` in generated migration DDL. Previously the wrapper was stripped during type-mapping resolution, so the migration emitted the inner type. ([#18](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/18))
