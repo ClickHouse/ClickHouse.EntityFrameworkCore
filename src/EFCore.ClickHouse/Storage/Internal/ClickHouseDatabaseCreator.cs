@@ -1,7 +1,11 @@
 using System.Data.Common;
 using ClickHouse.Driver.ADO;
 using ClickHouse.Driver.ADO.Parameters;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Logging;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
 
@@ -10,21 +14,39 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
     private readonly IClickHouseRelationalConnection _connection;
     private readonly IRawSqlCommandBuilder _rawSqlCommandBuilder;
     private readonly ISqlGenerationHelper _sqlGenerationHelper;
+    private readonly ICurrentDbContext _currentDbContext;
+    private readonly ILogger<ClickHouseDatabaseCreator> _logger;
 
     public ClickHouseDatabaseCreator(
         RelationalDatabaseCreatorDependencies dependencies,
         IClickHouseRelationalConnection connection,
         IRawSqlCommandBuilder rawSqlCommandBuilder,
-        ISqlGenerationHelper sqlGenerationHelper)
+        ISqlGenerationHelper sqlGenerationHelper,
+        ICurrentDbContext currentDbContext,
+        ILogger<ClickHouseDatabaseCreator> logger)
         : base(dependencies)
     {
         _connection = connection;
         _rawSqlCommandBuilder = rawSqlCommandBuilder;
         _sqlGenerationHelper = sqlGenerationHelper;
+        _currentDbContext = currentDbContext;
+        _logger = logger;
     }
 
     private string GetDatabaseName()
-        => new ClickHouseConnectionStringBuilder(_connection.ConnectionString).Database;
+    {
+        var connectionString = _connection.ConnectionString;
+        var connectionStringBuilder = new DbConnectionStringBuilder
+        {
+            ConnectionString = connectionString
+        };
+        var hasExplicitDatabase = connectionStringBuilder.ContainsKey("Database");
+        var connectionDatabase = hasExplicitDatabase
+            ? new ClickHouseConnectionStringBuilder(connectionString).Database
+            : null;
+        var schema = _currentDbContext.Context.Model.GetDefaultSchema();
+        return ClickHouseDatabaseNameResolver.Resolve(connectionDatabase, schema, _logger);
+    }
 
     public override bool Exists()
     {
