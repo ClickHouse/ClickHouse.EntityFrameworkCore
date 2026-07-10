@@ -1,3 +1,4 @@
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -82,12 +83,13 @@ public class ClickHouseModificationCommandBatch : ModificationCommandBatch
 
         // Group commands by table name and write-column set for correct row alignment
         var groups = _commands.GroupBy(c => (
+            c.Schema, // Schemas are treated as Databases
             c.TableName,
             Columns: string.Join(",", c.ColumnModifications.Where(cm => cm.IsWrite).Select(cm => cm.ColumnName))));
 
         foreach (var group in groups)
         {
-            var tableName = group.Key.TableName;
+            var tableName = ClickHouseIdentifierHelper.BuildQualifiedTableName(group.Key.TableName, group.Key.Schema);
             var commands = group.ToList();
 
             var columns = commands[0].ColumnModifications

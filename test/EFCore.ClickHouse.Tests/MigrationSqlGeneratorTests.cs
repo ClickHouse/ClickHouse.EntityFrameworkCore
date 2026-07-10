@@ -231,12 +231,17 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
-    public void EnsureSchema_throws_NotSupportedException()
+    public void EnsureSchema_generates_idempotent_CREATE_DATABASE()
     {
-        Assert.Throws<NotSupportedException>(() =>
-        {
-            Generate(new EnsureSchemaOperation { Name = "dbo" });
-        });
+        var sql = Generate(new EnsureSchemaOperation { Name = "dbo" });
+        Assert.Contains("CREATE DATABASE IF NOT EXISTS `dbo`", sql);
+    }
+
+    [Fact]
+    public void EnsureSchema_empty_name_is_noop()
+    {
+        var sql = Generate(new EnsureSchemaOperation { Name = "" });
+        Assert.Equal(string.Empty, sql);
     }
 
     [Fact]
@@ -244,6 +249,31 @@ public class MigrationSqlGeneratorTests
     {
         var sql = Generate(new RenameTableOperation { Name = "old_table", NewName = "new_table" });
         Assert.Contains("RENAME TABLE `old_table` TO `new_table`", sql);
+    }
+
+    [Fact]
+    public void RenameTable_with_schema_qualifies_database_and_table()
+    {
+        var sql = Generate(new RenameTableOperation
+        {
+            Name = "old_table",
+            Schema = "db1",
+            NewName = "new_table",
+            NewSchema = "db2"
+        });
+        Assert.Contains("RENAME TABLE `db1`.`old_table` TO `db2`.`new_table`", sql);
+    }
+
+    [Fact]
+    public void RenameTable_without_new_schema_keeps_existing_schema()
+    {
+        var sql = Generate(new RenameTableOperation
+        {
+            Name = "old_table",
+            Schema = "db1",
+            NewName = "new_table"
+        });
+        Assert.Contains("RENAME TABLE `db1`.`old_table` TO `db1`.`new_table`", sql);
     }
 
     [Fact]
@@ -741,6 +771,17 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
+    public void AddColumn_with_schema_qualifies_database_and_table()
+    {
+        var op = new AddColumnOperation
+        {
+            Schema = "analytics", Table = "t", Name = "NewCol", ColumnType = "String", ClrType = typeof(string)
+        };
+        var sql = Generate(op);
+        Assert.Contains("ALTER TABLE `analytics`.`t` ADD COLUMN `NewCol` String", sql);
+    }
+
+    [Fact]
     public void AlterColumn_generates_MODIFY_COLUMN()
     {
         var op = new AlterColumnOperation
@@ -760,10 +801,10 @@ public class MigrationSqlGeneratorTests
     }
 
     [Fact]
-    public void CreateDatabase_generates_CREATE_DATABASE()
+    public void CreateDatabase_generates_idempotent_CREATE_DATABASE()
     {
         var sql = Generate(new ClickHouseCreateDatabaseOperation { Name = "my_db" });
-        Assert.Contains("CREATE DATABASE `my_db`", sql);
+        Assert.Contains("CREATE DATABASE IF NOT EXISTS `my_db`", sql);
     }
 
     [Fact]
@@ -912,12 +953,52 @@ public class MigrationSqlGeneratorTests
         => AssertColumnTypePreserved<LowCardinalityStringContext>("LowCardinality(String)");
 
     [Fact]
-    public void HasColumnType_LowCardinality_NullableString_preserved_in_CreateTable_DDL()
-        => AssertColumnTypePreserved<LowCardinalityNullableContext>("LowCardinality(Nullable(String))");
+    public void HasColumnType_LowCardinality_NullableString_uses_property_nullability()
+    {
+        using var ctx = new LowCardinalityNullableContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var pathColumn = createTable.Columns.Single(c => c.Name == "Path");
+        Assert.Equal("LowCardinality(String)", pathColumn.ColumnType);
+        Assert.True(pathColumn.IsNullable);
+
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+        var sql = string.Join("\n", generator.Generate(operations).Select(c => c.CommandText));
+        Assert.Contains("`Path` LowCardinality(String)", sql);
+        Assert.DoesNotContain("Nullable(LowCardinality", sql);
+        Assert.DoesNotContain("LowCardinality(Nullable", sql);
+    }
 
     [Fact]
-    public void HasColumnType_Nullable_String_preserved_in_CreateTable_DDL()
-        => AssertColumnTypePreserved<NullableStringContext>("Nullable(String)");
+    public void HasColumnType_Nullable_String_uses_nullable_migration_metadata()
+    {
+        using var ctx = new NullableStringContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var pathColumn = createTable.Columns.Single(c => c.Name == "Path");
+        Assert.Equal("String", pathColumn.ColumnType);
+        Assert.True(pathColumn.IsNullable);
+    }
+
+    [Fact]
+    public void HasColumnType_Nullable_Enum_uses_nullable_migration_metadata()
+    {
+        using var ctx = new NullableEnumContext();
+        var model = ctx.GetService<IDesignTimeModel>().Model.GetRelationalModel();
+        var differ = ctx.GetService<IMigrationsModelDiffer>();
+        var operations = differ.GetDifferences(source: null, target: model);
+
+        var createTable = Assert.Single(operations.OfType<CreateTableOperation>());
+        var languageColumn = createTable.Columns.Single(c => c.Name == "Language");
+        Assert.Equal("Enum8('a'=1,'b'=2)", languageColumn.ColumnType);
+        Assert.True(languageColumn.IsNullable);
+    }
 
     [Fact]
     public void HasColumnType_Array_LowCardinality_element_preserved_in_CreateTable_DDL()
@@ -1024,11 +1105,53 @@ public class MigrationSqlGeneratorTests
     private sealed class LowCardinalityNullableContext : LowCardinalityContextBase
     {
         protected override string ColumnType => "LowCardinality(Nullable(String))";
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullablePageView>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType(ColumnType);
+                e.ToTable("page_views", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
     }
 
     private sealed class NullableStringContext : LowCardinalityContextBase
     {
         protected override string ColumnType => "Nullable(String)";
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullablePageView>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Path).HasColumnType(ColumnType);
+                e.ToTable("page_views", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
+    }
+
+    private sealed class NullableEnumContext : DbContext
+    {
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Database=test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<NullableEnumEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Language).HasColumnType("Nullable(Enum8('a'=1,'b'=2))");
+                e.ToTable("languages", t => t.HasMergeTreeEngine().WithOrderBy("Id"));
+            });
+        }
+    }
+
+    private sealed class NullableEnumEntity
+    {
+        public int Id { get; set; }
+        public string? Language { get; set; }
     }
 
     private sealed class AggregateFunctionContext : LowCardinalityContextBase

@@ -302,8 +302,9 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
     // ParseStoreTypeName may normalize or partially unwrap the store type in order to resolve
     // the underlying CLR mapping. EF Core's Property.GetColumnType() prefers
-    // RelationalTypeMapping.StoreType over the user's annotation, so preserve the explicit
-    // HasColumnType(...) text verbatim on the resolved mapping.
+    // RelationalTypeMapping.StoreType over the user's annotation, so preserve explicit
+    // HasColumnType(...) text on the resolved mapping except for scalar Nullable(...),
+    // whose nullability belongs in the migration operation's IsNullable property.
     private static RelationalTypeMapping PreserveExplicitStoreType(
         RelationalTypeMapping mapping,
         in RelationalTypeMappingInfo mappingInfo)
@@ -315,12 +316,45 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             return mapping;
         }
 
+        // Nullable is represented by EF Core's property nullability for scalar columns.
+        // Do not retain a store-type Nullable(...) wrapper, otherwise migrations emit
+        // Nullable(T) in `type:` instead of T with `nullable: true`.
+        var normalizedStoreTypeName = NormalizeNullableStoreType(storeTypeName);
+        if (!string.Equals(normalizedStoreTypeName, storeTypeName, StringComparison.Ordinal))
+        {
+            var normalizedInfo = new RelationalTypeMappingInfo(
+                storeTypeName: normalizedStoreTypeName,
+                storeTypeNameBase: mappingInfo.StoreTypeNameBase ?? normalizedStoreTypeName,
+                unicode: null,
+                size: mappingInfo.Size,
+                precision: mappingInfo.Precision,
+                scale: mappingInfo.Scale);
+            RelationalTypeMappingInfo? normalizedCloneInfo = normalizedInfo;
+            return mapping.Clone(in normalizedCloneInfo, storeTypePostfix: StoreTypePostfix.None);
+        }
+
+        if (string.Equals(storeTypeName, mapping.StoreType, StringComparison.Ordinal))
+            return mapping;
+
         // Force StoreTypePostfix.None so the constructor does not rebuild the type name
         // from the inner facets (e.g. Decimal's PrecisionAndScale postfix would produce
         // "LowCardinality(Decimal32(4))(9,4)" otherwise). The local exists because
         // Clone's overload signature takes `in RelationalTypeMappingInfo?`.
         RelationalTypeMappingInfo? cloneInfo = mappingInfo;
         return mapping.Clone(in cloneInfo, storeTypePostfix: StoreTypePostfix.None);
+    }
+
+    private static string NormalizeNullableStoreType(string storeType)
+    {
+        var trimmedStoreType = storeType.Trim();
+        if (TryUnwrapPrefix(trimmedStoreType, "Nullable", out var nullableInner))
+            return nullableInner;
+
+        if (TryUnwrapPrefix(trimmedStoreType, "LowCardinality", out var inner)
+            && TryUnwrapPrefix(inner, "Nullable", out nullableInner))
+            return $"LowCardinality({nullableInner})";
+
+        return storeType;
     }
 
     private static bool IsCollectionClrType(Type? clrType)
