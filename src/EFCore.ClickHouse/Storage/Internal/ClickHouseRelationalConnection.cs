@@ -45,10 +45,12 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     protected override bool SupportsAmbientTransactions => false;
 
     /// <summary>
-    /// Ensures <c>join_use_nulls=1</c> is present in the underlying connection's connection
-    /// string before it's opened. Required because ClickHouse's default (0) makes LEFT JOIN
-    /// return column defaults rather than NULL, which breaks EF Core's null-based navigation
-    /// detection.
+    /// Ensures <c>join_use_nulls=1</c> is applied to the underlying connection before it is
+    /// opened. Required because ClickHouse's default (0) makes LEFT JOIN return column defaults
+    /// rather than NULL, which breaks EF Core's null-based navigation detection. For a
+    /// <see cref="ClickHouseConnection"/> the setting is recorded on its
+    /// <see cref="ClickHouseConnection.Settings"/>; the connection-string fallback is used only
+    /// for a non-ClickHouse <see cref="DbConnection"/>.
     ///
     /// The ClickHouse.Driver HTTP protocol is stateless by default (<c>UseSession=False</c>):
     /// a standalone <c>SET join_use_nulls = 1</c> statement does not persist to subsequent
@@ -131,7 +133,8 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         }
         else
         {
-            var masterConnectionString = new ClickHouseConnectionStringBuilder(ConnectionString)
+            var masterConnectionString = new ClickHouseConnectionStringBuilder(
+                _dataSource?.ConnectionString ?? ConnectionString)
             {
                 Database = "default"
             }.ConnectionString;
