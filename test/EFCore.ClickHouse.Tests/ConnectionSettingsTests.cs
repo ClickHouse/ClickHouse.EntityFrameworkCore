@@ -1,5 +1,7 @@
 using ClickHouse.Driver.ADO;
+using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
@@ -94,6 +96,121 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
         await using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
 
         Assert.False(await GetJoinUseNullsAsync(ctx));
+    }
+
+    [Fact]
+    public async Task UseClickHouse_DbConnection_PreservesCodeOnlySettings()
+    {
+        // Settings that only exist in code (no connection-string equivalent) must survive the
+        // join_use_nulls injection performed on Open. Previously
+        // the provider rewrote ConnectionString, which rebuilt the driver's settings from the
+        // string alone and silently dropped SkipServerCertificateValidation.
+        var settings = new ClickHouseClientSettings(_fixture.ConnectionString)
+        {
+            SkipServerCertificateValidation = true
+        };
+
+        await using var connection = new ClickHouseConnection(settings);
+        await using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
+
+        Assert.True(await GetJoinUseNullsAsync(ctx));
+        Assert.True(connection.Settings.SkipServerCertificateValidation);
+    }
+
+    [Fact]
+    public async Task UseClickHouse_DbDataSource_PreservesCodeOnlySettings()
+    {
+        var settings = new ClickHouseClientSettings(_fixture.ConnectionString)
+        {
+            SkipServerCertificateValidation = true
+        };
+
+        await using var dataSource = new ClickHouseDataSource(settings);
+        await using var ctx = new MinimalContext(o => o.UseClickHouse(dataSource));
+
+        Assert.True(await GetJoinUseNullsAsync(ctx));
+
+        var connection = (ClickHouseConnection)ctx.Database.GetDbConnection();
+        Assert.True(connection.Settings.SkipServerCertificateValidation);
+    }
+
+    [Fact]
+    public void CreateMasterConnection_DbDataSource_PreservesCodeOnlySettings()
+    {
+        // The master connection (used for CREATE/DROP DATABASE) must not lose code-only settings
+        // by round-tripping through a connection string. Exercises several settings that have no
+        // connection-string representation, not just SkipServerCertificateValidation.
+        var settings = new ClickHouseClientSettings(_fixture.ConnectionString)
+        {
+            SkipServerCertificateValidation = true,
+            BearerToken = "token-abc",
+            CustomHeaders = new Dictionary<string, string> { ["X-Custom"] = "value" }
+        };
+
+        using var dataSource = new ClickHouseDataSource(settings);
+        using var ctx = new MinimalContext(o => o.UseClickHouse(dataSource));
+
+        var master = ctx.Database.GetService<IClickHouseRelationalConnection>().CreateMasterConnection();
+        try
+        {
+            var masterConnection = (ClickHouseConnection)master.DbConnection;
+            Assert.Equal("default", masterConnection.Settings.Database);
+            Assert.True(masterConnection.Settings.SkipServerCertificateValidation);
+            Assert.Equal("token-abc", masterConnection.Settings.BearerToken);
+            Assert.Equal("value", masterConnection.Settings.CustomHeaders["X-Custom"]);
+        }
+        finally
+        {
+            master.Dispose();
+        }
+    }
+
+    [Fact]
+    public void CreateMasterConnection_PreservesUserJoinUseNullsOptOut()
+    {
+        // If the user opted out via set_join_use_nulls=0, the master connection must carry that
+        // through so the injection on Open sees it and does not override the choice.
+        var optOutConnectionString = _fixture.ConnectionString
+            + (_fixture.ConnectionString.EndsWith(';') ? "" : ";")
+            + "set_join_use_nulls=0";
+
+        using var connection = new ClickHouseConnection(optOutConnectionString);
+        using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
+
+        var master = ctx.Database.GetService<IClickHouseRelationalConnection>().CreateMasterConnection();
+        try
+        {
+            var masterConnection = (ClickHouseConnection)master.DbConnection;
+            Assert.Equal("0", masterConnection.Settings.CustomSettings["join_use_nulls"].ToString());
+        }
+        finally
+        {
+            master.Dispose();
+        }
+    }
+
+    [Fact]
+    public void CreateMasterConnection_DbConnection_PreservesCodeOnlySettings()
+    {
+        var settings = new ClickHouseClientSettings(_fixture.ConnectionString)
+        {
+            SkipServerCertificateValidation = true
+        };
+
+        using var connection = new ClickHouseConnection(settings);
+        using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
+
+        var master = ctx.Database.GetService<IClickHouseRelationalConnection>().CreateMasterConnection();
+        try
+        {
+            var masterConnection = (ClickHouseConnection)master.DbConnection;
+            Assert.Equal("default", masterConnection.Settings.Database);
+            Assert.True(masterConnection.Settings.SkipServerCertificateValidation);
+        }
+        finally
+        {
+            master.Dispose();
+        }
     }
 
     private static async Task<bool> GetJoinUseNullsAsync(DbContext ctx)
