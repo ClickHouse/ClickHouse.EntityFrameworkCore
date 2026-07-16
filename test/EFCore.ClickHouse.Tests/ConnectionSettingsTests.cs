@@ -259,6 +259,26 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
         }
     }
 
+    [Fact]
+    public void CreateMasterConnection_NonClickHouseDataSource_UsesDataSourceConnectionString()
+    {
+        // A non-ClickHouse DbDataSource does not set a connection string on the EF options, so the
+        // fallback must read it from the data source itself rather than the (empty) options value.
+        using var dataSource = new FakeDbDataSource("Host=localhost;Port=8123;Database=app");
+        using var ctx = new MinimalContext(o => o.UseClickHouse(dataSource));
+
+        var master = ctx.Database.GetService<IClickHouseRelationalConnection>().CreateMasterConnection();
+        try
+        {
+            var masterConnection = (ClickHouseConnection)master.DbConnection;
+            Assert.Equal("default", masterConnection.Settings.Database);
+        }
+        finally
+        {
+            master.Dispose();
+        }
+    }
+
     private static async Task<bool> GetJoinUseNullsAsync(DbContext ctx)
     {
         var connection = ctx.Database.GetDbConnection();
@@ -314,6 +334,22 @@ internal sealed class FakeDbConnection : System.Data.Common.DbConnection
 
     protected override System.Data.Common.DbCommand CreateDbCommand()
         => throw new NotSupportedException();
+}
+
+/// <summary>
+/// Minimal non-ClickHouse <see cref="System.Data.Common.DbDataSource"/> used to verify that
+/// <c>CreateMasterConnection</c> falls back to the data source's own connection string.
+/// </summary>
+internal sealed class FakeDbDataSource : System.Data.Common.DbDataSource
+{
+    private readonly string _connectionString;
+
+    public FakeDbDataSource(string connectionString) => _connectionString = connectionString;
+
+    public override string ConnectionString => _connectionString;
+
+    protected override System.Data.Common.DbConnection CreateDbConnection()
+        => new FakeDbConnection(_connectionString);
 }
 
 public class ConnectionSettingsFixture : IAsyncLifetime
