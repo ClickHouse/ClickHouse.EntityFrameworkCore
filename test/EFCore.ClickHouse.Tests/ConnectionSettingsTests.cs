@@ -213,6 +213,52 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
         }
     }
 
+    [Fact]
+    public void EnsureJoinUseNulls_NonClickHouseConnection_FallsBackToConnectionString()
+    {
+        // Defensive fallback: for a DbConnection that is not a ClickHouseConnection we cannot
+        // mutate driver settings, so join_use_nulls is injected by rewriting the connection string.
+        using var connection = new FakeDbConnection("Host=localhost;Port=8123");
+        using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
+
+        ctx.Database.OpenConnection();
+
+        Assert.Contains("set_join_use_nulls=1", connection.ConnectionString, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void EnsureJoinUseNulls_NonClickHouseConnection_LeavesExistingSettingUntouched()
+    {
+        // If the connection string already configures join_use_nulls, the fallback must not append.
+        const string configured = "Host=localhost;Port=8123;set_join_use_nulls=0";
+        using var connection = new FakeDbConnection(configured);
+        using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
+
+        ctx.Database.OpenConnection();
+
+        Assert.Equal(configured, connection.ConnectionString);
+    }
+
+    [Fact]
+    public void CreateMasterConnection_NonClickHouseConnection_FallsBackToConnectionString()
+    {
+        // When neither a ClickHouseDataSource nor a ClickHouseConnection is available, the master
+        // connection is built from the connection string.
+        using var connection = new FakeDbConnection("Host=localhost;Port=8123;Database=app");
+        using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
+
+        var master = ctx.Database.GetService<IClickHouseRelationalConnection>().CreateMasterConnection();
+        try
+        {
+            var masterConnection = (ClickHouseConnection)master.DbConnection;
+            Assert.Equal("default", masterConnection.Settings.Database);
+        }
+        finally
+        {
+            master.Dispose();
+        }
+    }
+
     private static async Task<bool> GetJoinUseNullsAsync(DbContext ctx)
     {
         var connection = ctx.Database.GetDbConnection();
@@ -233,6 +279,41 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
                 await ctx.Database.CloseConnectionAsync();
         }
     }
+}
+
+/// <summary>
+/// Minimal non-ClickHouse <see cref="System.Data.Common.DbConnection"/> used to exercise the
+/// provider's defensive fallback paths that only run when the underlying connection is not a
+/// <see cref="ClickHouseConnection"/>.
+/// </summary>
+internal sealed class FakeDbConnection : System.Data.Common.DbConnection
+{
+    private System.Data.ConnectionState _state = System.Data.ConnectionState.Closed;
+
+    public FakeDbConnection(string connectionString) => ConnectionString = connectionString;
+
+    [System.Diagnostics.CodeAnalysis.AllowNull]
+    public override string ConnectionString { get; set; }
+
+    public override string Database => "app";
+
+    public override string DataSource => "fake";
+
+    public override string ServerVersion => "0.0";
+
+    public override System.Data.ConnectionState State => _state;
+
+    public override void Open() => _state = System.Data.ConnectionState.Open;
+
+    public override void Close() => _state = System.Data.ConnectionState.Closed;
+
+    public override void ChangeDatabase(string databaseName) { }
+
+    protected override System.Data.Common.DbTransaction BeginDbTransaction(System.Data.IsolationLevel isolationLevel)
+        => throw new NotSupportedException();
+
+    protected override System.Data.Common.DbCommand CreateDbCommand()
+        => throw new NotSupportedException();
 }
 
 public class ConnectionSettingsFixture : IAsyncLifetime
