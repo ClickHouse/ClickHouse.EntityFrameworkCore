@@ -25,6 +25,9 @@ v0.3.0
 * Preserve `LowCardinality(...)` and `Nullable(...)` wrappers from `HasColumnType(...)` in generated migration DDL. Previously the wrapper was stripped during type-mapping resolution, so the migration emitted the inner type. ([#18](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/18))
 * Preserve explicit `HasColumnType(...)` text whenever the resolved mapping's canonical store type differs from the user's input — fixes `Enum8(...)` and `AggregateFunction(...)` columns silently emitting `String` in generated DDL. Also covers `Enum16`, `SimpleAggregateFunction`, `Nested`, and the parameter-bearing forms (`Decimal128(S)`, `Json(...)` with type hints, etc.). ([#24](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/24))
 
+### Bug fixes
+* **SummingMergeTree with multiple sum columns**: `HasSummingMergeTreeEngine("A", "B")` now generates valid DDL (`SummingMergeTree((A, B))`). Previously it emitted a comma-separated argument list (`SummingMergeTree(A, B)`), which ClickHouse rejects with `NUMBER_OF_ARGUMENTS_DOESNT_MATCH`. Single-column and no-column usage are unaffected.
+
 v0.2.0
 ---
 ### Table engine and DDL

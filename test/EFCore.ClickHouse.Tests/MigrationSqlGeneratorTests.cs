@@ -587,7 +587,25 @@ public class MigrationSqlGeneratorTests
             op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
         });
 
-        Assert.Contains("ENGINE = SummingMergeTree(`Amount`, `Count`)", sql);
+        // Multiple sum columns must be wrapped in a tuple. `SummingMergeTree(`Amount`, `Count`)`
+        // is invalid DDL — ClickHouse rejects it with NUMBER_OF_ARGUMENTS_DOESNT_MATCH.
+        Assert.Contains("ENGINE = SummingMergeTree((`Amount`, `Count`))", sql);
+    }
+
+    [Fact]
+    public void SummingMergeTree_single_column()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.SummingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.SummingMergeTreeColumns, new[] { "Amount" });
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        // A single sum column is passed directly, without tuple wrapping.
+        Assert.Contains("ENGINE = SummingMergeTree(`Amount`)", sql);
+        Assert.DoesNotContain("SummingMergeTree((", sql);
     }
 
     [Fact]

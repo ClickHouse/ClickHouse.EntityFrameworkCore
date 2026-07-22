@@ -538,7 +538,15 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             case ClickHouseAnnotationNames.SummingMergeTree:
                 var columns = (string[]?)operation.FindAnnotation(ClickHouseAnnotationNames.SummingMergeTreeColumns)?.Value;
                 if (columns is { Length: > 0 })
-                    builder.Append(string.Join(", ", columns.Select(QuoteColumnOrExpression)));
+                {
+                    var quotedColumns = columns.Select(QuoteColumnOrExpression);
+                    // SummingMergeTree accepts a single optional parameter: the column to sum, or a
+                    // tuple of columns. Multiple columns must be wrapped in a tuple — emitting them as
+                    // a comma-separated argument list produces invalid DDL (NUMBER_OF_ARGUMENTS_DOESNT_MATCH).
+                    builder.Append(columns.Length == 1
+                        ? quotedColumns.First()
+                        : $"({string.Join(", ", quotedColumns)})");
+                }
                 break;
 
             case ClickHouseAnnotationNames.CollapsingMergeTree:

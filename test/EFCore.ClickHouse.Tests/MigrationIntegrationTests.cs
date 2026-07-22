@@ -659,6 +659,133 @@ public class MigrationIntegrationTests : IAsyncLifetime
         Assert.NotEqual("1970-01-01 00:00:00", createdAt); // not epoch — got now()
     }
 
+    // ── Engine-argument round-trips (execute CREATE TABLE against real server) ──
+    // These guard against generating engine DDL that our string-based unit tests accept
+    // but ClickHouse rejects. EnsureCreatedAsync throws if the CREATE TABLE is invalid,
+    // so reaching the assertions proves the generated DDL actually ran on the server.
+
+    [Fact]
+    public async Task SummingMergeTree_single_column_creates_valid_table()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<SummingEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("smt_single_test", t => t
+                    .HasSummingMergeTreeEngine("Amount")
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var engine = await QueryScalar(ctx,
+            $"SELECT engine FROM system.tables WHERE database = '{_databaseName}' AND name = 'smt_single_test'");
+        Assert.Equal("SummingMergeTree", engine);
+
+        // ClickHouse normalizes the stored engine expression without backticks.
+        var createSql = await QueryScalar(ctx,
+            $"SELECT create_table_query FROM system.tables WHERE database = '{_databaseName}' AND name = 'smt_single_test'");
+        Assert.Contains("SummingMergeTree(Amount)", createSql!);
+    }
+
+    [Fact]
+    public async Task SummingMergeTree_multiple_columns_creates_valid_table()
+    {
+        // Regression: multiple sum columns must be emitted as a tuple, e.g.
+        // SummingMergeTree((`Amount`, `Count`)). The comma-separated form
+        // SummingMergeTree(`Amount`, `Count`) fails with NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
+        // so EnsureCreatedAsync would throw before reaching the assertions below.
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<SummingEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("smt_multi_test", t => t
+                    .HasSummingMergeTreeEngine("Amount", "Count")
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var engine = await QueryScalar(ctx,
+            $"SELECT engine FROM system.tables WHERE database = '{_databaseName}' AND name = 'smt_multi_test'");
+        Assert.Equal("SummingMergeTree", engine);
+
+        // The stored DDL must carry the sum columns as a tuple (ClickHouse normalizes
+        // away the backticks). The comma-separated form never reaches this point.
+        var createSql = await QueryScalar(ctx,
+            $"SELECT create_table_query FROM system.tables WHERE database = '{_databaseName}' AND name = 'smt_multi_test'");
+        Assert.Contains("SummingMergeTree((Amount, Count))", createSql!);
+    }
+
+    [Fact]
+    public async Task CollapsingMergeTree_creates_valid_table()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<CollapsingEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Sign).HasColumnType("Int8");
+                e.ToTable("cmt_test", t => t
+                    .HasCollapsingMergeTreeEngine("Sign")
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var engine = await QueryScalar(ctx,
+            $"SELECT engine FROM system.tables WHERE database = '{_databaseName}' AND name = 'cmt_test'");
+        Assert.Equal("CollapsingMergeTree", engine);
+    }
+
+    [Fact]
+    public async Task VersionedCollapsingMergeTree_creates_valid_table()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<CollapsingEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Sign).HasColumnType("Int8");
+                e.ToTable("vcmt_test", t => t
+                    .HasVersionedCollapsingMergeTreeEngine("Sign", "Version")
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var engine = await QueryScalar(ctx,
+            $"SELECT engine FROM system.tables WHERE database = '{_databaseName}' AND name = 'vcmt_test'");
+        Assert.Equal("VersionedCollapsingMergeTree", engine);
+    }
+
+    [Fact]
+    public async Task AggregatingMergeTree_creates_valid_table()
+    {
+        await using var ctx = CreateContext(b =>
+        {
+            b.Entity<SummingEntity>(e =>
+            {
+                e.HasKey(x => x.Id);
+                e.ToTable("amt_test", t => t
+                    .HasAggregatingMergeTreeEngine()
+                    .WithOrderBy("Id"));
+            });
+        });
+        await ctx.Database.EnsureDeletedAsync();
+        await ctx.Database.EnsureCreatedAsync();
+
+        var engine = await QueryScalar(ctx,
+            $"SELECT engine FROM system.tables WHERE database = '{_databaseName}' AND name = 'amt_test'");
+        Assert.Equal("AggregatingMergeTree", engine);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private TestContext CreateContext(Action<ModelBuilder> configure)
@@ -765,5 +892,19 @@ public class MigrationIntegrationTests : IAsyncLifetime
         public long Id { get; set; }
         public string Name { get; set; } = string.Empty;
         public DateTime CreatedAt { get; set; }
+    }
+
+    public class SummingEntity
+    {
+        public long Id { get; set; }
+        public long Amount { get; set; }
+        public long Count { get; set; }
+    }
+
+    public class CollapsingEntity
+    {
+        public long Id { get; set; }
+        public sbyte Sign { get; set; }
+        public ulong Version { get; set; }
     }
 }
