@@ -2,6 +2,7 @@ v0.3.1 (Unreleased)
 ---
 ### Bug fixes
 * Summing a `double` or `float` column (`.SumAsync(x => x.Value)`) no longer throws `InvalidCastException`. Two ClickHouse-specific mismatches were biting: EF Core hands the float literal generator a boxed `Int32` `0` as the empty-result fallback, and ClickHouse widens `sum(Float32)` to `Float64` so the driver couldn't read it back as a `float`. Both the literal generation and the `Float32` read path now convert instead of hard-casting. ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46)) (Thanks to @HotTotem!)
+* **SummingMergeTree with multiple sum columns** now produces valid DDL. Configuring more than one sum column (`HasSummingMergeTreeEngine("A", "B")`) previously emitted `SummingMergeTree(A, B)`, which ClickHouse rejects with `NUMBER_OF_ARGUMENTS_DOESNT_MATCH` — the engine takes a single optional parameter that must be a tuple of columns. Multiple columns are now wrapped in a tuple (`SummingMergeTree((A, B))`); single-column and no-column usage are unchanged.
 
 v0.3.0
 ---
