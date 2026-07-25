@@ -88,6 +88,8 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 `Where`, `OrderBy`, `Take`, `Skip`, `Select`, `First`, `Single`, `Any`, `Count`, `Distinct`, `AsNoTracking`
 
+A `Contains` filter over a captured collection (`Where(x => ids.Contains(x.Id))`) is sent as a single native `Array(T)` parameter — `has({ids:Array(Int64)}, …)` — rather than one parameter per element, so large `IN`-style filters don't hit the parameter-count ceiling. Use `EF.Constant(ids)` to inline the values or `EF.MultipleParameters(ids)` to force one parameter per element for a specific query.
+
 ### GROUP BY & Aggregates
 
 `GroupBy` with `Count`, `LongCount`, `Sum`, `Average`, `Min`, `Max` — including `HAVING` (`.Where()` after `.GroupBy()`), multiple aggregates in a single projection, and `OrderBy` on aggregate results.
