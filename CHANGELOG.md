@@ -1,5 +1,8 @@
 v0.3.1 (Unreleased)
 ---
+### Query translation
+* **`toStartOf*` date-time functions** via `EF.Functions`: `ToStartOfYear`, `ToStartOfQuarter`, `ToStartOfMonth`, `ToStartOfWeek` (with optional week `mode`), `ToStartOfDay`, `ToStartOfHour`, `ToStartOfMinute`, `ToStartOfSecond`, the fixed buckets `ToStartOfFiveMinutes` / `ToStartOfTenMinutes` / `ToStartOfFifteenMinutes`, and the general `ToStartOfInterval(source, value, unit)`. Each maps to the matching ClickHouse function and works over `DateTime`, `DateOnly`, and `DateTime64`-mapped columns, including in `GROUP BY`. `ToStartOfInterval` takes a `ClickHouseInterval` unit (`Second`…`Year`) and emits `toStartOfInterval(source, toInterval<unit>(value))`; the unit must be a constant so it can be translated.
+
 ### Bug fixes
 * `Sum`/`SumAsync` over a `double` or `float` column no longer throws `InvalidCastException`. EF Core wraps a top-level aggregate so the empty case returns `0`, supplying that fallback as a boxed `Int32` carrying the `Float64`/`Float32` mapping; the literal generators now convert rather than unbox. The `Float32` read path also converts, since ClickHouse widens `sum(Float32)` to `Float64` (which the driver's `GetFloat()` refuses to downcast). ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46))
 * **SummingMergeTree with multiple sum columns**: `HasSummingMergeTreeEngine("A", "B")` now generates valid DDL (`SummingMergeTree((A, B))`). Previously it emitted a comma-separated argument list (`SummingMergeTree(A, B)`), which ClickHouse rejects with `NUMBER_OF_ARGUMENTS_DOESNT_MATCH`. Single-column and no-column usage are unaffected.

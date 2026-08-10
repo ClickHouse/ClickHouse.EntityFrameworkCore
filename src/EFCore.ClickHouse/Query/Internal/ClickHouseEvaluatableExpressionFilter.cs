@@ -19,6 +19,8 @@ public class ClickHouseEvaluatableExpressionFilter : RelationalEvaluatableExpres
     {
         MethodCallExpression methodCallExpression when methodCallExpression.Method.DeclaringType ==
                                                        typeof(ClickHouseJsonDbFunctionsExtensions) => false,
+        MethodCallExpression methodCallExpression when methodCallExpression.Method.DeclaringType ==
+                                                       typeof(ClickHouseDateTimeDbFunctionsExtensions) => false,
         NewExpression newExpression => !newExpression.Type.IsAssignableTo(typeof(ITuple)),
         _ => base.IsEvaluatableExpression(expression, model)
     };

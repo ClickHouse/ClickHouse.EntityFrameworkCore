@@ -100,6 +100,29 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 `Math.Abs`, `Floor`, `Ceiling`, `Round`, `Truncate`, `Pow`, `Sqrt`, `Cbrt`, `Exp`, `Log`, `Log2`, `Log10`, `Sign`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Atan2`, `RadiansToDegrees`, `DegreesToRadians`, `IsNaN`, `IsInfinity`, `IsFinite`, `IsPositiveInfinity`, `IsNegativeInfinity` — with both `Math` and `MathF` overloads.
 
+### Date/Time Functions
+
+The ClickHouse `toStartOf*` family is exposed through `EF.Functions`, so you can bucket and truncate timestamps directly in queries. Supported over `DateTime`, `DateOnly`, and `DateTime64`-mapped columns:
+
+`ToStartOfYear`, `ToStartOfQuarter`, `ToStartOfMonth`, `ToStartOfWeek` (with an optional ClickHouse week `mode`), `ToStartOfDay`, `ToStartOfHour`, `ToStartOfMinute`, `ToStartOfSecond`, `ToStartOfFiveMinutes`, `ToStartOfTenMinutes`, `ToStartOfFifteenMinutes`, and the general `ToStartOfInterval(source, value, unit)`.
+
+```csharp
+// Truncate to the start of the month
+var monthly = await ctx.Events
+    .Select(e => EF.Functions.ToStartOfMonth(e.Timestamp))
+    .ToListAsync();
+
+// Bucket into 15-minute intervals and count per bucket
+var buckets = await ctx.Events
+    .GroupBy(e => EF.Functions.ToStartOfInterval(e.Timestamp, 15, ClickHouseInterval.Minute))
+    .Select(g => new { Bucket = g.Key, Count = g.Count() })
+    .ToListAsync();
+```
+
+`ToStartOfInterval` takes a `ClickHouseInterval` unit (`Second`, `Minute`, `Hour`, `Day`, `Week`, `Month`, `Quarter`, `Year`) — from the `ClickHouse.EntityFrameworkCore.Metadata` namespace — and emits `toStartOfInterval(source, toInterval<unit>(value))`. The unit must be a constant.
+
+`ToStartOfWeek` defaults to ClickHouse week mode `0` (Sunday-based); pass a `mode` to change it. `ToStartOfSecond` requires a `DateTime64`-mapped column.
+
 ### INSERT via SaveChanges
 
 `SaveChanges` supports INSERT operations using the driver's native `InsertBinaryAsync` API — RowBinary encoding with GZip compression, far more efficient than parameterized SQL.
