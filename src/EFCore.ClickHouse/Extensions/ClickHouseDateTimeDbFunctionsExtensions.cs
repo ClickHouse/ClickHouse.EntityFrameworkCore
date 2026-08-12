@@ -139,7 +139,11 @@ public static class ClickHouseDateTimeDbFunctionsExtensions
     /// <c>toStartOfInterval(source, toInterval&lt;unit&gt;(value))</c>.
     /// </summary>
     /// <param name="_">The <see cref="DbFunctions"/> instance.</param>
-    /// <param name="source">The date or date-time value to truncate.</param>
+    /// <param name="source">
+    /// The value to truncate. Prefer a date-time source: older ClickHouse rejects a date-only
+    /// (<c>Date</c>/<c>Date32</c>) source for <c>toStartOfInterval</c> with
+    /// <c>Illegal type Date32 of 1st argument</c> while recent versions accept it.
+    /// </param>
     /// <param name="value">The number of interval units in each bucket.</param>
     /// <param name="unit">The interval unit. Must be a constant so it can be translated to SQL.</param>
     [DbFunction("toStartOfInterval")]
