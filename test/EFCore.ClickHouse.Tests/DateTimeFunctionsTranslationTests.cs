@@ -297,3 +297,43 @@ public class DateTimeFunctionsTranslationTest : IClassFixture<DateTimeFixture>
             () => EF.Functions.ToStartOfInterval(t, 15, ClickHouseInterval.Minute));
     }
 }
+
+/// <summary>
+/// Translation-only tests that need no ClickHouse container (they call <c>ToQueryString()</c>, which
+/// compiles the query without connecting).
+/// </summary>
+public class DateTimeFunctionsTranslationOfflineTest
+{
+    private sealed class OfflineContext : DbContext
+    {
+        public DbSet<DateTimeEntity> Events => Set<DateTimeEntity>();
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+            => optionsBuilder.UseClickHouse("Host=localhost;Protocol=http;Port=8123;Database=test");
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+            => modelBuilder.Entity<DateTimeEntity>(entity =>
+            {
+                entity.ToTable("datetime_functions_test");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.Timestamp).HasColumnName("ts");
+            });
+    }
+
+    [Fact]
+    public void ToStartOf_with_constant_argument_is_evaluated_server_side()
+    {
+        using var context = new OfflineContext();
+
+        // A constant/captured argument makes the whole call a client-evaluation candidate; the
+        // evaluatable-expression filter forces it to be translated server-side instead.
+        var when = new DateTime(2026, 8, 10, 13, 47, 0);
+
+        var sql = context.Events
+            .Select(e => new { e.Id, Bucket = EF.Functions.ToStartOfMonth(when) })
+            .ToQueryString();
+
+        Assert.Contains("toStartOfMonth", sql);
+    }
+}
