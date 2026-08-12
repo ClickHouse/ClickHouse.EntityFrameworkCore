@@ -102,7 +102,7 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 ### Date/Time Functions
 
-The ClickHouse `toStartOf*` family is exposed through `EF.Functions`, so you can bucket and truncate timestamps directly in queries. Supported over `DateTime`, `DateOnly`, and `DateTime64`-mapped columns:
+The ClickHouse `toStartOf*` family is exposed through `EF.Functions`, so you can bucket and truncate timestamps directly in queries, including in `GROUP BY`:
 
 `ToStartOfYear`, `ToStartOfQuarter`, `ToStartOfMonth`, `ToStartOfWeek` (with an optional ClickHouse week `mode`), `ToStartOfDay`, `ToStartOfHour`, `ToStartOfMinute`, `ToStartOfSecond`, `ToStartOfFiveMinutes`, `ToStartOfTenMinutes`, `ToStartOfFifteenMinutes`, and the general `ToStartOfInterval(source, value, unit)`.
 
@@ -121,7 +121,9 @@ var buckets = await ctx.Events
 
 `ToStartOfInterval` takes a `ClickHouseInterval` unit (`Second`, `Minute`, `Hour`, `Day`, `Week`, `Month`, `Quarter`, `Year`) — from the `ClickHouse.EntityFrameworkCore.Metadata` namespace — and emits `toStartOfInterval(source, toInterval<unit>(value))`. The unit must be a constant.
 
-`ToStartOfWeek` defaults to ClickHouse week mode `0` (Sunday-based); pass a `mode` to change it. `ToStartOfSecond` requires a `DateTime64`-mapped column.
+Input and return types follow ClickHouse. The calendar buckets (`ToStartOfYear`/`Quarter`/`Month`/`Week`) return `Date`; `ToStartOfDay` and the hour/minute buckets return `DateTime`; `ToStartOfSecond` returns `DateTime64`. They all accept `DateTime` and `DateTime64` columns, and the plain truncation functions also accept `DateOnly` (Date/Date32). `ToStartOfInterval` is the exception: older ClickHouse rejects `DateOnly` input (`Illegal type Date32`), so use a `DateTime`/`DateTime64` column for interval bucketing.
+
+`ToStartOfWeek` defaults to ClickHouse week mode `0` (Sunday-based); pass a `mode` to change it.
 
 ### INSERT via SaveChanges
 
