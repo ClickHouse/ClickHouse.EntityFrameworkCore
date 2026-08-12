@@ -123,6 +123,8 @@ var buckets = await ctx.Events
 
 Input and return types follow ClickHouse. The calendar buckets (`ToStartOfYear`/`Quarter`/`Month`/`Week`) return `Date`; `ToStartOfDay` and the hour/minute buckets return `DateTime`; `ToStartOfSecond` returns `DateTime64`. They all accept `DateTime` and `DateTime64` columns, and the plain truncation functions also accept `DateOnly` (Date/Date32). `ToStartOfInterval` is the exception: older ClickHouse rejects `DateOnly` input (`Illegal type Date32`), so use a `DateTime`/`DateTime64` column for interval bucketing.
 
+> **Date range:** those default result types (`Date`, `DateTime`) only span 1970–2149/2106, so ClickHouse **narrows values outside that window** — a pre-1970 date is clamped to the epoch (calendar buckets) or wraps around (sub-day/interval buckets). To preserve the full range, enable [`enable_extended_results_for_datetime_functions`](https://clickhouse.com/docs/operations/settings/settings#enable_extended_results_for_datetime_functions) for your session — e.g. add `set_enable_extended_results_for_datetime_functions=1` to the connection string — which makes ClickHouse return `Date32`/`DateTime64` instead.
+
 `ToStartOfWeek` defaults to ClickHouse week mode `0` (Sunday-based); pass a `mode` to change it.
 
 ### INSERT via SaveChanges

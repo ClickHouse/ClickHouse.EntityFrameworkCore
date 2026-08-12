@@ -75,9 +75,13 @@ public class DateTimeFixture : IAsyncLifetime
         await createCmd.ExecuteNonQueryAsync();
 
         using var insertCmd = connection.CreateCommand();
+        // Row 1 is inside the legacy Date/DateTime window (1970-2106). Row 2 is pre-1970 (only Date32
+        // and DateTime64 can hold it; ts is a placeholder) — used to verify how the toStartOf* result
+        // types narrow the range by ClickHouse default.
         insertCmd.CommandText = """
                                 INSERT INTO datetime_functions_test (id, ts, ts64, d) VALUES
-                                (1, '2026-08-10 13:47:32', '2026-08-10 13:47:32.500', '2026-08-10')
+                                (1, '2026-08-10 13:47:32', '2026-08-10 13:47:32.500', '2026-08-10'),
+                                (2, '1970-01-01 00:00:00', '1920-05-15 12:34:56.500', '1920-05-15')
                                 """;
         await insertCmd.ExecuteNonQueryAsync();
     }
@@ -211,6 +215,60 @@ public class DateTimeFunctionsTranslationTest : IClassFixture<DateTimeFixture>
         Assert.Equal(new DateOnly(2026, 8, 1), result);
     }
 
+    // --- Out-of-legacy-range (pre-1970) behavior --------------------------------------------------
+    // By ClickHouse default, the calendar buckets return Date and the sub-day/interval buckets return
+    // DateTime — neither of which can represent dates before 1970. Values outside that window are
+    // therefore narrowed (Date clamps to the epoch; DateTime wraps around). Row 2 is a 1920 value.
+    // Enabling enable_extended_results_for_datetime_functions makes ClickHouse return the wider
+    // Date32/DateTime64 types instead, preserving the full range — verified below.
+
+    [Fact]
+    public async Task ToStartOfMonth_on_pre_1970_date_is_narrowed_to_epoch_by_default()
+    {
+        await using var context = new DateTimeDbContext(_fixture.ConnectionString);
+
+        // toStartOfMonth returns Date (min 1970-01-01), so the 1920 input is clamped to the epoch.
+        var result = await context.Events.AsNoTracking().Where(e => e.Id == 2)
+            .Select(e => EF.Functions.ToStartOfMonth(e.Date))
+            .SingleAsync();
+
+        Assert.Equal(new DateOnly(1970, 1, 1), result);
+    }
+
+    [Fact]
+    public async Task ToStartOfInterval_on_pre_1970_datetime64_is_not_preserved_by_default()
+    {
+        await using var context = new DateTimeDbContext(_fixture.ConnectionString);
+
+        // toStartOfInterval returns DateTime (1970-2106) by default, so a 1920 value is not preserved.
+        var result = await context.Events.AsNoTracking().Where(e => e.Id == 2)
+            .Select(e => EF.Functions.ToStartOfInterval(e.Timestamp64, 15, ClickHouseInterval.Minute))
+            .SingleAsync();
+
+        Assert.NotEqual(1920, result.Year);
+    }
+
+    [Fact]
+    public async Task ToStartOf_with_extended_results_setting_preserves_pre_1970_values()
+    {
+        // The driver applies set_* connection-string parameters as query settings. Enabling
+        // enable_extended_results_for_datetime_functions makes the functions return Date32/DateTime64,
+        // preserving the full range.
+        var connectionString =
+            _fixture.ConnectionString + ";set_enable_extended_results_for_datetime_functions=1";
+        await using var context = new DateTimeDbContext(connectionString);
+
+        var month = await context.Events.AsNoTracking().Where(e => e.Id == 2)
+            .Select(e => EF.Functions.ToStartOfMonth(e.Date))
+            .SingleAsync();
+        Assert.Equal(new DateOnly(1920, 5, 1), month);
+
+        var bucket = await context.Events.AsNoTracking().Where(e => e.Id == 2)
+            .Select(e => EF.Functions.ToStartOfInterval(e.Timestamp64, 15, ClickHouseInterval.Minute))
+            .SingleAsync();
+        Assert.Equal(new DateTime(1920, 5, 15, 12, 30, 0), bucket);
+    }
+
     [Fact]
     public async Task ToStartOf_functions_work_in_group_by()
     {
@@ -218,6 +276,7 @@ public class DateTimeFunctionsTranslationTest : IClassFixture<DateTimeFixture>
 
         var buckets = await context.Events
             .AsNoTracking()
+            .Where(e => e.Id == 1)
             .GroupBy(e => EF.Functions.ToStartOfMonth(e.Timestamp))
             .Select(g => new { Month = g.Key, Count = g.Count() })
             .ToListAsync();
