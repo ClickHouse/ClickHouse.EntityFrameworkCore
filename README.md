@@ -88,6 +88,26 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 `Where`, `OrderBy`, `Take`, `Skip`, `Select`, `First`, `Single`, `Any`, `Count`, `Distinct`, `AsNoTracking`
 
+### Joins
+
+`Join` (INNER JOIN), `GroupJoin` + `SelectMany` + `DefaultIfEmpty` (LEFT JOIN), `SelectMany` (CROSS JOIN), and self-joins. Joining a local sequence (`int[]`, `string[]`, `byte[]`) also works, as does `Contains` against a local collection (`T[]`, `List<T>`, and the `ICollection`/`IList`/`IReadOnlyList` interfaces), which becomes an `IN` predicate.
+
+ClickHouse returns column defaults (`0`, `""`) instead of `NULL` for unmatched LEFT JOIN rows unless `join_use_nulls=1` is set. The provider adds this setting to the connection automatically so LEFT JOIN gives the .NET semantics you expect. To opt out, use `DisableJoinNullSemantics()`:
+
+```csharp
+optionsBuilder.UseClickHouse("Host=localhost", o => o.DisableJoinNullSemantics());
+```
+
+### Subqueries
+
+`Contains` over an `IQueryable` (`IN (SELECT …)`), `Any` (`EXISTS`), `All`, correlated scalar subqueries in a projection, and subqueries in `FROM`.
+
+ClickHouse returns `NULL` from a scalar subquery that matches no rows, where standard SQL `COUNT` returns `0`. The provider wraps `COUNT` and `SUM` scalar subqueries in `ifNull(…, 0)` when the target CLR type is a non-nullable value type, so a customer with no orders projects `0` rather than throwing.
+
+### Set Operations
+
+`Concat` (`UNION ALL`), `Union` (`UNION DISTINCT`), `Intersect`, and `Except`, including chained and nested combinations. ClickHouse leaves `union_default_mode` empty and rejects a bare `UNION`, so the provider always emits an explicit `ALL` or `DISTINCT` modifier.
+
 ### GROUP BY & Aggregates
 
 `GroupBy` with `Count`, `LongCount`, `Sum`, `Average`, `Min`, `Max` — including `HAVING` (`.Where()` after `.GroupBy()`), multiple aggregates in a single projection, and `OrderBy` on aggregate results.
@@ -209,13 +229,41 @@ public class Event
 entity.Property(e => e.Payload).HasColumnType("Json");
 ```
 
+#### Querying JSON paths
+
+Indexing a `JsonNode` property translates to ClickHouse's native dot and subscript syntax, so filters and projections run on the server:
+
+```csharp
+// WHERE CAST(`e`.`payload`.`age` AS Int32) > 20
+//   AND CAST(`e`.`payload`.`username` AS String) = 'alice_dev'
+var users = await ctx.Events
+    .Where(e => (int)e.Payload!["age"]! > 20
+             && e.Payload!["username"]!.GetValue<string>() == "alice_dev")
+    .ToListAsync();
+```
+
+Paths nest to any depth (`e.Payload!["meta"]!["runtime"]!["cpu_limit"]!`), and array subscripts work too — the provider converts the 0-based .NET index to ClickHouse's 1-based one, so `["orders"]![0]` emits `.orders[1]`.
+
+Both `.GetValue<T>()` and an explicit cast emit a `CAST(… AS <storeType>)`, with the store type taken from the target CLR type. Keys and array indices must be compile-time constants. A variable key does not translate: in a `Where` it throws, and it can only be client-evaluated in a final `Select`.
+
+#### `simpleJSON*` functions
+
+For JSON held in a **`String`** column (not the native `Json` type), use the `EF.Functions` helpers, which map to ClickHouse's `simpleJSON*` family:
+
+```csharp
+var clicks = await ctx.Logs
+    .Where(l => EF.Functions.SimpleJsonExtractString(l.RawPayload, "action") == "click")
+    .ToListAsync();
+```
+
+`SimpleJsonExtractBool`, `SimpleJsonExtractFloat`, `SimpleJsonExtractInt`, `SimpleJsonExtractRaw`, `SimpleJsonExtractString`, `SimpleJsonExtractUInt`, `SimpleJsonHas`.
+
 **Limitations:**
 
-- **No JSON path translation** — `entity.Payload["name"]` in LINQ does not translate to ClickHouse's `data.name` SQL syntax. Filter on non-JSON columns or load entities and inspect JSON in memory.
 - **No owned entity mapping** — `.ToJson()` / `StructuralJsonTypeMapping` is not supported. JSON columns are opaque `JsonNode` or `string` values.
 - **`JsonElement` / `JsonDocument` not supported** — only `JsonNode` and `string` CLR types are mapped.
 - **NULL semantics** — ClickHouse's JSON type returns `{}` (empty object) for NULL values rather than SQL NULL. A row inserted with `Data = null` will read back as an empty `JsonNode`, not `null`.
-- **Integer precision** — ClickHouse JSON stores all integers as `Int64` unless the path is typed otherwise. When reading via `JsonNode`, use `GetValue<long>()` rather than `GetValue<int>()`.
+- **Integer precision** — ClickHouse JSON stores all integers as `Int64` unless the path is typed otherwise. When inspecting a materialized `JsonNode` in memory, use `GetValue<long>()` rather than `GetValue<int>()`. This does not apply to a translated path query, where `GetValue<int>()` emits an explicit `CAST(… AS Int32)` that the server applies.
 
 ### Table Engine Configuration
 
@@ -277,9 +325,11 @@ dotnet ef database update
 ### Not Yet Implemented
 
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
-- JOINs, subqueries, set operations
+- Server-generated values — identity columns, `RETURNING`, computed defaults read back after insert
 - Reverse engineering / scaffolding (`dotnet ef dbcontext scaffold`)
-- JSON path query translation
+- Owned entities mapped to JSON (`.ToJson()`)
+- Queries that EF Core lowers to `CROSS APPLY` / `OUTER APPLY`, which ClickHouse has no equivalent for. This covers correlated `SelectMany` that selects the outer element or entity, `Take` inside a collection projection, and correlated collections over a `UNION` source.
+- Set operations after a client projection (for example `Union(...).FirstOrDefault()` on a client-evaluated shape)
 
 ## Building
 
