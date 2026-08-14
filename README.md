@@ -67,7 +67,7 @@ public class PageView
 | **Bool** | `Bool` | `bool` |
 | **Strings** | `String`, `FixedString(N)` | `string` |
 | **Enums** | `Enum8(...)`, `Enum16(...)` | `string` or C# `enum` |
-| **Date/time** | `Date`, `Date32`, `DateTime`, `DateTime64(P, 'TZ')` | `DateOnly`, `DateTime` |
+| **Date/time** | `Date`, `Date32`, `DateTime`, `DateTime64(P, 'TZ')` | `DateOnly`, `DateTime`, `DateTimeOffset` (see [below](#datetimeoffset)) |
 | **Time** | `Time`, `Time64(N)` | `TimeSpan` |
 | **UUID** | `UUID` | `Guid` |
 | **Network** | `IPv4`, `IPv6` | `IPAddress` |
@@ -79,6 +79,71 @@ public class PageView
 | **JSON** | `Json` | `JsonNode` or `string` |
 | **Geographic** | `Point`, `Ring`, `LineString`, `Polygon`, `MultiLineString`, `MultiPolygon`, `Geometry` | `Tuple<double,double>` and arrays thereof; `object` for Geometry |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
+
+### DateTimeOffset
+
+A `DateTimeOffset` property maps to `DateTime64(7, 'UTC')` by default:
+
+```csharp
+public class Reading
+{
+    public long Id { get; set; }
+    public DateTimeOffset RecordedAt { get; set; }   // DateTime64(7, 'UTC')
+}
+```
+
+Three things to know:
+
+**The offset is not kept.** ClickHouse has no type that stores a UTC offset. `DateTime64` holds an
+instant, and a declared timezone only decides how that instant is rendered. A value written with
+any offset is stored as the correct instant, and a value read back carries the offset of the
+column's timezone — `+00:00` for the default store type. With that default store type, comparisons
+and ordering are instant-correct, so these two values match the same row:
+
+```csharp
+// The same instant, written two ways.
+var a = new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.FromHours(5));
+var b = new DateTimeOffset(2026, 1, 15,  5, 0, 0, TimeSpan.Zero);
+```
+
+If you must keep the offset, store it yourself in a second column alongside a `DateTime`. To keep
+the whole value as text, ask for the conversion explicitly with `HasConversion<string>()` — note
+that `HasColumnType("String")` on its own is not enough, because it adds no converter.
+
+**Precision 7 makes the round trip exact.** One .NET tick is 100 ns, which is precision 7, so a
+stored value never comes back truncated. Precision 7 also covers the full `DateTimeOffset` range,
+which lets you use `DateTimeOffset.MinValue` and `MaxValue` as open-ended range limits. Choose a
+smaller precision if you prefer, but be aware that it discards the digits below it:
+
+```csharp
+b.Property(e => e.RecordedAt).HasColumnType("DateTime64(3, 'UTC')");   // milliseconds
+b.Property(e => e.RecordedAt).HasPrecision(3);                         // the same thing
+```
+
+Do not go above precision 7. .NET cannot represent more than 7 fractional digits, and the driver
+overflows an `Int64` at precision 8 or 9 for dates far from the epoch, which corrupts the value
+without an error.
+
+**Keep `'UTC'` in the store type** unless you have a reason to change it. For a timezone-less type
+such as `DateTime64(7)`, the server reads the query parameter in its `session_timezone`, which moves
+the instant when that setting is not UTC.
+
+A column that declares a different timezone, for example `DateTime64(6, 'Asia/Tokyo')`, is read
+correctly and returns that zone's offset. Two limits apply to such a column:
+
+- The host operating system must know the timezone, or the read throws. Minimal Linux images may
+  need the `tzdata` package.
+- In a zone with daylight saving, the repeated hour when clocks go back is ambiguous, because the
+  driver gives a wall clock and drops the offset. The provider recovers the instant where the zone's
+  standard offset is zero, such as `Europe/London`. Where both candidate offsets are non-zero, such
+  as `Europe/Paris`, the value can read back one hour early.
+
+`DateTimeOffset` also composes into the collection types, so `DateTimeOffset[]`,
+`List<DateTimeOffset>`, `Dictionary<string, DateTimeOffset>` and `Tuple<DateTimeOffset, …>` all
+round trip.
+
+`DateTimeOffset` members such as `.Year` and `.UtcDateTime` do not translate to SQL yet. This
+applies to `DateTime` as well — see [#55](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/55).
 
 ## Current Status
 
@@ -272,7 +337,7 @@ Configure ClickHouse table engines, ordering, partitioning, and more via EF Core
 ```csharp
 modelBuilder.Entity<SensorReading>(b =>
 {
-    b.HasKey(e => e.Id);
+    b.HasKey(e => e.Id); // becomes ORDER BY (the ClickHouse primary key) when no explicit ORDER BY is set
     b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
     b.Property(e => e.Location).HasColumnComment("Installation site");
     b.HasIndex(e => e.Timestamp)
@@ -297,6 +362,8 @@ modelBuilder.Entity<SensorReading>(b =>
 **Engine settings:** `.WithSetting("index_granularity", "4096")` — any ClickHouse setting as a key-value pair
 
 **Default behavior:** If no engine is configured, the provider defaults to `MergeTree` with the EF primary key as `ORDER BY`.
+
+**Primary key vs sorting key:** In ClickHouse the `ORDER BY` (sorting key) *is* the primary key, so `HasKey` alone is sufficient — it becomes `ORDER BY`. Only use `.WithPrimaryKey(...)` when you need the primary index to differ from the sort order (e.g. a `SummingMergeTree`/`AggregatingMergeTree` rollup with a long `ORDER BY` but a narrow index). ClickHouse requires the primary key to be a prefix of the `ORDER BY` columns.
 
 ### Migrations
 
