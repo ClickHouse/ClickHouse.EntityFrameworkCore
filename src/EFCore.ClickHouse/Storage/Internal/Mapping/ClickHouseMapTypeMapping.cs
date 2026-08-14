@@ -13,6 +13,9 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
     private static readonly MethodInfo GetValueMethod =
         typeof(DbDataReader).GetRuntimeMethod(nameof(DbDataReader.GetValue), [typeof(int)])!;
 
+    private static readonly MethodInfo ConvertMapMethod =
+        typeof(ClickHouseMapTypeMapping).GetMethod(nameof(ConvertMap), BindingFlags.Static | BindingFlags.NonPublic)!;
+
     public RelationalTypeMapping KeyMapping { get; }
     public RelationalTypeMapping ValueMapping { get; }
 
@@ -46,7 +49,44 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
         => GetValueMethod;
 
     public override Expression CustomizeDataReaderExpression(Expression expression)
-        => Expression.Convert(expression, ClrType);
+    {
+        // A key or value whose CLR type differs from what the driver produces (DateTimeOffset and
+        // DateOnly both arrive as DateTime) needs the dictionary rebuilt entry by entry. Casting
+        // the whole dictionary would throw InvalidCastException.
+        if (!ClickHouseComponentConversion.NeedsConversion(KeyMapping)
+            && !ClickHouseComponentConversion.NeedsConversion(ValueMapping))
+        {
+            return Expression.Convert(expression, ClrType);
+        }
+
+        Expression converted = Expression.Call(
+            ConvertMapMethod.MakeGenericMethod(KeyMapping.ClrType, ValueMapping.ClrType),
+            expression,
+            ClickHouseComponentConversion.CreateConverter(KeyMapping, KeyMapping.ClrType),
+            ClickHouseComponentConversion.CreateConverter(ValueMapping, ValueMapping.ClrType));
+
+        return converted.Type == ClrType ? converted : Expression.Convert(converted, ClrType);
+    }
+
+    private static Dictionary<TKey, TValue> ConvertMap<TKey, TValue>(
+        object value,
+        Func<object, TKey> convertKey,
+        Func<object, TValue> convertValue)
+        where TKey : notnull
+    {
+        if (value is Dictionary<TKey, TValue> alreadyTyped)
+            return alreadyTyped;
+
+        var source = (IDictionary)value;
+        var result = new Dictionary<TKey, TValue>(source.Count);
+        foreach (DictionaryEntry entry in source)
+        {
+            result[convertKey(entry.Key)] =
+                entry.Value is null or DBNull ? default! : convertValue(entry.Value);
+        }
+
+        return result;
+    }
 
     protected override string GenerateNonNullSqlLiteral(object value)
     {

@@ -28,6 +28,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     private static readonly RelationalTypeMapping Float64Mapping = new ClickHouseDoubleTypeMapping();
     private static readonly RelationalTypeMapping DateTimeMapping = new ClickHouseDateTimeTypeMapping();
     private static readonly RelationalTypeMapping DateTime64Mapping = new ClickHouseDateTime64TypeMapping();
+    private static readonly RelationalTypeMapping DateTimeOffsetMapping = new ClickHouseDateTimeOffsetTypeMapping();
     private static readonly RelationalTypeMapping DateOnlyMapping = new ClickHouseDateOnlyTypeMapping();
     private static readonly RelationalTypeMapping GuidMapping = new ClickHouseGuidTypeMapping();
     private static readonly RelationalTypeMapping IPv4Mapping = new ClickHouseIPAddressTypeMapping("IPv4");
@@ -80,6 +81,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         { typeof(float), Float32Mapping },
         { typeof(double), Float64Mapping },
         { typeof(DateTime), DateTimeMapping },
+        { typeof(DateTimeOffset), DateTimeOffsetMapping },
         { typeof(DateOnly), DateOnlyMapping },
         { typeof(Guid), GuidMapping },
         { typeof(char), StringMapping },
@@ -143,6 +145,9 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
     // Matches a single-quoted string like 'UTC' or 'Asia/Tokyo'
     private static readonly Regex TimezoneRegex = new(@"'([^']+)'", RegexOptions.Compiled);
+
+    /// <summary>ClickHouse reads a bare <c>DateTime64</c> with no argument as precision 3.</summary>
+    private const int BareDateTime64Precision = 3;
 
     public ClickHouseTypeMappingSource(
         TypeMappingSourceDependencies dependencies,
@@ -283,6 +288,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
         // Call base so plugin/extension type mappings can intercept before our defaults.
         var mapping = base.FindMapping(in mappingInfo)
+           ?? FindDateTimeOffsetMapping(mappingInfo)
            ?? FindDateTime64Mapping(mappingInfo)
            ?? FindDateTimeMapping(mappingInfo)
            ?? FindFixedStringMapping(mappingInfo)
@@ -340,6 +346,56 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             || def == typeof(IReadOnlyCollection<>);
     }
 
+    /// <summary>
+    /// Resolves <see cref="DateTimeOffset"/> properties. This runs before the
+    /// <c>DateTime64</c>/<c>DateTime</c> resolvers and before the store-type aliases, because those
+    /// all produce a <see cref="DateTime"/> CLR type. Without it, EF Core would find no mapping and
+    /// fall back to <c>DateTimeOffsetToStringConverter</c>, which silently makes a
+    /// <c>String</c> column (issue #53).
+    /// </summary>
+    private static RelationalTypeMapping? FindDateTimeOffsetMapping(in RelationalTypeMappingInfo mappingInfo)
+    {
+        if (mappingInfo.ClrType != typeof(DateTimeOffset))
+            return null;
+
+        var baseName = mappingInfo.StoreTypeNameBase;
+        var storeTypeName = mappingInfo.StoreTypeName;
+
+        // No store type configured — use the UTC-pinned default, but respect HasPrecision(n).
+        if (string.IsNullOrWhiteSpace(baseName) && string.IsNullOrWhiteSpace(storeTypeName))
+        {
+            return mappingInfo.Precision is null
+                ? DateTimeOffsetMapping
+                : new ClickHouseDateTimeOffsetTypeMapping(
+                    mappingInfo.Precision,
+                    ClickHouseDateTimeOffsetTypeMapping.DefaultTimezone);
+        }
+
+        if (string.Equals(baseName, "DateTime64", StringComparison.OrdinalIgnoreCase))
+        {
+            // A bare DateTime64 with no argument is precision 3 in ClickHouse, which is what
+            // FindDateTime64Mapping assumes as well. Our own default of 7 applies only when the
+            // model configures no store type at all.
+            return new ClickHouseDateTimeOffsetTypeMapping(
+                mappingInfo.Precision ?? BareDateTime64Precision,
+                storeTypeName is null ? null : ExtractTimezone(storeTypeName));
+        }
+
+        if (string.Equals(baseName, "DateTime", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ClickHouseDateTimeOffsetTypeMapping(
+                precision: null,
+                storeTypeName is null ? null : ExtractTimezone(storeTypeName));
+        }
+
+        // Any other explicit store type falls through to the resolvers below, which key off the
+        // store type rather than the CLR type. Pointing a DateTimeOffset property at an unrelated
+        // store type such as String therefore gives that store type's mapping with no converter,
+        // and the CLR type will not agree with the property. Use HasConversion<string>() to store
+        // the value as text.
+        return null;
+    }
+
     private RelationalTypeMapping? FindDateTime64Mapping(in RelationalTypeMappingInfo mappingInfo)
     {
         if (!string.Equals(mappingInfo.StoreTypeNameBase, "DateTime64", StringComparison.OrdinalIgnoreCase))
@@ -350,7 +406,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         if (storeTypeName is null || !storeTypeName.Contains('('))
             return null;
 
-        var precision = mappingInfo.Precision ?? 3;
+        var precision = mappingInfo.Precision ?? BareDateTime64Precision;
         var timezone = ExtractTimezone(storeTypeName);
         return new ClickHouseDateTime64TypeMapping(precision, timezone);
     }
@@ -391,6 +447,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     private RelationalTypeMapping? FindArrayMapping(in RelationalTypeMappingInfo mappingInfo)
     {
         RelationalTypeMapping? elementMapping = null;
+        var elementClrTypeHint = GetCollectionElementType(mappingInfo.ClrType);
 
         // Resolve element mapping from store type: Array(X). When the user wrote
         // HasColumnType("Array(...)"), prefer parsing the inner type from the store
@@ -406,7 +463,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             if (innerType is null)
                 return null;
 
-            elementMapping = FindComponentMapping(innerType);
+            elementMapping = FindComponentMapping(innerType, elementClrTypeHint);
         }
 
         // Fall back to the pre-resolved element type mapping from EF Core (used by
@@ -414,7 +471,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         elementMapping ??= mappingInfo.ElementTypeMapping as RelationalTypeMapping;
 
         var clrType = mappingInfo.ClrType;
-        var elementClrType = GetCollectionElementType(clrType);
+        var elementClrType = elementClrTypeHint;
 
         // Resolve element mapping from CLR type if not already resolved
         if (elementMapping is null && elementClrType is not null)
@@ -461,14 +518,34 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     /// <para>
     /// EF Core's scalar nullability lives on <see cref="Microsoft.EntityFrameworkCore.Metadata.IProperty.IsNullable"/>,
     /// which is why <see cref="ParseStoreTypeName"/> strips <c>Nullable(...)</c> and
-    /// <c>FindMapping</c> returns the unwrapped scalar mapping — correct for scalar columns
-    /// where the property/column annotation carries the nullability separately, but
-    /// insufficient for composites whose element nullability has no annotation channel.
+    /// <c>FindMapping</c> returns the unwrapped scalar mapping. That is correct for a scalar column,
+    /// where the property annotation carries nullability separately, but a composite needs the
+    /// element nullability in the element mapping's CLR type.
+    /// <para>
+    /// Note that EF Core does model this for a primitive collection, on
+    /// <see cref="Microsoft.EntityFrameworkCore.Metadata.IReadOnlyElementType.IsNullable"/>, which this
+    /// resolver does not yet consult. It has no equivalent for a <c>Map</c> value or one <c>Tuple</c>
+    /// position, so the store type stays the only channel for those.
+    /// </para>
     /// </para>
     /// </summary>
-    private RelationalTypeMapping? FindComponentMapping(string innerStoreType)
+    /// <param name="clrTypeHint">
+    /// The component's CLR type, where the model supplies one. Several CLR types share a single
+    /// ClickHouse store type — <c>DateTime64</c> serves both <see cref="DateTime"/> and
+    /// <see cref="DateTimeOffset"/>, and <c>Date32</c> serves both <see cref="DateTime"/> and
+    /// <see cref="DateOnly"/> — so resolving from the store type alone would always pick the
+    /// default CLR type and give the composite the wrong element type.
+    /// </param>
+    private RelationalTypeMapping? FindComponentMapping(string innerStoreType, Type? clrTypeHint = null)
     {
-        var inner = FindMapping(innerStoreType);
+        // Element nullability rides on the store type, so strip Nullable<> from the hint and let
+        // the wrapper below re-apply it.
+        var hint = clrTypeHint is null ? null : Nullable.GetUnderlyingType(clrTypeHint) ?? clrTypeHint;
+
+        var inner = hint is null
+            ? FindMapping(innerStoreType)
+            : FindMapping(hint, innerStoreType) ?? FindMapping(innerStoreType);
+
         if (inner is null)
             return null;
 
@@ -546,8 +623,14 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             if (innerTypes is null)
                 return null;
 
-            var keyMapping = FindComponentMapping(innerTypes[0]);
-            var valueMapping = FindComponentMapping(innerTypes[1]);
+            // Dictionary<K,V> supplies the component CLR types when the model has one.
+            var dictionaryArgs = mappingInfo.ClrType is { IsGenericType: true } dictType
+                && dictType.GetGenericTypeDefinition() == typeof(Dictionary<,>)
+                    ? dictType.GetGenericArguments()
+                    : null;
+
+            var keyMapping = FindComponentMapping(innerTypes[0], dictionaryArgs?[0]);
+            var valueMapping = FindComponentMapping(innerTypes[1], dictionaryArgs?[1]);
             if (keyMapping is null || valueMapping is null)
                 return null;
 
@@ -581,10 +664,18 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
             if (innerTypes is null || innerTypes.Count == 0)
                 return null;
 
+            // A tuple CLR type supplies the component CLR types, provided the arity agrees.
+            var tupleArgs = mappingInfo.ClrType is { IsGenericType: true } tupleType
+                && ClassifyTupleType(tupleType).IsTuple
+                && tupleType.GetGenericArguments() is { } args
+                && args.Length == innerTypes.Count
+                    ? args
+                    : null;
+
             var elementMappings = new List<RelationalTypeMapping>();
-            foreach (var innerType in innerTypes)
+            for (var i = 0; i < innerTypes.Count; i++)
             {
-                var mapping = FindComponentMapping(innerType);
+                var mapping = FindComponentMapping(innerTypes[i], tupleArgs?[i]);
                 if (mapping is null)
                     return null;
                 elementMappings.Add(mapping);

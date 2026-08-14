@@ -14,6 +14,9 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
     private static readonly MethodInfo GetValueMethod =
         typeof(DbDataReader).GetRuntimeMethod(nameof(DbDataReader.GetValue), [typeof(int)])!;
 
+    private static readonly MethodInfo ConvertArrayMethod =
+        typeof(ClickHouseArrayTypeMapping).GetMethod(nameof(ConvertArray), BindingFlags.Static | BindingFlags.NonPublic)!;
+
     public RelationalTypeMapping ElementMapping { get; }
 
     /// <summary>
@@ -81,7 +84,43 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         // When there's a ValueConverter (e.g. List<T> ↔ T[]), the data reader must produce
         // the provider type (T[]). EF Core applies the converter afterward.
         var targetType = Converter?.ProviderClrType ?? ClrType;
-        return Expression.Convert(expression, targetType);
+
+        // An element whose CLR type differs from what the driver produces (DateTimeOffset and
+        // DateOnly both arrive as DateTime) needs the array rebuilt element by element. Casting
+        // the whole array would throw InvalidCastException. Otherwise cast directly, which is
+        // both correct and cheaper.
+        if (!ClickHouseComponentConversion.NeedsConversion(ElementMapping))
+            return Expression.Convert(expression, targetType);
+
+        var elementType = ElementMapping.ClrType;
+        Expression converted = Expression.Call(
+            ConvertArrayMethod.MakeGenericMethod(elementType),
+            expression,
+            ClickHouseComponentConversion.CreateConverter(ElementMapping, elementType));
+
+        return converted.Type == targetType ? converted : Expression.Convert(converted, targetType);
+    }
+
+    /// <summary>
+    /// Rebuilds the driver's array as <c>TElement[]</c>, converting each element. Nested composites
+    /// compose through this: an <c>Array(Array(DateTime64))</c> element mapping is itself a
+    /// <see cref="ClickHouseArrayTypeMapping"/>, so its own conversion runs per element.
+    /// </summary>
+    private static TElement[] ConvertArray<TElement>(object value, Func<object, TElement> convertElement)
+    {
+        // The driver often already produces the target type, for example Array(Int32) -> int[].
+        if (value is TElement[] alreadyTyped)
+            return alreadyTyped;
+
+        var source = (Array)value;
+        var result = new TElement[source.Length];
+        for (var i = 0; i < source.Length; i++)
+        {
+            var element = source.GetValue(i);
+            result[i] = element is null or DBNull ? default! : convertElement(element);
+        }
+
+        return result;
     }
 
     protected override string GenerateNonNullSqlLiteral(object value)

@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore.Storage;
 
@@ -14,10 +15,14 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 /// so <see cref="ClickHouseTypeMappingSource"/>'s <c>FindMapping</c> strips
 /// <c>Nullable(...)</c> wrappers in <c>ParseStoreTypeName</c> and returns the unwrapped scalar
 /// mapping. That convention works for scalar columns but breaks composites: an
-/// <c>Array(Nullable(Int32))</c> property is <c>int?[]</c> at the CLR level, and there is no
-/// per-element <c>IsNullable</c> annotation channel for the composite to consult. The only
-/// way to surface element-level nullability is through the element mapping's
-/// <see cref="RelationalTypeMapping.ClrType"/>.
+/// <c>Array(Nullable(Int32))</c> property is <c>int?[]</c> at the CLR level, so the composite must
+/// take element nullability from the element mapping's <see cref="RelationalTypeMapping.ClrType"/>.
+/// <para>
+/// For a primitive collection, EF Core does model this on
+/// <see cref="Microsoft.EntityFrameworkCore.Metadata.IReadOnlyElementType.IsNullable"/>, and the
+/// resolver should prefer that channel. It has no equivalent for a <c>Map</c> value or a single
+/// <c>Tuple</c> position, so this wrapper stays necessary for those.
+/// </para>
 /// </para>
 /// <para>
 /// This wrapper exists for that single purpose: report <c>Nullable&lt;T&gt;</c> as the CLR
@@ -60,7 +65,7 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
                 valueGeneratorFactory: null,
                 elementMapping: inner.ElementTypeMapping,
                 jsonValueReaderWriter: inner.JsonValueReaderWriter),
-            $"Nullable({inner.StoreType})",
+            FormatStoreType(inner.StoreType),
             inner.StoreTypePostfix,
             inner.DbType,
             inner.IsUnicode,
@@ -70,10 +75,39 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
             inner.Scale);
     }
 
+    /// <summary>
+    /// Adds the <c>Nullable(...)</c> wrapper unless the inner store type already carries one.
+    /// </summary>
+    /// <remarks>
+    /// The inner mapping is resolved from the component store type, which still holds the
+    /// <c>Nullable(...)</c> text, and <c>PreserveExplicitStoreType</c> keeps that text verbatim.
+    /// Wrapping it again would give <c>Nullable(Nullable(T))</c>, which ClickHouse rejects with
+    /// <c>Nested type Nullable(T) cannot be inside Nullable type</c>.
+    /// </remarks>
+    private static string FormatStoreType(string innerStoreType)
+        => DenotesNullable(innerStoreType) ? innerStoreType : $"Nullable({innerStoreType})";
+
+    private static bool DenotesNullable(string storeType)
+    {
+        var s = storeType.AsSpan().Trim();
+
+        // LowCardinality(Nullable(T)) is already nullable; the wrapper must not be added again.
+        if (s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase) && s.EndsWith(")"))
+            s = s["LowCardinality(".Length..^1].Trim();
+
+        return s.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase);
+    }
+
     protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters)
         => new ClickHouseNullableElementMapping(parameters, Inner);
 
     public override MethodInfo GetDataReaderMethod() => Inner.GetDataReaderMethod();
+
+    // Delegate the read conversion as well, so a composite over Nullable(DateTime64) or
+    // Nullable(Date32) still converts each element. Callers handle the null case before this
+    // runs, so the inner non-nullable conversion is safe here.
+    public override Expression CustomizeDataReaderExpression(Expression expression)
+        => Inner.CustomizeDataReaderExpression(expression);
 
     protected override string GenerateNonNullSqlLiteral(object value) => Inner.GenerateSqlLiteral(value);
 }
