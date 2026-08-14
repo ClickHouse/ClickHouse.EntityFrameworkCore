@@ -142,6 +142,20 @@ public class DateTimeFunctionsTranslationTest : IClassFixture<DateTimeFixture>
     }
 
     [Fact]
+    public async Task ToStartOfWeek_accepts_parameterized_mode()
+    {
+        var mode = (byte)1;
+
+        await using var context = new DateTimeDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => EF.Functions.ToStartOfWeek(e.Timestamp, mode));
+
+        Assert.Contains("{mode:UInt8}", query.ToQueryString());
+        var result = await query.SingleAsync();
+        Assert.Equal(new DateTime(2026, 8, 10), result);
+    }
+
+    [Fact]
     public async Task ToStartOfDay_truncates_to_midnight()
     {
         var result = await SelectSingleAsync(q => q.Select(e => EF.Functions.ToStartOfDay(e.Timestamp)));
@@ -196,6 +210,20 @@ public class DateTimeFunctionsTranslationTest : IClassFixture<DateTimeFixture>
     {
         var result = await SelectSingleAsync(
             q => q.Select(e => EF.Functions.ToStartOfInterval(e.Timestamp, 15, ClickHouseInterval.Minute)));
+        Assert.Equal(new DateTime(2026, 8, 10, 13, 45, 0), result);
+    }
+
+    [Fact]
+    public async Task ToStartOfInterval_accepts_parameterized_size()
+    {
+        var size = 15;
+
+        await using var context = new DateTimeDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => EF.Functions.ToStartOfInterval(e.Timestamp, size, ClickHouseInterval.Minute));
+
+        Assert.Contains("{size:Int32}", query.ToQueryString());
+        var result = await query.SingleAsync();
         Assert.Equal(new DateTime(2026, 8, 10, 13, 45, 0), result);
     }
 
@@ -394,5 +422,34 @@ public class DateTimeFunctionsTranslationOfflineTest
             .ToQueryString();
 
         Assert.Contains("toStartOfMonth", sql);
+    }
+
+    [Fact]
+    public void ToStartOfWeek_with_row_dependent_mode_is_not_translatable()
+    {
+        using var context = new OfflineContext();
+
+        var query = context.Events
+            .Select(e => EF.Functions.ToStartOfWeek(e.Timestamp, (byte)e.Id));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => query.ToQueryString());
+        Assert.Contains("'ToStartOfWeek' method's 'mode' argument", exception.Message);
+        Assert.Contains("SQL literal or query parameter", exception.Message);
+    }
+
+    [Fact]
+    public void ToStartOfInterval_with_row_dependent_size_is_not_translatable()
+    {
+        using var context = new OfflineContext();
+
+        var query = context.Events
+            .Select(e => EF.Functions.ToStartOfInterval(
+                e.Timestamp,
+                (int)e.Id,
+                ClickHouseInterval.Minute));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => query.ToQueryString());
+        Assert.Contains("'ToStartOfInterval' method's 'value' argument", exception.Message);
+        Assert.Contains("SQL literal or query parameter", exception.Message);
     }
 }
