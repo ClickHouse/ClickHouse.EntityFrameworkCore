@@ -62,14 +62,23 @@ public class ClickHouseTupleTypeMapping : RelationalTypeMapping
             ElementMappings.Select(
                 mapping => (Expression)ClickHouseComponentConversion.CreateConverter(mapping, typeof(object))));
 
-        return Expression.Call(ConvertMethod.MakeGenericMethod(ClrType), expression, componentConverters);
+        return Expression.Call(
+            ConvertMethod.MakeGenericMethod(ClrType),
+            expression,
+            componentConverters,
+            Expression.Constant(ElementMappings.All(ClickHouseComponentConversion.CanPassThrough)));
     }
 
     // Rebuilds the driver's tuple as T, converting each component. Handles both ValueTuple<> and
     // System.Tuple<> targets, since both expose a constructor taking every component.
-    private static T ConvertTuple<T>(object value, Func<object, object?>[] convertComponents)
+    private static T ConvertTuple<T>(
+        object value,
+        Func<object, object?>[] convertComponents,
+        bool canPassThrough)
     {
-        if (value is T alreadyTyped)
+        // A ValueTuple target never takes this path, because the driver returns System.Tuple<>.
+        // See ClickHouseComponentConversion.CanPassThrough for the component condition.
+        if (canPassThrough && value is T alreadyTyped)
             return alreadyTyped;
 
         if (value is not ITuple tuple)

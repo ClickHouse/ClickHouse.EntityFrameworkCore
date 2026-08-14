@@ -96,7 +96,8 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         Expression converted = Expression.Call(
             ConvertArrayMethod.MakeGenericMethod(elementType),
             expression,
-            ClickHouseComponentConversion.CreateConverter(ElementMapping, elementType));
+            ClickHouseComponentConversion.CreateConverter(ElementMapping, elementType),
+            Expression.Constant(ClickHouseComponentConversion.CanPassThrough(ElementMapping)));
 
         return converted.Type == targetType ? converted : Expression.Convert(converted, targetType);
     }
@@ -106,10 +107,15 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
     /// compose through this: an <c>Array(Array(DateTime64))</c> element mapping is itself a
     /// <see cref="ClickHouseArrayTypeMapping"/>, so its own conversion runs per element.
     /// </summary>
-    private static TElement[] ConvertArray<TElement>(object value, Func<object, TElement> convertElement)
+    private static TElement[] ConvertArray<TElement>(
+        object value,
+        Func<object, TElement> convertElement,
+        bool canPassThrough)
     {
         // The driver often already produces the target type, for example Array(Int32) -> int[].
-        if (value is TElement[] alreadyTyped)
+        // See ClickHouseComponentConversion.CanPassThrough for when that proves there is no work
+        // left to do.
+        if (canPassThrough && value is TElement[] alreadyTyped)
             return alreadyTyped;
 
         var source = (Array)value;
