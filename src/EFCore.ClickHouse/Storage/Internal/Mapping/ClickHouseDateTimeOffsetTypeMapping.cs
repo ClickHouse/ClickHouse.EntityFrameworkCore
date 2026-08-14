@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
@@ -23,12 +24,17 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 /// No value converter is used. The driver accepts a <see cref="DateTimeOffset"/> directly on both
 /// the query parameter path and the bulk insert path, and converts it to the correct instant.
 ///
+/// A column may declare a fixed UTC offset rather than a named zone, which ClickHouse spells
+/// <c>Fixed/UTC±HH:MM:SS</c>. <see cref="TryParseFixedOffset"/> reads those, because .NET has no
+/// timezone of that name.
+///
 /// One limit applies to a column that declares a timezone with daylight saving. The driver gives a
 /// wall clock in that timezone and drops the offset, so the repeated hour when clocks go back is
 /// ambiguous. <see cref="ResolveOffset"/> recovers it when the zone's standard offset is zero, for
 /// example Europe/London. In a zone where both candidate offsets are not zero, such as
 /// Europe/Paris, the reading falls back to standard time and can be one hour early. The default
-/// <c>'UTC'</c> store type has no daylight saving and is not affected.
+/// <c>'UTC'</c> store type has no daylight saving and is not affected, and neither is a fixed
+/// offset, which by definition never changes.
 /// </summary>
 public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping
 {
@@ -42,6 +48,19 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping
 
     /// <summary>.NET cannot render more than 7 fractional digits, because a tick is its smallest unit.</summary>
     private const int MaxFractionalDigits = 7;
+
+    /// <summary>
+    /// ClickHouse spells a fixed-offset timezone <c>Fixed/UTC±HH:MM:SS</c>. See
+    /// <see cref="TryParseFixedOffset"/> for why the pattern is this strict.
+    /// </summary>
+    private static readonly Regex FixedOffsetRegex = new(
+        @"^Fixed/UTC([+-])(\d{2}):(\d{2}):(\d{2})$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    // DateTimeOffset holds an offset only within ±14 hours, and only in whole minutes. ClickHouse
+    // accepts both a larger magnitude and a finer granularity, for example 'Fixed/UTC+00:00:42'.
+    private static readonly TimeSpan MaxRepresentableOffset = TimeSpan.FromHours(14);
+    private static readonly TimeSpan MinRepresentableOffset = TimeSpan.FromHours(-14);
 
     private static readonly MethodInfo GetValueMethod =
         typeof(DbDataReader).GetRuntimeMethod(nameof(DbDataReader.GetValue), [typeof(int)])!;
@@ -126,6 +145,11 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping
         if (timezone is null)
             return new DateTimeOffset(DateTime.SpecifyKind(dateTime, DateTimeKind.Utc));
 
+        // A fixed offset resolves without the host's timezone data. This must come before the
+        // lookup below, which cannot resolve such a name.
+        if (TryParseFixedOffset(timezone, out var fixedOffset))
+            return new DateTimeOffset(DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified), fixedOffset);
+
         var zone = FindTimeZone(timezone)
             ?? throw new InvalidOperationException(
                 $"Cannot read the DateTimeOffset column because this machine does not know the "
@@ -137,6 +161,85 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping
         var wallClock = DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified);
         return new DateTimeOffset(wallClock, ResolveOffset(zone, wallClock));
     }
+
+    /// <summary>
+    /// Reads a ClickHouse fixed-offset timezone name into its offset.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ClickHouse lets a column declare a fixed UTC offset instead of a named zone, and spells it
+    /// <c>Fixed/UTC±HH:MM:SS</c> — for example <c>DateTime64(7, 'Fixed/UTC+05:30:00')</c>. Each
+    /// field must have exactly two digits, and the server rejects <c>Fixed/UTC+5:30:00</c>,
+    /// <c>Fixed/UTC+05:30</c> and any change of case. Such a name is not in the IANA database, so
+    /// <see cref="TimeZoneInfo.FindSystemTimeZoneById"/> cannot resolve it however complete the
+    /// host's timezone data is. It needs no daylight-saving logic either, because the offset is
+    /// fixed by definition, so the reading is never ambiguous.
+    /// </para>
+    /// <para>
+    /// The minutes and seconds fields are not held to 59. ClickHouse carries the excess, so
+    /// <c>Fixed/UTC+05:60:00</c> is a legal name for the offset <c>+06:00</c>, and the server
+    /// accepts any name up to a total of 24 hours. The whole shape is matched here so that such a
+    /// name is diagnosed rather than left to the unresolvable-timezone error, but the offset is
+    /// only returned for the spelling the driver also reads. See the throw below.
+    /// </para>
+    /// </remarks>
+    private static bool TryParseFixedOffset(string timezone, out TimeSpan offset)
+    {
+        offset = default;
+
+        var match = FixedOffsetRegex.Match(timezone);
+        if (!match.Success)
+            return false;
+
+        var magnitude = new TimeSpan(
+            int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture),
+            int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture),
+            int.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture));
+
+        var sign = match.Groups[1].Value == "-" ? -1 : 1;
+        var candidate = sign * magnitude;
+
+        // ClickHouse accepts offsets that DateTimeOffset cannot hold. Its constructor would throw
+        // an ArgumentException naming only the rule, so report the timezone that broke it instead.
+        var limit = candidate < MinRepresentableOffset || candidate > MaxRepresentableOffset
+            ? "DateTimeOffset holds an offset only within plus or minus 14 hours"
+            : candidate.Ticks % TimeSpan.TicksPerMinute != 0
+                ? "DateTimeOffset holds an offset only in whole minutes"
+                : null;
+
+        if (limit is not null)
+        {
+            throw new InvalidOperationException(
+                $"Cannot read the DateTimeOffset column because its declared timezone '{timezone}' "
+                + $"is an offset of {candidate}, and {limit}. Declare the column with an offset that "
+                + $"a DateTimeOffset can hold, or map the property as DateTime.");
+        }
+
+        // ClickHouse carries minutes and seconds above 59, so 'Fixed/UTC+05:60:00' is a legal name
+        // for the offset +06:00. The driver does not read those, and returns a UTC wall clock
+        // instead of one in the column's timezone, so the offset here cannot be attached to it —
+        // that would move the instant by the whole offset and report nothing. Only the spelling the
+        // driver agrees with can be read.
+        if (magnitude.Minutes != int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture)
+            || magnitude.Seconds != int.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture))
+        {
+            throw new InvalidOperationException(
+                $"Cannot read the DateTimeOffset column because the ClickHouse driver does not "
+                + $"support the timezone '{timezone}' that the column declares. ClickHouse reads it "
+                + $"as the offset {candidate}, but only spells that offset in a form the driver "
+                + $"accepts when the minutes and seconds are below 60. Declare the column as "
+                + $"DateTime64(P, '{FormatFixedOffset(candidate)}') instead.");
+        }
+
+        offset = candidate;
+        return true;
+    }
+
+    /// <summary>Spells an offset the way ClickHouse names a fixed-offset timezone.</summary>
+    private static string FormatFixedOffset(TimeSpan offset)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"Fixed/UTC{(offset < TimeSpan.Zero ? '-' : '+')}{offset.Duration():hh\\:mm\\:ss}");
 
     private static TimeSpan ResolveOffset(TimeZoneInfo zone, DateTime wallClock)
     {

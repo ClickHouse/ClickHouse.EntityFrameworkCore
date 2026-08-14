@@ -63,7 +63,10 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
             ConvertMapMethod.MakeGenericMethod(KeyMapping.ClrType, ValueMapping.ClrType),
             expression,
             ClickHouseComponentConversion.CreateConverter(KeyMapping, KeyMapping.ClrType),
-            ClickHouseComponentConversion.CreateConverter(ValueMapping, ValueMapping.ClrType));
+            ClickHouseComponentConversion.CreateConverter(ValueMapping, ValueMapping.ClrType),
+            Expression.Constant(
+                ClickHouseComponentConversion.CanPassThrough(KeyMapping)
+                && ClickHouseComponentConversion.CanPassThrough(ValueMapping)));
 
         return converted.Type == ClrType ? converted : Expression.Convert(converted, ClrType);
     }
@@ -71,10 +74,13 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
     private static Dictionary<TKey, TValue> ConvertMap<TKey, TValue>(
         object value,
         Func<object, TKey> convertKey,
-        Func<object, TValue> convertValue)
+        Func<object, TValue> convertValue,
+        bool canPassThrough)
         where TKey : notnull
     {
-        if (value is Dictionary<TKey, TValue> alreadyTyped)
+        // See ClickHouseComponentConversion.CanPassThrough for when a dictionary the driver already
+        // typed needs no rebuilding.
+        if (canPassThrough && value is Dictionary<TKey, TValue> alreadyTyped)
             return alreadyTyped;
 
         var source = (IDictionary)value;

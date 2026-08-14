@@ -63,6 +63,31 @@ internal static class ClickHouseComponentConversion
         });
 
     /// <summary>
+    /// Reports whether a composite that the driver already produced at the target CLR type may be
+    /// returned unchanged, instead of being rebuilt component by component.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rebuilding is only needed where reading a component changes its value. The composite
+    /// mappings therefore keep a fast path for a driver value that already has the target type —
+    /// which earns its keep for a nested composite such as <c>Array(Array(Int32))</c>, where the
+    /// inner mapping's read is a cast and nothing more.
+    /// </para>
+    /// <para>
+    /// That fast path is only sound where matching CLR types prove there is nothing left to do.
+    /// It holds for <see cref="RelationalTypeMapping.CustomizeDataReaderExpression"/>: every
+    /// component mapping that uses it either changes the CLR type — <see cref="DateTimeOffset"/>
+    /// and <see cref="DateOnly"/> are both built from a <see cref="DateTime"/> — or coerces a
+    /// numeric type the driver may return too wide, which is a no-op once the type already matches.
+    /// It does not hold for a <see cref="RelationalTypeMapping.Converter"/>, which is free to
+    /// change the value while keeping the CLR type. So a component that carries one is always
+    /// rebuilt.
+    /// </para>
+    /// </remarks>
+    public static bool CanPassThrough(RelationalTypeMapping mapping)
+        => mapping.Converter is null;
+
+    /// <summary>
     /// Returns an expression of type <c>Func&lt;object, TComponent&gt;</c> that reads one component,
     /// where <c>TComponent</c> is <paramref name="componentType"/>.
     /// </summary>

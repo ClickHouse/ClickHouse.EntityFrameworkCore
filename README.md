@@ -108,12 +108,18 @@ var b = new DateTimeOffset(2026, 1, 15,  5, 0, 0, TimeSpan.Zero);
 
 If you must keep the offset, store it yourself in a second column alongside a `DateTime`. To keep
 the whole value as text, ask for the conversion explicitly with `HasConversion<string>()` — note
-that `HasColumnType("String")` on its own is not enough, because it adds no converter.
+that `HasColumnType("String")` on its own is not enough, because it adds no converter. Such a
+column is read-only for now: `SaveChanges` cannot write any property that has a value converter
+([#54](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/54)).
 
 **Precision 7 makes the round trip exact.** One .NET tick is 100 ns, which is precision 7, so a
 stored value never comes back truncated. Precision 7 also covers the full `DateTimeOffset` range,
-which lets you use `DateTimeOffset.MinValue` and `MaxValue` as open-ended range limits. Choose a
-smaller precision if you prefer, but be aware that it discards the digits below it:
+which lets you use `DateTimeOffset.MinValue` and `MaxValue` as open-ended range limits on the
+default store type. Keep those two sentinels to a column whose timezone offset is zero, such as the
+default `'UTC'`. Both sit at the edge of the `DateTime` range, and the driver has to build a wall
+clock in the column's timezone to return a value, so any non-zero offset pushes one end outside
+`DateTime`: reading `MaxValue` from a `DateTime64(7, 'Asia/Tokyo')` column throws. Choose a smaller
+precision if you prefer, but be aware that it discards the digits below it:
 
 ```csharp
 b.Property(e => e.RecordedAt).HasColumnType("DateTime64(3, 'UTC')");   // milliseconds
@@ -137,6 +143,30 @@ correctly and returns that zone's offset. Two limits apply to such a column:
   driver gives a wall clock and drops the offset. The provider recovers the instant where the zone's
   standard offset is zero, such as `Europe/London`. Where both candidate offsets are non-zero, such
   as `Europe/Paris`, the value can read back one hour early.
+- Dates at the far ends of the `DateTimeOffset` range do not survive, as described above. A named
+  zone is worse than a fixed offset here: zones carry a Local Mean Time offset for year 1
+  (`+09:18:59` for `Asia/Tokyo`), so a value near `DateTimeOffset.MinValue` reads back quietly
+  shifted rather than reporting an error.
+
+A column can also declare a fixed UTC offset instead of a named zone. ClickHouse spells this
+`Fixed/UTC±HH:MM:SS`, with two digits in every field — the server rejects `Fixed/UTC+5:30:00` and
+`Fixed/UTC+05:30`:
+
+```csharp
+b.Property(e => e.RecordedAt).HasColumnType("DateTime64(7, 'Fixed/UTC+05:30:00')");
+```
+
+Neither limit above applies here: the host needs no timezone data, and a fixed offset is never
+ambiguous. Two limits of its own do, and each reports the timezone and the reason rather than
+failing obscurely:
+
+- `DateTimeOffset` holds an offset only within plus or minus 14 hours, and only in whole minutes.
+  ClickHouse accepts more, so `Fixed/UTC+15:00:00` and `Fixed/UTC+00:00:42` cannot be read into one.
+- ClickHouse does not hold the minutes and seconds fields to 59 — it carries the excess, so
+  `Fixed/UTC+05:60:00` is a legal name for `+06:00`. The driver reads only the plain spelling, so
+  declare that offset as `Fixed/UTC+06:00:00`.
+
+Map such a column as `DateTime` if you cannot change how it is declared.
 
 `DateTimeOffset` also composes into the collection types, so `DateTimeOffset[]`,
 `List<DateTimeOffset>`, `Dictionary<string, DateTimeOffset>` and `Tuple<DateTimeOffset, …>` all

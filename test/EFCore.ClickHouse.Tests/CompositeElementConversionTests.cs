@@ -1,5 +1,9 @@
 using System.Linq.Expressions;
+using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
@@ -129,6 +133,39 @@ public class CompositeElementDbContext : DbContext
             e.Property(x => x.Labels).HasColumnName("labels");
         });
     }
+}
+
+public class ElementConverterEntity
+{
+    public long Id { get; set; }
+    public string[] Tags { get; set; } = [];
+}
+
+/// <summary>
+/// An element converter that keeps the CLR type, set through EF Core's public
+/// <c>ElementType().HasConversion(...)</c> API.
+/// </summary>
+public class ElementConverterDbContext : DbContext
+{
+    private readonly string _connectionString;
+
+    public ElementConverterDbContext(string connectionString) => _connectionString = connectionString;
+
+    public DbSet<ElementConverterEntity> Entities => Set<ElementConverterEntity>();
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder.UseClickHouse(_connectionString);
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+        => modelBuilder.Entity<ElementConverterEntity>(e =>
+        {
+            e.ToTable("element_converted");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.PrimitiveCollection(x => x.Tags).HasColumnName("tags")
+                .ElementType(el => el.HasConversion(
+                    new ValueConverter<string, string>(v => v, v => v + "!")));
+        });
 }
 
 public class CompositeElementConversionFixture : IAsyncLifetime
@@ -480,5 +517,147 @@ public class CompositeElementConversionTests : IClassFixture<CompositeElementCon
         Assert.Equal("Map(String, Enum8('Red' = 1, 'Green' = 2, 'Blue' = 3))", columns["colour_by_name"]);
         Assert.Equal("Map(String, Array(Int32))", columns["buckets"]);
         Assert.Equal("Array(Array(Int32))", columns["nested"]);
+    }
+
+    // --- the already-typed pass-through -------------------------------------
+
+    /// <summary>
+    /// Reading a composite keeps a fast path for a driver value that already has the target CLR
+    /// type. That is sound only where matching types prove there is no work left, which a
+    /// <c>ValueConverter</c> can break: it may change the value and keep the CLR type, so the
+    /// driver's array is already <c>string[]</c> while <c>ConvertFromProvider</c> still has to run.
+    /// </summary>
+    /// <remarks>
+    /// No mapping the provider resolves on its own is shaped this way — every converter it uses also
+    /// changes the CLR type — but the shape is reachable from the public API through
+    /// <c>ElementType().HasConversion(...)</c>, which the model test below covers. This one drives
+    /// the mapping directly so the fast path is exercised without a model.
+    /// </remarks>
+    [Fact]
+    public void A_same_clr_type_component_converter_is_not_skipped_by_the_fast_path()
+    {
+        using var ctx = new CompositeElementDbContext(_fixture.ConnectionString);
+        var source = ctx.GetService<IRelationalTypeMappingSource>();
+        var stringMapping = source.FindMapping(typeof(string), "String")!;
+
+        // A converter that keeps the CLR type but changes the value.
+        var elementMapping = (RelationalTypeMapping)stringMapping.WithComposedConverter(
+            new ValueConverter<string, string>(v => v, v => v + "!"));
+        var arrayMapping = new ClickHouseArrayTypeMapping(elementMapping);
+
+        Assert.Equal(typeof(string[]), arrayMapping.ClrType);
+        Assert.NotNull(elementMapping.Converter);
+
+        // The driver hands back string[], which is already the target type.
+        var read = Read<string[]>(arrayMapping, new[] { "a", "b" });
+
+        Assert.Equal(["a!", "b!"], read);
+    }
+
+    /// <summary>
+    /// The fast path must survive for the case it exists to serve: a component whose read is a cast
+    /// and nothing more, as in a nested array. Here the driver's value is returned as it stands.
+    /// </summary>
+    [Fact]
+    public void An_already_typed_component_with_no_converter_passes_straight_through()
+    {
+        using var ctx = new CompositeElementDbContext(_fixture.ConnectionString);
+        var source = ctx.GetService<IRelationalTypeMappingSource>();
+        var innerArray = source.FindMapping(typeof(int[]), "Array(Int32)")!;
+        var outerArray = new ClickHouseArrayTypeMapping(innerArray);
+
+        // No converter, so a matching CLR type is proof enough that nothing is left to do.
+        Assert.Null(innerArray.Converter);
+
+        var driverValue = new[] { new[] { 1, 2 }, new[] { 3 } };
+        var read = Read<int[][]>(outerArray, driverValue);
+
+        Assert.Same(driverValue, read);
+    }
+
+    /// <summary>
+    /// The same hazard for a <c>Map</c>. Both the key and the value mapping must be checked, so this
+    /// puts the converter on the value and leaves the key alone.
+    /// </summary>
+    [Fact]
+    public void A_same_clr_type_map_value_converter_is_not_skipped_by_the_fast_path()
+    {
+        using var ctx = new CompositeElementDbContext(_fixture.ConnectionString);
+        var source = ctx.GetService<IRelationalTypeMappingSource>();
+        var stringMapping = source.FindMapping(typeof(string), "String")!;
+
+        var valueMapping = (RelationalTypeMapping)stringMapping.WithComposedConverter(
+            new ValueConverter<string, string>(v => v, v => v + "!"));
+        var mapMapping = new ClickHouseMapTypeMapping(stringMapping, valueMapping);
+
+        // The driver hands back the target dictionary type already.
+        var read = Read<Dictionary<string, string>>(
+            mapMapping,
+            new Dictionary<string, string> { ["k"] = "a" });
+
+        Assert.Equal("a!", read["k"]);
+    }
+
+    /// <summary>
+    /// The same hazard for a <c>Tuple</c>. A reference tuple is used, because a <c>ValueTuple</c>
+    /// target never reaches the fast path — the driver returns <c>System.Tuple&lt;&gt;</c>.
+    /// </summary>
+    [Fact]
+    public void A_same_clr_type_tuple_component_converter_is_not_skipped_by_the_fast_path()
+    {
+        using var ctx = new CompositeElementDbContext(_fixture.ConnectionString);
+        var source = ctx.GetService<IRelationalTypeMappingSource>();
+        var stringMapping = source.FindMapping(typeof(string), "String")!;
+
+        var componentMapping = (RelationalTypeMapping)stringMapping.WithComposedConverter(
+            new ValueConverter<string, string>(v => v, v => v + "!"));
+        var tupleMapping = new ClickHouseTupleTypeMapping(
+            [componentMapping, componentMapping],
+            useValueTuple: false);
+
+        Assert.Equal(typeof(Tuple<string, string>), tupleMapping.ClrType);
+
+        var read = Read<Tuple<string, string>>(tupleMapping, Tuple.Create("a", "b"));
+
+        Assert.Equal(Tuple.Create("a!", "b!"), read);
+    }
+
+    /// <summary>
+    /// The reachable route to the same shape: an element converter set through the public API. This
+    /// is why the gate matters rather than being defence against a shape nobody can build.
+    /// </summary>
+    [Fact]
+    public async Task An_element_converter_set_on_the_model_is_applied_on_read()
+    {
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+
+        // The fixture already created the database, so EnsureCreated would add nothing. Written
+        // outside EF anyway, because SaveChanges does not apply converters yet (#54).
+        using var create = connection.CreateCommand();
+        create.CommandText =
+            "CREATE TABLE IF NOT EXISTS element_converted (id Int64, tags Array(String)) "
+            + "ENGINE = MergeTree ORDER BY id";
+        await create.ExecuteNonQueryAsync();
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO element_converted VALUES (1, ['a', 'b'])";
+        await command.ExecuteNonQueryAsync();
+
+        using var readContext = new ElementConverterDbContext(_fixture.ConnectionString);
+        var row = await readContext.Entities.SingleAsync(e => e.Id == 1);
+
+        // Without the gate the driver's raw string[] would come straight through as "a", "b".
+        Assert.Equal(["a!", "b!"], row.Tags);
+    }
+
+    /// <summary>Compiles and runs a mapping's data-reader expression over one driver value.</summary>
+    private static T Read<T>(RelationalTypeMapping mapping, object driverValue)
+    {
+        var parameter = Expression.Parameter(typeof(object), "value");
+        var body = mapping.CustomizeDataReaderExpression(parameter);
+
+        return Expression.Lambda<Func<object, T>>(Expression.Convert(body, typeof(T)), parameter)
+            .Compile()(driverValue);
     }
 }
