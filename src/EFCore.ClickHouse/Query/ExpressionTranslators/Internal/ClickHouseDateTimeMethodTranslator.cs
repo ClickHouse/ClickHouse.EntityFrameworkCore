@@ -36,6 +36,7 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
         [ClickHouseInterval.Year] = "toIntervalYear",
     };
 
+    private static readonly MethodInfo ToStartOfWeekWithModeMethod;
     private static readonly MethodInfo ToStartOfIntervalMethod;
 
     static ClickHouseDateTimeMethodTranslator()
@@ -75,7 +76,7 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
         RegisterSourceOnly(nameof(DateTimeDbFunctions.ToStartOfFifteenMinutes), "toStartOfFifteenMinutes");
 
         // ToStartOfWeek(source, byte mode) -> toStartOfWeek
-        var weekWithMode = type.GetMethods().FirstOrDefault(m =>
+        ToStartOfWeekWithModeMethod = type.GetMethods().FirstOrDefault(m =>
         {
             if (m.Name != nameof(DateTimeDbFunctions.ToStartOfWeek) || !m.IsGenericMethod)
             {
@@ -88,7 +89,7 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
                    && parameters[1].ParameterType.IsGenericParameter
                    && parameters[2].ParameterType == typeof(byte);
         }) ?? throw new InvalidOperationException("Method ToStartOfWeek(source, mode) with strict signature not found.");
-        SupportedMethods.Add(weekWithMode, "toStartOfWeek");
+        SupportedMethods.Add(ToStartOfWeekWithModeMethod, "toStartOfWeek");
 
         ToStartOfIntervalMethod = type.GetMethods().FirstOrDefault(m =>
         {
@@ -121,6 +122,13 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
 
         if (SupportedMethods.TryGetValue(genericMethod, out var function))
         {
+            // ClickHouse requires the optional week mode to be constant for the query. SQL literals and
+            // parameters both satisfy that requirement, but row-dependent expressions (such as columns) do not.
+            if (genericMethod == ToStartOfWeekWithModeMethod && !IsQueryConstant(arguments[2]))
+            {
+                throw QueryConstantRequired(nameof(DateTimeDbFunctions.ToStartOfWeek), "mode");
+            }
+
             // arguments[0] is the DbFunctions receiver; the source is arguments[1].
             var sqlArguments = arguments.Skip(1).ToList();
             var source = sqlArguments[0];
@@ -140,7 +148,13 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
             var source = arguments[1];
             var value = arguments[2];
 
-            // The interval unit must be a compile-time constant so it can be mapped to a toInterval* function.
+            // ClickHouse requires the interval value to be constant for the query. The unit is stricter: it must
+            // be a SQL literal because its value selects the toInterval* function emitted into the SQL tree.
+            if (!IsQueryConstant(value))
+            {
+                throw QueryConstantRequired(nameof(DateTimeDbFunctions.ToStartOfInterval), "value");
+            }
+
             if (arguments[3] is not SqlConstantExpression { Value: ClickHouseInterval unit }
                 || !IntervalFunctions.TryGetValue(unit, out var intervalFunction))
             {
@@ -165,4 +179,12 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
 
         return null;
     }
+
+    private static bool IsQueryConstant(SqlExpression expression)
+        => expression is SqlConstantExpression or SqlParameterExpression;
+
+    private static InvalidOperationException QueryConstantRequired(string method, string argument)
+        => new(
+            $"The '{method}' method's '{argument}' argument must be a SQL literal or query parameter because " +
+            "ClickHouse requires it to be constant for the query. Row-dependent expressions cannot be translated.");
 }

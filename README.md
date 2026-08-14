@@ -119,7 +119,7 @@ var buckets = await ctx.Events
     .ToListAsync();
 ```
 
-`ToStartOfInterval` takes a `ClickHouseInterval` unit (`Second`, `Minute`, `Hour`, `Day`, `Week`, `Month`, `Quarter`, `Year`) — from the `ClickHouse.EntityFrameworkCore.Metadata` namespace — and emits `toStartOfInterval(source, toInterval<unit>(value))`. The unit must be a constant.
+`ToStartOfInterval` takes a `ClickHouseInterval` unit (`Second`, `Minute`, `Hour`, `Day`, `Week`, `Month`, `Quarter`, `Year`) — from the `ClickHouse.EntityFrameworkCore.Metadata` namespace — and emits `toStartOfInterval(source, toInterval<unit>(value))`. The unit must be an inline enum constant. The interval size and optional `ToStartOfWeek` mode may be literals or captured query parameters, but cannot depend on values from the current row.
 
 Input and return types follow ClickHouse. The calendar buckets (`ToStartOfYear`/`Quarter`/`Month`/`Week`) return `Date`; `ToStartOfDay` and the hour/minute buckets return `DateTime`; `ToStartOfSecond` returns `DateTime64`. They all accept `DateTime` and `DateTime64` columns, and the plain truncation functions also accept `DateOnly` (Date/Date32). `ToStartOfInterval` is the exception: older ClickHouse rejects a `DateOnly` (Date/Date32) source with `Illegal type Date32 of 1st argument` while recent versions accept it. Prefer a `DateTime`/`DateTime64` column for interval bucketing.
 

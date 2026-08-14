@@ -57,7 +57,10 @@ public static class ClickHouseDateTimeDbFunctionsExtensions
     /// </summary>
     /// <param name="_">The <see cref="DbFunctions"/> instance.</param>
     /// <param name="source">The date or date-time value to truncate.</param>
-    /// <param name="mode">The ClickHouse week mode (0-9) that determines the first day of the week.</param>
+    /// <param name="mode">
+    /// The ClickHouse week mode (0-9) that determines the first day of the week. Must be a literal or captured
+    /// query parameter; row-dependent expressions cannot be translated.
+    /// </param>
     [DbFunction("toStartOfWeek")]
     public static T ToStartOfWeek<T>(this DbFunctions _, T source, byte mode) =>
         throw new InvalidOperationException(CoreStrings.FunctionOnClient(nameof(ToStartOfWeek)));
@@ -144,7 +147,10 @@ public static class ClickHouseDateTimeDbFunctionsExtensions
     /// (<c>Date</c>/<c>Date32</c>) source for <c>toStartOfInterval</c> with
     /// <c>Illegal type Date32 of 1st argument</c> while recent versions accept it.
     /// </param>
-    /// <param name="value">The number of interval units in each bucket.</param>
+    /// <param name="value">
+    /// The number of interval units in each bucket. Must be a literal or captured query parameter;
+    /// row-dependent expressions cannot be translated.
+    /// </param>
     /// <param name="unit">The interval unit. Must be a constant so it can be translated to SQL.</param>
     [DbFunction("toStartOfInterval")]
     public static T ToStartOfInterval<T>(this DbFunctions _, T source, int value, ClickHouseInterval unit) =>
