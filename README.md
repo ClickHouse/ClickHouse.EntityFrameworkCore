@@ -221,6 +221,64 @@ ClickHouse returns `NULL` from a scalar subquery that matches no rows, where sta
 
 ### Date/Time Functions
 
+#### Standard members and methods
+
+The standard .NET date/time members translate to ClickHouse functions, for both `DateTime` and `DateOnly`:
+
+| .NET | ClickHouse |
+| --- | --- |
+| `.Year` `.Month` `.Day` | `toYear` `toMonth` `toDayOfMonth` |
+| `.Hour` `.Minute` `.Second` `.Millisecond` | `toHour` `toMinute` `toSecond` `toMillisecond` |
+| `.DayOfYear` | `toDayOfYear` |
+| `.DayOfWeek` | `toDayOfWeek(x, 2)` |
+| `.Date` | `toStartOfDay` |
+| `.TimeOfDay` | `toTime64(x, 7)` |
+| `.AddYears(n)` `.AddMonths(n)` | `addYears` `addMonths` |
+| `.AddDays(n)` `.AddHours(n)` `.AddMinutes(n)` `.AddSeconds(n)` `.AddMilliseconds(n)` | `addDays` `addHours` … (see below) |
+| `DateTime.UtcNow` | `now64(7, 'UTC')` |
+| `DateTime.Now` | `now64(7)` |
+| `DateTime.Today` | `toStartOfDay(now())` |
+
+```csharp
+// Runs entirely on the server
+var busyHours = await ctx.Events
+    .Where(e => e.Timestamp.Year == 2026 && e.Timestamp.DayOfWeek == DayOfWeek.Sunday)
+    .GroupBy(e => e.Timestamp.Hour)
+    .Select(g => new { Hour = g.Key, Count = g.Count() })
+    .ToListAsync();
+
+var recent = await ctx.Events
+    .Where(e => e.Timestamp > DateTime.UtcNow.AddDays(-7))
+    .ToListAsync();
+```
+
+`DateOnly` gets the date components only, which are the members it declares. `DateTimeOffset` is not covered yet, because it has no store mapping — see [#53](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/53).
+
+Five points are worth knowing:
+
+**`.DayOfWeek` needs no correction.** ClickHouse week mode 2 agrees with `System.DayOfWeek` exactly — Sunday is 0 through to Saturday 6 — so the value is used as it comes back. The mode argument is always sent, because the default mode starts the week on Monday.
+
+**`.Now` and `.Today` read the server clock**, so they follow the *server's* timezone, not the client's, and they come back with `DateTimeKind.Unspecified`. Use `DateTime.UtcNow` when you need an instant that does not depend on server configuration.
+
+**`.Date` narrows outside 1970–2106.** `toStartOfDay` returns a `DateTime`, and ClickHouse *wraps* a value outside that window instead of reporting it — so `.Date` on a `DateTime64` column holding a pre-1970 date reads back wrong. Enable [`enable_extended_results_for_datetime_functions`](https://clickhouse.com/docs/operations/settings/settings#enable_extended_results_for_datetime_functions) — for example `set_enable_extended_results_for_datetime_functions=1` in the connection string — to get a range-preserving `DateTime64` result.
+
+**A fractional `Add*` argument is exact or is not translated.** `AddDays` and the other time-based methods take a `double`, which .NET scales to whole *ticks* (100 ns), so `AddSeconds(0.1234567)` adds exactly 1 234 567 ticks. The ClickHouse `addDays` function takes a whole number of days and discards the rest, so it cannot be used directly. A constant argument is folded to ticks and then expressed in the coarsest unit that holds it exactly:
+
+```csharp
+e.Timestamp.AddDays(1)                // addDays(ts, 1)
+e.Timestamp.AddDays(1.5)              // addMilliseconds(ts, 129600000)
+e.Timestamp.AddMilliseconds(0.5)      // not translated — 5 000 ticks is below millisecond resolution
+e.Timestamp.AddDays(offsetVariable)    // not translated — cannot be checked for exactness
+```
+
+The natural function keeps the column's store type, and it is the only form that works on a `Date`/`Date32` column — ClickHouse rejects `addMilliseconds` on those. Anything the provider cannot express exactly is left untranslated rather than rounded to fit, so a projection still gives the correct .NET value through client evaluation, while a predicate reports why. `DateOnly.AddDays` takes an `int`, so it always emits `addDays`.
+
+**Arithmetic on two date/time values is not translated.** `dt1 - dt2` and `time1 - time2` give a `TimeSpan`, and `date + timeSpan` mixes types ClickHouse rejects; `dateDiff` returns a count of whole units, and `Time64` subtraction returns a decimal number of seconds. In a projection EF Core reads the columns and does the arithmetic on the client, which gives the correct result. In a predicate there is no client fallback, so the query fails with an explanation.
+
+Not yet translated: `.Ticks`, `.AddTicks`, and the `.Microsecond`/`.Nanosecond` members.
+
+#### `toStartOf*` bucketing
+
 The ClickHouse `toStartOf*` family is exposed through `EF.Functions`, so you can bucket and truncate timestamps directly in queries, including in `GROUP BY`:
 
 `ToStartOfYear`, `ToStartOfQuarter`, `ToStartOfMonth`, `ToStartOfWeek` (with an optional ClickHouse week `mode`), `ToStartOfDay`, `ToStartOfHour`, `ToStartOfMinute`, `ToStartOfSecond`, `ToStartOfFiveMinutes`, `ToStartOfTenMinutes`, `ToStartOfFifteenMinutes`, and the general `ToStartOfInterval(source, value, unit)`.

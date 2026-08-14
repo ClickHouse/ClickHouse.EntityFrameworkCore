@@ -16,6 +16,7 @@ public class ClickHouseMemberTranslatorProvider : RelationalMemberTranslatorProv
         [
             new ClickHouseArrayMethodTranslator(sqlExpressionFactory, typeMappingSource),
             new ClickHouseStringMethodTranslator(sqlExpressionFactory),
+            new ClickHouseDateTimeMemberTranslator(sqlExpressionFactory, typeMappingSource),
         ]);
     }
 }
