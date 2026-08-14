@@ -15,6 +15,9 @@ public class DateTimeMemberEntity
 
     /// <summary>Mapped to ClickHouse <c>Date32</c>.</summary>
     public DateOnly Date { get; set; }
+
+    /// <summary>Mapped to ClickHouse <c>DateTime64(7, 'UTC')</c> by the DateTimeOffset mapping.</summary>
+    public DateTimeOffset Offset { get; set; }
 }
 
 public class DateTimeMemberDbContext : DbContext
@@ -43,6 +46,7 @@ public class DateTimeMemberDbContext : DbContext
             entity.Property(e => e.Timestamp).HasColumnName("ts");
             entity.Property(e => e.Timestamp64).HasColumnName("ts64").HasColumnType("DateTime64(7)");
             entity.Property(e => e.Date).HasColumnName("d");
+            entity.Property(e => e.Offset).HasColumnName("off");
         });
     }
 }
@@ -74,7 +78,8 @@ public class DateTimeMemberFixture : IAsyncLifetime
                                     id Int64,
                                     ts DateTime,
                                     ts64 DateTime64(7),
-                                    d Date32
+                                    d Date32,
+                                    off DateTime64(7, 'UTC')
                                 ) ENGINE = MergeTree()
                                 ORDER BY id
                                 """;
@@ -83,9 +88,9 @@ public class DateTimeMemberFixture : IAsyncLifetime
         using var insertCmd = connection.CreateCommand();
         // Row 2 is the last day of a month, so AddMonths and AddYears have a day to clamp.
         insertCmd.CommandText = """
-                                INSERT INTO datetime_member_test (id, ts, ts64, d) VALUES
-                                (1, '2026-08-16 13:47:32', '2026-08-16 13:47:32.1234567', '2026-08-16'),
-                                (2, '2026-01-31 00:00:00', '2026-01-31 00:00:00.0000000', '2026-01-31')
+                                INSERT INTO datetime_member_test (id, ts, ts64, d, off) VALUES
+                                (1, '2026-08-16 13:47:32', '2026-08-16 13:47:32.1234567', '2026-08-16', '2026-08-16 13:47:32.1234567'),
+                                (2, '2026-01-31 00:00:00', '2026-01-31 00:00:00.0000000', '2026-01-31', '2026-01-31 00:00:00.0000000')
                                 """;
         await insertCmd.ExecuteNonQueryAsync();
     }
@@ -222,6 +227,91 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
         Assert.Equal(16, result.Day);
         Assert.Equal(228, result.DayOfYear);
         Assert.Equal(DayOfWeek.Sunday, result.DayOfWeek);
+    }
+
+    // ---------------------------------------------------------------- DateTimeOffset
+
+    [Fact]
+    public async Task DateTimeOffset_components_translate()
+    {
+        var result = await SelectSingleAsync(q => q.Select(e => new
+        {
+            e.Offset.Year,
+            e.Offset.Month,
+            e.Offset.Day,
+            e.Offset.Hour,
+            e.Offset.Minute,
+            e.Offset.Second,
+            e.Offset.DayOfYear,
+            e.Offset.DayOfWeek
+        }));
+
+        // The store type is UTC-pinned, and a value read back carries +00:00, so every component
+        // describes the same instant on both sides.
+        Assert.Equal(2026, result.Year);
+        Assert.Equal(8, result.Month);
+        Assert.Equal(16, result.Day);
+        Assert.Equal(13, result.Hour);
+        Assert.Equal(47, result.Minute);
+        Assert.Equal(32, result.Second);
+        Assert.Equal(228, result.DayOfYear);
+        Assert.Equal(DayOfWeek.Sunday, result.DayOfWeek);
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_components_agree_with_dotnet()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+
+        var expected = await context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Offset).SingleAsync();
+        var actual = await SelectSingleAsync(q => q.Select(e => new { e.Offset.Year, e.Offset.Hour, e.Offset.Second }));
+
+        Assert.Equal(expected.Year, actual.Year);
+        Assert.Equal(expected.Hour, actual.Hour);
+        Assert.Equal(expected.Second, actual.Second);
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_Date_translates()
+        => Assert.Equal(
+            new DateTime(2026, 8, 16),
+            await SelectSingleAsync(q => q.Select(e => e.Offset.Date)));
+
+    [Fact]
+    public async Task DateTimeOffset_TimeOfDay_keeps_tick_precision()
+        => Assert.Equal(
+            DateTimeMemberFixture.InstantTimeOfDay,
+            await SelectSingleAsync(q => q.Select(e => e.Offset.TimeOfDay)));
+
+    [Fact]
+    public async Task DateTimeOffset_AddDays_translates()
+    {
+        var result = await SelectSingleAsync(q => q.Select(e => e.Offset.AddDays(1)));
+
+        Assert.Equal(new DateTimeOffset(2026, 8, 17, 13, 47, 32, TimeSpan.Zero).AddTicks(1_234_567), result);
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_AddMonths_clamps_like_dotnet()
+        => Assert.Equal(
+            new DateTimeOffset(2026, 2, 28, 0, 0, 0, TimeSpan.Zero),
+            await SelectSingleAsync(q => q.Select(e => e.Offset.AddMonths(1)), id: 2));
+
+    [Fact]
+    public async Task DateTimeOffset_DayOfWeek_compares_against_a_dotnet_constant()
+        => Assert.Equal([1L], await WhereIdsAsync(e => e.Offset.DayOfWeek == DayOfWeek.Sunday));
+
+    [Fact]
+    public async Task DateTimeOffset_UtcNow_runs_on_the_server()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.Offset < DateTimeOffset.UtcNow.AddYears(100))
+            .Select(e => e.Id);
+
+        Assert.Contains("now64", query.ToQueryString());
+        Assert.Equal([1L, 2L], await query.OrderBy(id => id).ToListAsync());
     }
 
     // ---------------------------------------------------------------- Add*

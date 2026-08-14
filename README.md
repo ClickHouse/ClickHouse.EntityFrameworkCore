@@ -176,8 +176,9 @@ ambiguous, and it does not change before 1900. Two points of its own do:
 `List<DateTimeOffset>`, `Dictionary<string, DateTimeOffset>` and `Tuple<DateTimeOffset, …>` all
 round trip.
 
-`DateTimeOffset` members such as `.Year` and `.UtcDateTime` do not translate to SQL yet. This
-applies to `DateTime` as well — see [#55](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/55).
+The standard members and methods — `.Year`, `.DayOfWeek`, `.AddDays(n)` and the rest — translate to
+SQL; see [Date/Time Functions](#datetime-functions). `.UtcDateTime`, `.LocalDateTime` and `.Offset`
+do not.
 
 ## Current Status
 
@@ -223,7 +224,7 @@ ClickHouse returns `NULL` from a scalar subquery that matches no rows, where sta
 
 #### Standard members and methods
 
-The standard .NET date/time members translate to ClickHouse functions, for both `DateTime` and `DateOnly`:
+The standard .NET date/time members translate to ClickHouse functions, for `DateTime`, `DateTimeOffset` and `DateOnly` alike:
 
 | .NET | ClickHouse |
 | --- | --- |
@@ -252,7 +253,7 @@ var recent = await ctx.Events
     .ToListAsync();
 ```
 
-`DateOnly` gets the date components only, which are the members it declares. `DateTimeOffset` is not covered yet, because it has no store mapping — see [#53](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/53).
+`DateOnly` gets the date components only, which are the members it declares. For a `DateTimeOffset` property the result is in the timezone the column declares, which the store type pins to UTC — that agrees with .NET, because a value read back carries the `+00:00` offset.
 
 Five points are worth knowing:
 

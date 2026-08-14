@@ -122,13 +122,10 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
         }) ?? throw new InvalidOperationException("Method ToStartOfInterval with strict signature not found.");
 
         RegisterAddMethods(typeof(DateTime), hasTimeComponents: true);
+        RegisterAddMethods(typeof(DateTimeOffset), hasTimeComponents: true);
 
         // DateOnly declares no time-based Add* method, and its AddDays takes an int.
         RegisterAddMethods(typeof(DateOnly), hasTimeComponents: false);
-
-        // DateTimeOffset is deliberately absent: the provider has no DateTimeOffset store mapping yet,
-        // so such a property resolves to String and these functions would either fail on the server or
-        // silently drop the offset. Add it here together with the mapping (issue #53).
     }
 
     /// <summary>

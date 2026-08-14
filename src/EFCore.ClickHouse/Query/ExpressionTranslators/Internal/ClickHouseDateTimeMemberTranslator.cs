@@ -13,10 +13,17 @@ namespace ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 /// and <see cref="DateOnly"/> to ClickHouse functions.
 /// </summary>
 /// <remarks>
+/// <para>
 /// One class serves all three CLR types, because the ClickHouse function is the same for each: the
 /// <c>to*</c> extraction functions accept <c>Date</c>, <c>Date32</c>, <c>DateTime</c> and
 /// <c>DateTime64</c> alike. <see cref="RegisterInstanceMembers"/> registers the members that the
 /// given type declares, so <see cref="DateOnly"/> gets the date components only.
+/// </para>
+/// <para>
+/// For <see cref="DateTimeOffset"/> the result is in the timezone the column declares, which the
+/// provider pins to UTC. That agrees with .NET, because a value read back from such a column carries
+/// the <c>+00:00</c> offset, so <c>.Hour</c> and <c>.Date</c> describe the same instant on both sides.
+/// </para>
 /// </remarks>
 public class ClickHouseDateTimeMemberTranslator : IMemberTranslator
 {
@@ -69,16 +76,17 @@ public class ClickHouseDateTimeMemberTranslator : IMemberTranslator
     static ClickHouseDateTimeMemberTranslator()
     {
         RegisterInstanceMembers(typeof(DateTime), hasTimeComponents: true);
+        RegisterInstanceMembers(typeof(DateTimeOffset), hasTimeComponents: true);
         RegisterInstanceMembers(typeof(DateOnly), hasTimeComponents: false);
 
         ServerClockMembers.Add(Property(typeof(DateTime), nameof(DateTime.UtcNow)), ServerClock.UtcNow);
         ServerClockMembers.Add(Property(typeof(DateTime), nameof(DateTime.Now)), ServerClock.LocalNow);
         ServerClockMembers.Add(Property(typeof(DateTime), nameof(DateTime.Today)), ServerClock.LocalToday);
 
-        // DateTimeOffset is deliberately absent, even though every function here would serve it. The
-        // provider has no DateTimeOffset store mapping yet, so such a property resolves to String: the
-        // extraction functions then fail on the server, and addDays silently drops the offset and the
-        // sub-second part. Register it here together with the mapping (issue #53).
+        // A DateTimeOffset is an instant, and its store type is UTC-pinned, so both of its clock
+        // members read the same UTC value.
+        ServerClockMembers.Add(Property(typeof(DateTimeOffset), nameof(DateTimeOffset.UtcNow)), ServerClock.UtcNow);
+        ServerClockMembers.Add(Property(typeof(DateTimeOffset), nameof(DateTimeOffset.Now)), ServerClock.UtcNow);
     }
 
     public ClickHouseDateTimeMemberTranslator(
