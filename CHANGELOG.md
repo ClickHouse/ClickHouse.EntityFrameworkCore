@@ -8,6 +8,9 @@ v0.3.1 (Unreleased)
 * `Sum`/`SumAsync` over a `double` or `float` column no longer throws `InvalidCastException`. EF Core wraps a top-level aggregate so the empty case returns `0`, supplying that fallback as a boxed `Int32` carrying the `Float64`/`Float32` mapping; the literal generators now convert rather than unbox. The `Float32` read path also converts, since ClickHouse widens `sum(Float32)` to `Float64` (which the driver's `GetFloat()` refuses to downcast). ([#46](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/46))
 * **SummingMergeTree with multiple sum columns**: `HasSummingMergeTreeEngine("A", "B")` now generates valid DDL (`SummingMergeTree((A, B))`). Previously it emitted a comma-separated argument list (`SummingMergeTree(A, B)`), which ClickHouse rejects with `NUMBER_OF_ARGUMENTS_DOESNT_MATCH`. Single-column and no-column usage are unaffected.
 
+### Dependencies
+* **`ClickHouse.Driver` 1.3.0 → [1.4.0](https://github.com/ClickHouse/clickhouse-cs/releases/tag/1.4.0)** across the provider and both test projects (the pins must move together or restore fails with `NU1605`). No provider code changes were required. Two driver behaviour changes are worth knowing: query responses are now compressed with **zstd** instead of gzip by default (decoded transparently, no action needed), and reading a column from `ClickHouseDataReader` with no current row now throws `InvalidOperationException` instead of returning a value. The provider's own materialization always positions the reader first, so the latter only affects code that uses the underlying `ClickHouseConnection` directly.
+
 v0.3.0
 ---
 ### Advanced queries
