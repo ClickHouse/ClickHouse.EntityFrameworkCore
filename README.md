@@ -67,7 +67,7 @@ public class PageView
 | **Bool** | `Bool` | `bool` |
 | **Strings** | `String`, `FixedString(N)` | `string` |
 | **Enums** | `Enum8(...)`, `Enum16(...)` | `string` or C# `enum` |
-| **Date/time** | `Date`, `Date32`, `DateTime`, `DateTime64(P, 'TZ')` | `DateOnly`, `DateTime` |
+| **Date/time** | `Date`, `Date32`, `DateTime`, `DateTime64(P, 'TZ')` | `DateOnly`, `DateTime`, `DateTimeOffset` (see [below](#datetimeoffset)) |
 | **Time** | `Time`, `Time64(N)` | `TimeSpan` |
 | **UUID** | `UUID` | `Guid` |
 | **Network** | `IPv4`, `IPv6` | `IPAddress` |
@@ -79,6 +79,105 @@ public class PageView
 | **JSON** | `Json` | `JsonNode` or `string` |
 | **Geographic** | `Point`, `Ring`, `LineString`, `Polygon`, `MultiLineString`, `MultiPolygon`, `Geometry` | `Tuple<double,double>` and arrays thereof; `object` for Geometry |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
+
+### DateTimeOffset
+
+A `DateTimeOffset` property maps to `DateTime64(7, 'UTC')` by default:
+
+```csharp
+public class Reading
+{
+    public long Id { get; set; }
+    public DateTimeOffset RecordedAt { get; set; }   // DateTime64(7, 'UTC')
+}
+```
+
+Three things to know:
+
+**The offset is not kept.** ClickHouse has no type that stores a UTC offset. `DateTime64` holds an
+instant, and a declared timezone only decides how that instant is rendered. A value written with
+any offset is stored as the correct instant, and a value read back carries the offset of the
+column's timezone — `+00:00` for the default store type. With that default store type, comparisons
+and ordering are instant-correct, so these two values match the same row:
+
+```csharp
+// The same instant, written two ways.
+var a = new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.FromHours(5));
+var b = new DateTimeOffset(2026, 1, 15,  5, 0, 0, TimeSpan.Zero);
+```
+
+If you must keep the offset, store it yourself in a second column alongside a `DateTime`. To keep
+the whole value as text, ask for the conversion explicitly with `HasConversion<string>()` — note
+that `HasColumnType("String")` on its own is not enough, because it adds no converter. Such a
+column is read-only for now: `SaveChanges` cannot write any property that has a value converter
+([#54](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/54)).
+
+**Precision 7 makes the round trip exact.** One .NET tick is 100 ns, which is precision 7, so a
+stored value never comes back truncated. Precision 7 also covers the full `DateTimeOffset` range,
+which lets you use `DateTimeOffset.MinValue` and `MaxValue` as open-ended range limits on the
+default store type. Keep those two sentinels to a column whose timezone offset is zero, such as the
+default `'UTC'`. Both sit at the edge of the `DateTime` range, and the driver has to build a wall
+clock in the column's timezone to return a value, so any non-zero offset pushes one end outside
+`DateTime`: reading `MaxValue` from a `DateTime64(7, 'Asia/Tokyo')` column throws. Choose a smaller
+precision if you prefer, but be aware that it discards the digits below it:
+
+```csharp
+b.Property(e => e.RecordedAt).HasColumnType("DateTime64(3, 'UTC')");   // milliseconds
+b.Property(e => e.RecordedAt).HasPrecision(3);                         // the same thing
+```
+
+Precision 8 and 9 are accepted, but they hold a narrower range of dates. ClickHouse stores a
+`DateTime64(P)` as an `Int64` count of 10^-P seconds, so precision 9 reaches only 1678 to 2262 and
+precision 8 about 1970 ± 2900 years. A value outside the range wraps rather than reporting, so the
+provider checks it and throws on write instead. Precision 7 has no such limit — it spans roughly
+29 000 years, which is why it is the default. Note also that .NET cannot represent more than 7
+fractional digits, so the extra precision stores no extra detail.
+
+**Keep `'UTC'` in the store type** unless you have a reason to change it. For a timezone-less type
+such as `DateTime64(7)`, the server reads the query parameter in its `session_timezone`, which moves
+the instant when that setting is not UTC.
+
+A column that declares a different timezone, for example `DateTime64(6, 'Asia/Tokyo')`, is read
+correctly and returns that zone's offset. Two limits apply to such a column:
+
+- The host operating system must know the timezone, or the read throws. Minimal Linux images may
+  need the `tzdata` package.
+- In a zone with daylight saving, the repeated hour when clocks go back is ambiguous, because the
+  driver gives a wall clock and drops the offset. The provider recovers the instant where the zone's
+  standard offset is zero, such as `Europe/London`. Where both candidate offsets are non-zero, such
+  as `Europe/Paris`, the instant cannot be recovered and the read throws — reporting one of the two
+  would move the instant and give the same result for two different ones.
+- A value before 1900 in a named zone throws. Before standard time a zone's offset is Local Mean
+  Time, which IANA records to the second (`+09:18:59` for `Asia/Tokyo`) while `TimeZoneInfo` may
+  round it to the minute, so the instant cannot be reproduced exactly. Store such a value in a
+  `'UTC'` column, which has no such offset.
+- Dates at the far ends of the `DateTimeOffset` range do not survive, as described above.
+
+A column can also declare a fixed UTC offset instead of a named zone. ClickHouse spells this
+`Fixed/UTC±HH:MM:SS`, with two digits in every field — the server rejects `Fixed/UTC+5:30:00` and
+`Fixed/UTC+05:30`:
+
+```csharp
+b.Property(e => e.RecordedAt).HasColumnType("DateTime64(7, 'Fixed/UTC+05:30:00')");
+```
+
+None of the limits above applies here: the host needs no timezone data, a fixed offset is never
+ambiguous, and it does not change before 1900. Two points of its own do:
+
+- `DateTimeOffset` holds an offset only within plus or minus 14 hours, and only in whole minutes,
+  while ClickHouse accepts more. Such a column still reads correctly — the instant is exact, because
+  the offset is known — but the value comes back at offset `+00:00` rather than the column's offset.
+  This mapping does not keep the offset in any case.
+- ClickHouse does not hold the minutes and seconds fields to 59 — it carries the excess, so
+  `Fixed/UTC+05:60:00` is a legal name for `+06:00`. The driver does not read such a name, so the
+  read throws rather than depend on that. Declare the offset as `Fixed/UTC+06:00:00` instead.
+
+`DateTimeOffset` also composes into the collection types, so `DateTimeOffset[]`,
+`List<DateTimeOffset>`, `Dictionary<string, DateTimeOffset>` and `Tuple<DateTimeOffset, …>` all
+round trip.
+
+`DateTimeOffset` members such as `.Year` and `.UtcDateTime` do not translate to SQL yet. This
+applies to `DateTime` as well — see [#55](https://github.com/ClickHouse/ClickHouse.EntityFrameworkCore/issues/55).
 
 ## Current Status
 
@@ -272,7 +371,7 @@ Configure ClickHouse table engines, ordering, partitioning, and more via EF Core
 ```csharp
 modelBuilder.Entity<SensorReading>(b =>
 {
-    b.HasKey(e => e.Id);
+    b.HasKey(e => e.Id); // becomes ORDER BY (the ClickHouse primary key) when no explicit ORDER BY is set
     b.Property(e => e.Temperature).HasCodec("Delta, ZSTD");
     b.Property(e => e.Location).HasColumnComment("Installation site");
     b.HasIndex(e => e.Timestamp)
@@ -297,6 +396,8 @@ modelBuilder.Entity<SensorReading>(b =>
 **Engine settings:** `.WithSetting("index_granularity", "4096")` — any ClickHouse setting as a key-value pair
 
 **Default behavior:** If no engine is configured, the provider defaults to `MergeTree` with the EF primary key as `ORDER BY`.
+
+**Primary key vs sorting key:** In ClickHouse the `ORDER BY` (sorting key) *is* the primary key, so `HasKey` alone is sufficient — it becomes `ORDER BY`. Only use `.WithPrimaryKey(...)` when you need the primary index to differ from the sort order (e.g. a `SummingMergeTree`/`AggregatingMergeTree` rollup with a long `ORDER BY` but a narrow index). ClickHouse requires the primary key to be a prefix of the `ORDER BY` columns.
 
 ### Migrations
 

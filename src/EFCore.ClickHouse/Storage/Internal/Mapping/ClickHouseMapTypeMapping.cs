@@ -13,15 +13,27 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
     private static readonly MethodInfo GetValueMethod =
         typeof(DbDataReader).GetRuntimeMethod(nameof(DbDataReader.GetValue), [typeof(int)])!;
 
+    private static readonly MethodInfo ConvertMapMethod =
+        typeof(ClickHouseMapTypeMapping).GetMethod(nameof(ConvertMap), BindingFlags.Static | BindingFlags.NonPublic)!;
+
     public RelationalTypeMapping KeyMapping { get; }
     public RelationalTypeMapping ValueMapping { get; }
+
+    // The CLR types this Map is built from. See ClickHouseNullableElementMapping.ComponentClrType
+    // for why the component mapping's own ClrType is not enough.
+    private Type KeyComponentClrType => ClickHouseNullableElementMapping.ComponentClrType(KeyMapping);
+    private Type ValueComponentClrType => ClickHouseNullableElementMapping.ComponentClrType(ValueMapping);
 
     public ClickHouseMapTypeMapping(RelationalTypeMapping keyMapping, RelationalTypeMapping valueMapping)
         : base(
             new RelationalTypeMappingParameters(
                 new CoreTypeMappingParameters(
-                    typeof(Dictionary<,>).MakeGenericType(keyMapping.ClrType, valueMapping.ClrType),
-                    comparer: CreateDictionaryComparer(keyMapping.ClrType, valueMapping.ClrType)),
+                    typeof(Dictionary<,>).MakeGenericType(
+                        ClickHouseNullableElementMapping.ComponentClrType(keyMapping),
+                        ClickHouseNullableElementMapping.ComponentClrType(valueMapping)),
+                    comparer: CreateDictionaryComparer(
+                        ClickHouseNullableElementMapping.ComponentClrType(keyMapping),
+                        ClickHouseNullableElementMapping.ComponentClrType(valueMapping))),
                 $"Map({keyMapping.StoreType}, {valueMapping.StoreType})",
                 dbType: System.Data.DbType.Object))
     {
@@ -46,7 +58,50 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
         => GetValueMethod;
 
     public override Expression CustomizeDataReaderExpression(Expression expression)
-        => Expression.Convert(expression, ClrType);
+    {
+        // A key or value whose CLR type differs from what the driver produces (DateTimeOffset and
+        // DateOnly both arrive as DateTime) needs the dictionary rebuilt entry by entry. Casting
+        // the whole dictionary would throw InvalidCastException.
+        if (!ClickHouseComponentConversion.NeedsConversion(KeyMapping)
+            && !ClickHouseComponentConversion.NeedsConversion(ValueMapping))
+        {
+            return Expression.Convert(expression, ClrType);
+        }
+
+        Expression converted = Expression.Call(
+            ConvertMapMethod.MakeGenericMethod(KeyComponentClrType, ValueComponentClrType),
+            expression,
+            ClickHouseComponentConversion.CreateConverter(KeyMapping, KeyComponentClrType),
+            ClickHouseComponentConversion.CreateConverter(ValueMapping, ValueComponentClrType),
+            Expression.Constant(
+                ClickHouseComponentConversion.CanPassThrough(KeyMapping)
+                && ClickHouseComponentConversion.CanPassThrough(ValueMapping)));
+
+        return converted.Type == ClrType ? converted : Expression.Convert(converted, ClrType);
+    }
+
+    private static Dictionary<TKey, TValue> ConvertMap<TKey, TValue>(
+        object value,
+        Func<object, TKey> convertKey,
+        Func<object, TValue> convertValue,
+        bool canPassThrough)
+        where TKey : notnull
+    {
+        // See ClickHouseComponentConversion.CanPassThrough for when a dictionary the driver already
+        // typed needs no rebuilding.
+        if (canPassThrough && value is Dictionary<TKey, TValue> alreadyTyped)
+            return alreadyTyped;
+
+        var source = (IDictionary)value;
+        var result = new Dictionary<TKey, TValue>(source.Count);
+        foreach (DictionaryEntry entry in source)
+        {
+            result[convertKey(entry.Key)] =
+                entry.Value is null or DBNull ? default! : convertValue(entry.Value);
+        }
+
+        return result;
+    }
 
     protected override string GenerateNonNullSqlLiteral(object value)
     {
