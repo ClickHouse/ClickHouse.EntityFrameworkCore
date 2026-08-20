@@ -91,6 +91,7 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
     {
         var s = storeType.AsSpan().Trim();
 
+        // LowCardinality is the only wrapper ClickHouse allows outside Nullable, so Nullable( is not always first.
         // LowCardinality(Nullable(T)) is already nullable; the wrapper must not be added again.
         if (s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase) && s.EndsWith(")"))
             s = s["LowCardinality(".Length..^1].Trim();
