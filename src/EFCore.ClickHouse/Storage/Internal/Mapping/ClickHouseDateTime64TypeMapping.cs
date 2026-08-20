@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 
-public class ClickHouseDateTime64TypeMapping : RelationalTypeMapping
+public class ClickHouseDateTime64TypeMapping : RelationalTypeMapping, IClickHouseTimezoneTypeMapping
 {
     private const int DefaultPrecision = 3;
 

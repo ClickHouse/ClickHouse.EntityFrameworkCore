@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
 
@@ -7,6 +8,13 @@ namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpressionVisitor
 {
     private readonly ClickHouseArrayLinqTranslator _arrayLinqTranslator;
+
+    /// <summary>
+    /// Reasons already reported for this translation. A single unsupported call can be reached more
+    /// than once — the same expression may appear twice in a predicate, and building the reason for an
+    /// <c>Add*</c> call re-visits its operands — so the set keeps the message from repeating.
+    /// </summary>
+    private readonly HashSet<string> _reportedTranslationErrors = new(StringComparer.Ordinal);
 
     public ClickHouseSqlTranslatingExpressionVisitor(
         RelationalSqlTranslatingExpressionVisitorDependencies dependencies,
@@ -41,7 +49,100 @@ public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatin
     /// <c>Select(...).Contains(...)</c> lambda patterns.
     /// </summary>
     protected override Expression VisitMethodCall(MethodCallExpression methodCallExpression)
-        => _arrayLinqTranslator.TryTranslate(methodCallExpression, out var translated)
-            ? translated
-            : base.VisitMethodCall(methodCallExpression);
+    {
+        if (_arrayLinqTranslator.TryTranslate(methodCallExpression, out var arrayTranslation))
+        {
+            return arrayTranslation;
+        }
+
+        var translated = base.VisitMethodCall(methodCallExpression);
+
+        if (translated == QueryCompilationContext.NotTranslatedExpression
+            && ClickHouseDateTimeMethodTranslator.IsAddMethod(methodCallExpression.Method)
+            && methodCallExpression.Object is { } methodInstance
+            && methodCallExpression.Arguments is [var methodArgument]
+            && Visit(methodInstance) is SqlExpression sqlInstance
+            && Visit(methodArgument) is SqlExpression sqlArgument
+            && ClickHouseDateTimeMethodTranslator.GetUnsupportedAddTranslationErrorDetails(
+                methodCallExpression.Method, sqlInstance, sqlArgument) is { } errorDetails)
+        {
+            ReportTranslationError(errorDetails);
+        }
+
+        return translated;
+    }
+
+    /// <summary>Attaches a reason to the translation failure, at most once per distinct reason.</summary>
+    private void ReportTranslationError(string details)
+    {
+        if (_reportedTranslationErrors.Add(details))
+        {
+            AddTranslationErrorDetails(details);
+        }
+    }
+
+    /// <summary>
+    /// Reports a clear reason when two date/time values are added or subtracted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ClickHouse has no operator for any of these shapes, and each one fails differently:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>
+    ///     One date minus another gives a <see cref="TimeSpan"/> in .NET, whereas <c>dateDiff</c>
+    ///     returns a count of whole units.
+    ///   </description></item>
+    ///   <item><description>
+    ///     One time of day minus another gives a <see cref="TimeSpan"/> in .NET, whereas ClickHouse
+    ///     <c>Time64</c> subtraction gives a <c>Decimal</c> number of seconds.
+    ///   </description></item>
+    ///   <item><description>
+    ///     A date plus or minus a <see cref="TimeSpan"/> keeps the date type in .NET, whereas ClickHouse
+    ///     rejects the mixed operands outright (<c>Illegal types ... of arguments of function plus</c>).
+    ///   </description></item>
+    /// </list>
+    /// <para>
+    /// Left alone, each of these reaches type-mapping inference or the server and fails with an internal
+    /// cast error or raw SQL error that names types the user never wrote. Reporting the reason here turns
+    /// that into EF Core's normal "could not be translated" message with an explanation attached — which
+    /// also restores client evaluation in a projection, where the .NET result is correct.
+    /// </para>
+    /// </remarks>
+    protected override Expression VisitBinary(BinaryExpression binaryExpression)
+    {
+        if (binaryExpression.NodeType is ExpressionType.Add or ExpressionType.Subtract
+            && IsDateOrTimeType(binaryExpression.Left.Type)
+            && IsDateOrTimeType(binaryExpression.Right.Type))
+        {
+            // Shifting a date by a span has a translatable equivalent, so point at it rather than
+            // sending the reader to the client. Subtracting two dates has none.
+            ReportTranslationError(
+                IsSpanType(binaryExpression.Right.Type) && !IsSpanType(binaryExpression.Left.Type)
+                    ? "Adding or subtracting a TimeSpan is not supported, because ClickHouse rejects the "
+                      + "mixed operands. Use the Add* methods instead — 'x.AddDays(-7)' translates where "
+                      + "'x - TimeSpan.FromDays(7)' does not."
+                    : "Arithmetic on two date or time values is not supported, because ClickHouse has no "
+                      + "operator that matches the .NET result. Compare the two values directly, or project "
+                      + "them and do the arithmetic on the client.");
+
+            return QueryCompilationContext.NotTranslatedExpression;
+        }
+
+        return base.VisitBinary(binaryExpression);
+    }
+
+    /// <summary>Whether the type is a length of time rather than a point in time.</summary>
+    private static bool IsSpanType(Type type)
+        => (Nullable.GetUnderlyingType(type) ?? type) == typeof(TimeSpan);
+
+    private static bool IsDateOrTimeType(Type type)
+    {
+        var unwrapped = Nullable.GetUnderlyingType(type) ?? type;
+        return unwrapped == typeof(DateTime)
+               || unwrapped == typeof(DateTimeOffset)
+               || unwrapped == typeof(DateOnly)
+               || unwrapped == typeof(TimeSpan)
+               || unwrapped == typeof(TimeOnly);
+    }
 }

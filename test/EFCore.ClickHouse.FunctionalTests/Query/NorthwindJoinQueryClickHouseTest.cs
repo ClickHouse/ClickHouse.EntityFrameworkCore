@@ -36,11 +36,6 @@ public class NorthwindJoinQueryClickHouseTest
     public override Task SelectMany_with_client_eval_with_constructor(bool async)
         => AssertUnsupported(() => base.SelectMany_with_client_eval_with_constructor(async));
 
-    // Complex LINQ pattern not translatable
-    public override Task GroupJoin_aggregate_anonymous_key_selectors2(bool async)
-        => Assert.ThrowsAsync<InvalidOperationException>(
-            () => base.GroupJoin_aggregate_anonymous_key_selectors2(async));
-
     private static async Task AssertUnsupported(Func<Task> test)
         => await Assert.ThrowsAsync<ClickHouse.Driver.ClickHouseServerException>(test);
 }
