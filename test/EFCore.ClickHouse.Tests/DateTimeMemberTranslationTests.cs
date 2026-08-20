@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -18,6 +19,15 @@ public class DateTimeMemberEntity
 
     /// <summary>Mapped to ClickHouse <c>DateTime64(7, 'UTC')</c> by the DateTimeOffset mapping.</summary>
     public DateTimeOffset Offset { get; set; }
+
+    /// <summary>Mapped to a named timezone with daylight-saving transitions.</summary>
+    public DateTimeOffset OffsetLondon { get; set; }
+
+    /// <summary>Mapped to a fixed-offset ClickHouse timezone.</summary>
+    public DateTimeOffset OffsetFixed { get; set; }
+
+    /// <summary>Mapped to a timezone-less ClickHouse date/time type.</summary>
+    public DateTimeOffset OffsetNaive { get; set; }
 }
 
 public class DateTimeMemberDbContext : DbContext
@@ -47,6 +57,12 @@ public class DateTimeMemberDbContext : DbContext
             entity.Property(e => e.Timestamp64).HasColumnName("ts64").HasColumnType("DateTime64(7)");
             entity.Property(e => e.Date).HasColumnName("d");
             entity.Property(e => e.Offset).HasColumnName("off");
+            entity.Property(e => e.OffsetLondon).HasColumnName("off_london")
+                .HasColumnType("DateTime64(7, 'Europe/London')");
+            entity.Property(e => e.OffsetFixed).HasColumnName("off_fixed")
+                .HasColumnType("DateTime64(7, 'Fixed/UTC+05:30:00')");
+            entity.Property(e => e.OffsetNaive).HasColumnName("off_naive")
+                .HasColumnType("DateTime64(7)");
         });
     }
 }
@@ -79,7 +95,10 @@ public class DateTimeMemberFixture : IAsyncLifetime
                                     ts DateTime,
                                     ts64 DateTime64(7),
                                     d Date32,
-                                    off DateTime64(7, 'UTC')
+                                    off DateTime64(7, 'UTC'),
+                                    off_london DateTime64(7, 'Europe/London'),
+                                    off_fixed DateTime64(7, 'Fixed/UTC+05:30:00'),
+                                    off_naive DateTime64(7)
                                 ) ENGINE = MergeTree()
                                 ORDER BY id
                                 """;
@@ -88,9 +107,14 @@ public class DateTimeMemberFixture : IAsyncLifetime
         using var insertCmd = connection.CreateCommand();
         // Row 2 is the last day of a month, so AddMonths and AddYears have a day to clamp.
         insertCmd.CommandText = """
-                                INSERT INTO datetime_member_test (id, ts, ts64, d, off) VALUES
-                                (1, '2026-08-16 13:47:32', '2026-08-16 13:47:32.1234567', '2026-08-16', '2026-08-16 13:47:32.1234567'),
-                                (2, '2026-01-31 00:00:00', '2026-01-31 00:00:00.0000000', '2026-01-31', '2026-01-31 00:00:00.0000000')
+                                INSERT INTO datetime_member_test
+                                    (id, ts, ts64, d, off, off_london, off_fixed, off_naive) VALUES
+                                (1, '2026-08-16 13:47:32', '2026-08-16 13:47:32.1234567', '2026-08-16',
+                                    '2026-08-16 13:47:32.1234567', '2026-08-16 13:47:32.1234567+00:00',
+                                    '2026-08-16 13:47:32.1234567+00:00', '2026-08-16 13:47:32.1234567'),
+                                (2, '2026-01-31 00:00:00', '2026-01-31 00:00:00.0000000', '2026-01-31',
+                                    '2026-01-31 00:00:00.0000000', '2026-03-28 12:00:00.0000000+00:00',
+                                    '2026-01-31 00:00:00.0000000+00:00', '2026-01-31 00:00:00.0000000')
                                 """;
         await insertCmd.ExecuteNonQueryAsync();
     }
@@ -287,9 +311,81 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
     [Fact]
     public async Task DateTimeOffset_AddDays_translates()
     {
-        var result = await SelectSingleAsync(q => q.Select(e => e.Offset.AddDays(1)));
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Offset.AddDays(1));
 
+        Assert.Contains("addDays", query.ToQueryString());
+        var result = await query.SingleAsync();
         Assert.Equal(new DateTimeOffset(2026, 8, 17, 13, 47, 32, TimeSpan.Zero).AddTicks(1_234_567), result);
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_AddDays_on_a_fixed_offset_mapping_translates()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var source = await context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.OffsetFixed).SingleAsync();
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.OffsetFixed.AddDays(1));
+
+        Assert.Contains("addDays", query.ToQueryString());
+        Assert.Equal(source.AddDays(1), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_AddDays_on_a_dst_mapping_uses_client_semantics_across_the_transition()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var source = await context.Events.AsNoTracking().Where(e => e.Id == 2)
+            .Select(e => e.OffsetLondon).SingleAsync();
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 2)
+            .Select(e => e.OffsetLondon.AddDays(1));
+
+        // The UK moves from +00:00 to +01:00 on 2026-03-29. DateTimeOffset.AddDays preserves
+        // the source's +00:00 offset; ClickHouse addDays would instead apply London's calendar
+        // rules and return a value one hour earlier as an instant.
+        Assert.Equal(new DateTimeOffset(2026, 3, 28, 12, 0, 0, TimeSpan.Zero), source);
+        Assert.DoesNotContain("addDays", query.ToQueryString());
+        Assert.Equal(source.AddDays(1), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_AddDays_on_a_timezone_less_mapping_uses_client_evaluation()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var source = await context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.OffsetNaive).SingleAsync();
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.OffsetNaive.AddDays(1));
+
+        Assert.DoesNotContain("addDays", query.ToQueryString());
+        Assert.Equal(source.AddDays(1), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_AddMonths_on_a_dst_mapping_in_a_predicate_reports_the_reason()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.OffsetLondon.AddMonths(1) > e.OffsetLondon);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("timezone 'Europe/London'", exception.Message);
+        Assert.Contains("daylight-saving transition", exception.Message);
+    }
+
+    [Fact]
+    public async Task DateTimeOffset_AddDays_on_a_timezone_less_mapping_in_a_predicate_reports_the_reason()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.OffsetNaive.AddDays(1) > e.OffsetNaive);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("no declared timezone", exception.Message);
     }
 
     [Fact]
@@ -385,6 +481,30 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
             await SelectSingleAsync(q => q.Select(e => e.Timestamp64.AddMilliseconds(1))));
 
     [Fact]
+    public async Task AddMilliseconds_truncates_positive_fractional_ticks_like_dotnet()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddMilliseconds(0.99995));
+
+        // .NET 10 truncates 9 999.5 fractional ticks toward zero. Rounding would incorrectly
+        // turn this into one whole millisecond and make it look translatable.
+        Assert.DoesNotContain("addMilliseconds", query.ToQueryString());
+        Assert.Equal(DateTimeMemberFixture.Instant.AddTicks(9_999), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddMilliseconds_truncates_negative_fractional_ticks_like_dotnet()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddMilliseconds(-0.99995));
+
+        Assert.DoesNotContain("addMilliseconds", query.ToQueryString());
+        Assert.Equal(DateTimeMemberFixture.Instant.AddTicks(-9_999), await query.SingleAsync());
+    }
+
+    [Fact]
     public async Task AddDays_on_a_Date32_column_keeps_the_date_store_type()
     {
         // DateOnly.AddDays takes an int, so this must use addDays — addMilliseconds rejects a Date32.
@@ -419,7 +539,7 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
     [Fact]
     public async Task AddMilliseconds_below_millisecond_resolution_keeps_dotnet_semantics()
     {
-        // .NET rounds to the nearest tick, so this adds 5 000 ticks — not 0 ms and not 1 ms.
+        // This is exactly 5 000 ticks — not 0 ms and not 1 ms.
         var result = await SelectSingleAsync(q => q.Select(e => e.Timestamp64.AddMilliseconds(0.5)));
 
         Assert.Equal(DateTimeMemberFixture.Instant.AddMilliseconds(0.5), result);
@@ -449,7 +569,57 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
         await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
         var query = context.Events.AsNoTracking().Where(e => e.Timestamp64.AddDays(days) > e.Timestamp);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("argument must be a constant", exception.Message);
+    }
+
+    [Fact]
+    public async Task AddMilliseconds_below_millisecond_resolution_in_a_predicate_reports_the_reason()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.Timestamp64.AddMilliseconds(0.99995) > e.Timestamp64);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("sub-millisecond tick offset", exception.Message);
+    }
+
+    [Fact]
+    public async Task AddSeconds_above_the_positive_dotnet_unit_bound_is_not_translated()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddSeconds(315_537_897_599.5));
+
+        Assert.DoesNotContain("addSeconds", query.ToQueryString());
+        Assert.DoesNotContain("addMilliseconds", query.ToQueryString());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddSeconds_below_the_negative_dotnet_unit_bound_is_not_translated()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddSeconds(-315_537_897_599.5));
+
+        Assert.DoesNotContain("addSeconds", query.ToQueryString());
+        Assert.DoesNotContain("addMilliseconds", query.ToQueryString());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddSeconds_outside_the_dotnet_unit_bound_in_a_predicate_reports_the_reason()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.Timestamp64.AddSeconds(315_537_897_599.5) > e.Timestamp64);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("outside the range that .NET accepts", exception.Message);
     }
 
     [Fact]
@@ -592,6 +762,9 @@ public class DateTimeMemberTranslationOfflineTest
                 entity.ToTable("datetime_member_test");
                 entity.HasKey(e => e.Id);
                 entity.Property(e => e.Timestamp64).HasColumnType("DateTime64(7)");
+                entity.Property(e => e.OffsetLondon).HasColumnType("DateTime64(7, 'Europe/London')");
+                entity.Property(e => e.OffsetFixed).HasColumnType("DateTime64(7, 'Fixed/UTC+05:30:00')");
+                entity.Property(e => e.OffsetNaive).HasColumnType("DateTime64(7)");
             });
         }
     }
@@ -600,6 +773,17 @@ public class DateTimeMemberTranslationOfflineTest
     {
         using var context = new OfflineContext();
         return selector(context.Events).ToQueryString();
+    }
+
+    private static void AssertNonFiniteAddReportsOutOfRange(
+        Expression<Func<DateTimeMemberEntity, bool>> predicate)
+    {
+        using var context = new OfflineContext();
+        var query = context.Events.Where(predicate);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => query.ToQueryString());
+
+        Assert.Contains("outside the range that .NET accepts", exception.Message);
     }
 
     [Fact]
@@ -678,6 +862,28 @@ public class DateTimeMemberTranslationOfflineTest
         => Assert.Contains("addHours(", Sql(q => q.Select(e => e.Timestamp64.AddHours(3))));
 
     [Fact]
+    public void DateTimeOffset_AddDays_on_a_fixed_offset_mapping_emits_addDays()
+        => Assert.Contains("addDays(", Sql(q => q.Select(e => e.OffsetFixed.AddDays(1))));
+
+    [Fact]
+    public void DateTimeOffset_AddDays_on_a_dst_mapping_emits_no_add_function()
+        => Assert.DoesNotContain("addDays(", Sql(q => q.Select(e => e.OffsetLondon.AddDays(1))));
+
+    [Fact]
+    public void AddSeconds_with_nan_reports_out_of_range()
+        => AssertNonFiniteAddReportsOutOfRange(e => e.Timestamp64.AddSeconds(double.NaN) > e.Timestamp64);
+
+    [Fact]
+    public void AddSeconds_with_positive_infinity_reports_out_of_range()
+        => AssertNonFiniteAddReportsOutOfRange(
+            e => e.Timestamp64.AddSeconds(double.PositiveInfinity) > e.Timestamp64);
+
+    [Fact]
+    public void AddSeconds_with_negative_infinity_reports_out_of_range()
+        => AssertNonFiniteAddReportsOutOfRange(
+            e => e.Timestamp64.AddSeconds(double.NegativeInfinity) > e.Timestamp64);
+
+    [Fact]
     public void UtcNow_emits_a_utc_pinned_now64()
         => Assert.Contains("now64(7, 'UTC')", Sql(q => q.Where(e => e.Timestamp64 < DateTime.UtcNow).Select(e => e.Id)));
 
@@ -689,4 +895,14 @@ public class DateTimeMemberTranslationOfflineTest
         Assert.Contains("now64(7)", sql);
         Assert.DoesNotContain("'UTC'", sql);
     }
+
+    [Fact]
+    public void DateTimeOffset_UtcNow_emits_a_utc_pinned_now64()
+        => Assert.Contains(
+            "now64(7, 'UTC')",
+            Sql(q => q.Where(e => e.Offset < DateTimeOffset.UtcNow).Select(e => e.Id)));
+
+    [Fact]
+    public void DateTimeOffset_Now_is_left_for_client_evaluation()
+        => Assert.DoesNotContain("now64", Sql(q => q.Select(_ => DateTimeOffset.Now)));
 }

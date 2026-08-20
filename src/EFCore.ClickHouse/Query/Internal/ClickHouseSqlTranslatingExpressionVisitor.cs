@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
 
@@ -41,9 +42,28 @@ public class ClickHouseSqlTranslatingExpressionVisitor : RelationalSqlTranslatin
     /// <c>Select(...).Contains(...)</c> lambda patterns.
     /// </summary>
     protected override Expression VisitMethodCall(MethodCallExpression methodCallExpression)
-        => _arrayLinqTranslator.TryTranslate(methodCallExpression, out var translated)
-            ? translated
-            : base.VisitMethodCall(methodCallExpression);
+    {
+        if (_arrayLinqTranslator.TryTranslate(methodCallExpression, out var arrayTranslation))
+        {
+            return arrayTranslation;
+        }
+
+        var translated = base.VisitMethodCall(methodCallExpression);
+
+        if (translated == QueryCompilationContext.NotTranslatedExpression
+            && ClickHouseDateTimeMethodTranslator.IsAddMethod(methodCallExpression.Method)
+            && methodCallExpression.Object is { } methodInstance
+            && methodCallExpression.Arguments is [var methodArgument]
+            && Visit(methodInstance) is SqlExpression sqlInstance
+            && Visit(methodArgument) is SqlExpression sqlArgument
+            && ClickHouseDateTimeMethodTranslator.GetUnsupportedAddTranslationErrorDetails(
+                methodCallExpression.Method, sqlInstance, sqlArgument) is { } errorDetails)
+        {
+            AddTranslationErrorDetails(errorDetails);
+        }
+
+        return translated;
+    }
 
     /// <summary>
     /// Reports a clear reason when two date/time values are added or subtracted.

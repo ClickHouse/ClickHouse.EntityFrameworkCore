@@ -96,6 +96,15 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
     /// </summary>
     public string? Timezone { get; }
 
+    /// <summary>
+    /// Whether the declared timezone has one offset for every instant. Date/time addition can only
+    /// preserve <see cref="DateTimeOffset"/> semantics for these mappings: named zones with daylight
+    /// saving may change offset while .NET deliberately keeps the instance offset.
+    /// </summary>
+    internal bool HasFixedOffset
+        => Timezone == DefaultTimezone
+           || Timezone is not null && FixedOffsetRegex.IsMatch(Timezone);
+
     public ClickHouseDateTimeOffsetTypeMapping()
         : this(DefaultPrecision, DefaultTimezone)
     {

@@ -20,9 +20,10 @@ namespace ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 /// given type declares, so <see cref="DateOnly"/> gets the date components only.
 /// </para>
 /// <para>
-/// For <see cref="DateTimeOffset"/> the result is in the timezone the column declares, which the
-/// provider pins to UTC. That agrees with .NET, because a value read back from such a column carries
-/// the <c>+00:00</c> offset, so <c>.Hour</c> and <c>.Date</c> describe the same instant on both sides.
+/// For <see cref="DateTimeOffset"/> the result is in the timezone the column declares. The default
+/// mapping pins that timezone to UTC; an explicitly configured named or fixed-offset timezone is
+/// preserved instead. In either case, a materialized value carries the same declared-zone offset, so
+/// its components agree with the server result.
 /// </para>
 /// </remarks>
 public class ClickHouseDateTimeMemberTranslator : IMemberTranslator
@@ -83,10 +84,10 @@ public class ClickHouseDateTimeMemberTranslator : IMemberTranslator
         ServerClockMembers.Add(Property(typeof(DateTime), nameof(DateTime.Now)), ServerClock.LocalNow);
         ServerClockMembers.Add(Property(typeof(DateTime), nameof(DateTime.Today)), ServerClock.LocalToday);
 
-        // A DateTimeOffset is an instant, and its store type is UTC-pinned, so both of its clock
-        // members read the same UTC value.
+        // UtcNow is an instant and the default DateTimeOffset store type is UTC-pinned.
+        // DateTimeOffset.Now deliberately stays untranslated: unlike UtcNow, it exposes the client's
+        // current local offset, which a UTC-pinned server value cannot preserve.
         ServerClockMembers.Add(Property(typeof(DateTimeOffset), nameof(DateTimeOffset.UtcNow)), ServerClock.UtcNow);
-        ServerClockMembers.Add(Property(typeof(DateTimeOffset), nameof(DateTimeOffset.Now)), ServerClock.UtcNow);
     }
 
     public ClickHouseDateTimeMemberTranslator(

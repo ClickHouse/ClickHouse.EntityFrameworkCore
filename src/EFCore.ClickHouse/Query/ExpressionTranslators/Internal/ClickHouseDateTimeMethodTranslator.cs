@@ -1,5 +1,6 @@
 using System.Reflection;
 using ClickHouse.EntityFrameworkCore.Metadata;
+using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Query;
@@ -12,7 +13,9 @@ namespace ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 /// Translates date/time method calls to ClickHouse SQL functions: the
 /// <c>EF.Functions.ToStartOf*</c> extension methods
 /// (<see cref="ClickHouseDateTimeDbFunctionsExtensions"/>), and the standard <c>Add*</c> methods of
-/// <see cref="DateTime"/>, <see cref="DateTimeOffset"/> and <see cref="DateOnly"/>.
+/// <see cref="DateTime"/>, <see cref="DateTimeOffset"/> and <see cref="DateOnly"/>. DateTimeOffset
+/// addition is limited to UTC and fixed-offset mappings so daylight-saving calendar rules cannot
+/// change .NET's offset-preserving semantics.
 /// </summary>
 public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
 {
@@ -20,7 +23,8 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
 
     /// <summary>
     /// <c>Add*</c> methods that take an <see cref="int"/>, keyed to their ClickHouse function. An
-    /// integer count needs no rounding, so these always translate.
+    /// integer count needs no precision check. <see cref="DateTimeOffset"/> calls still require a
+    /// fixed-offset source mapping so daylight-saving rules cannot change their semantics.
     /// </summary>
     private static readonly Dictionary<MethodInfo, string> IntegralAddMethods = [];
 
@@ -29,7 +33,14 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
     /// the tick length of the method's own unit. Keeping the two families in separate dictionaries
     /// makes a unit with no fixed tick length (a month, a year) unrepresentable here.
     /// </summary>
-    private static readonly Dictionary<MethodInfo, (string Function, long TicksPerUnit)> FractionalAddMethods = [];
+    private static readonly Dictionary<MethodInfo, (string Function, long TicksPerUnit, long MaxUnitCount)> FractionalAddMethods = [];
+
+    private enum TickConversionResult
+    {
+        Success,
+        NonConstant,
+        OutOfRange
+    }
 
     /// <summary>
     /// Maps the generic method definitions that take only the source value (and, for
@@ -149,12 +160,17 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
             return;
         }
 
-        FractionalAddMethods.Add(Method(type, nameof(DateTime.AddDays), typeof(double)), ("addDays", TimeSpan.TicksPerDay));
-        FractionalAddMethods.Add(Method(type, nameof(DateTime.AddHours), typeof(double)), ("addHours", TimeSpan.TicksPerHour));
-        FractionalAddMethods.Add(Method(type, nameof(DateTime.AddMinutes), typeof(double)), ("addMinutes", TimeSpan.TicksPerMinute));
-        FractionalAddMethods.Add(Method(type, nameof(DateTime.AddSeconds), typeof(double)), ("addSeconds", TimeSpan.TicksPerSecond));
-        FractionalAddMethods.Add(Method(type, nameof(DateTime.AddMilliseconds), typeof(double)), ("addMilliseconds", TimeSpan.TicksPerMillisecond));
+        RegisterFractionalAdd(type, nameof(DateTime.AddDays), "addDays", TimeSpan.TicksPerDay);
+        RegisterFractionalAdd(type, nameof(DateTime.AddHours), "addHours", TimeSpan.TicksPerHour);
+        RegisterFractionalAdd(type, nameof(DateTime.AddMinutes), "addMinutes", TimeSpan.TicksPerMinute);
+        RegisterFractionalAdd(type, nameof(DateTime.AddSeconds), "addSeconds", TimeSpan.TicksPerSecond);
+        RegisterFractionalAdd(type, nameof(DateTime.AddMilliseconds), "addMilliseconds", TimeSpan.TicksPerMillisecond);
     }
+
+    private static void RegisterFractionalAdd(Type type, string methodName, string function, long ticksPerUnit)
+        => FractionalAddMethods.Add(
+            Method(type, methodName, typeof(double)),
+            (function, ticksPerUnit, DateTime.MaxValue.Ticks / ticksPerUnit));
 
     private static MethodInfo Method(Type type, string name, Type argumentType)
         => type.GetRuntimeMethod(name, [argumentType])
@@ -173,6 +189,11 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
     {
         if (instance is not null)
         {
+            if (IsAddMethod(method) && !CanTranslateDateTimeOffsetAdd(method, instance))
+            {
+                return null;
+            }
+
             if (IntegralAddMethods.TryGetValue(method, out var integralFunction))
             {
                 return AddFunction(integralFunction, instance, arguments[0], method.ReturnType);
@@ -181,7 +202,12 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
             if (FractionalAddMethods.TryGetValue(method, out var fractional))
             {
                 return TranslateFractionalAdd(
-                    instance, fractional.Function, fractional.TicksPerUnit, arguments[0], method.ReturnType);
+                    instance,
+                    fractional.Function,
+                    fractional.TicksPerUnit,
+                    fractional.MaxUnitCount,
+                    arguments[0],
+                    method.ReturnType);
             }
         }
 
@@ -253,7 +279,8 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
     /// </summary>
     /// <remarks>
     /// <para>
-    /// .NET scales the argument to whole ticks and rounds half away from zero, so
+    /// .NET separates the integral and fractional parts, scales each to ticks, and truncates any
+    /// fractional tick toward zero. Consequently,
     /// <c>AddSeconds(0.1234567)</c> adds exactly 1 234 567 ticks. The matching ClickHouse function takes
     /// a whole number of its own unit and discards the rest, so <c>addDays(x, 1.5)</c> would add one day.
     /// The two agree only when the tick count divides exactly into the function's unit.
@@ -278,15 +305,11 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
         SqlExpression instance,
         string function,
         long ticksPerUnit,
+        long maxUnitCount,
         SqlExpression value,
         Type returnType)
     {
-        if (value is not SqlConstantExpression { Value: double constantValue })
-        {
-            return null;
-        }
-
-        if (TicksFor(constantValue, ticksPerUnit) is not { } ticks)
+        if (TryGetTicks(value, ticksPerUnit, maxUnitCount, out var ticks) != TickConversionResult.Success)
         {
             return null;
         }
@@ -309,26 +332,106 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
     }
 
     /// <summary>
-    /// The tick count that .NET would add, or <see langword="null" /> when .NET would not produce one.
+    /// Computes the tick count that .NET would add and reports why it cannot be folded when necessary.
     /// </summary>
     /// <remarks>
-    /// Mirrors <see cref="DateTime.Add(TimeSpan)"/>'s scaling: multiply by the unit's tick length, then
-    /// round half away from zero. A value that <see cref="DateTime"/> cannot represent is rejected, so
+    /// Mirrors .NET 10's <c>DateTime.AddUnits</c> implementation: reject values outside that method's
+    /// per-unit bound, split the integral and fractional parts, and truncate fractional ticks toward
+    /// zero. A value that <see cref="DateTime"/> cannot represent is rejected, so
     /// the <see cref="ArgumentOutOfRangeException"/> comes from .NET during client evaluation instead of
     /// from a wrapped Int64 on the server, which ClickHouse reports as a decimal overflow — or, for the
     /// larger magnitudes, does not report at all.
     /// </remarks>
-    private static long? TicksFor(double value, long ticksPerUnit)
+    private static TickConversionResult TryGetTicks(
+        SqlExpression value,
+        long ticksPerUnit,
+        long maxUnitCount,
+        out long ticks)
     {
-        if (double.IsNaN(value) || double.IsInfinity(value))
+        ticks = default;
+
+        if (value is not SqlConstantExpression { Value: double constantValue })
+        {
+            return TickConversionResult.NonConstant;
+        }
+
+        if (!double.IsFinite(constantValue) || Math.Abs(constantValue) > maxUnitCount)
+        {
+            return TickConversionResult.OutOfRange;
+        }
+
+        var integralPart = Math.Truncate(constantValue);
+        var fractionalPart = constantValue - integralPart;
+        ticks = (long)integralPart * ticksPerUnit;
+        ticks += (long)(fractionalPart * ticksPerUnit);
+
+        return TickConversionResult.Success;
+    }
+
+    internal static bool IsAddMethod(MethodInfo method)
+        => IntegralAddMethods.ContainsKey(method) || FractionalAddMethods.ContainsKey(method);
+
+    /// <summary>
+    /// Returns a provider-specific explanation when a recognized <c>Add*</c> method was deliberately
+    /// left untranslated.
+    /// </summary>
+    internal static string? GetUnsupportedAddTranslationErrorDetails(
+        MethodInfo method,
+        SqlExpression instance,
+        SqlExpression value)
+    {
+        if (!IsAddMethod(method))
         {
             return null;
         }
 
-        var scaled = value * ticksPerUnit + (value >= 0 ? 0.5 : -0.5);
+        var displayName = $"{method.DeclaringType?.Name}.{method.Name}";
 
-        return double.Abs(scaled) > DateTime.MaxValue.Ticks ? null : (long)scaled;
+        if (!CanTranslateDateTimeOffsetAdd(method, instance))
+        {
+            var timezone = (instance.TypeMapping as ClickHouseDateTimeOffsetTypeMapping)?.Timezone;
+            var timezoneDescription = timezone is null ? "no declared timezone" : $"timezone '{timezone}'";
+
+            return $"The '{displayName}' method cannot be translated for a DateTimeOffset column with "
+                   + $"{timezoneDescription}. .NET preserves the instance offset, while ClickHouse applies "
+                   + "the column timezone's calendar rules and may change the offset across a daylight-saving "
+                   + "transition. Use a UTC or Fixed/UTC offset store type, or perform the addition on the client.";
+        }
+
+        if (!FractionalAddMethods.TryGetValue(method, out var fractional))
+        {
+            return null;
+        }
+
+        var tickResult = TryGetTicks(value, fractional.TicksPerUnit, fractional.MaxUnitCount, out var ticks);
+        if (tickResult == TickConversionResult.NonConstant)
+        {
+            return $"The '{displayName}' argument must be a constant so its exact .NET tick count can be "
+                   + "checked before translating it to ClickHouse. Perform the addition on the client when "
+                   + "the offset is row-dependent or parameterized.";
+        }
+
+        if (tickResult == TickConversionResult.OutOfRange)
+        {
+            return $"The '{displayName}' argument is outside the range that .NET accepts for that unit, so "
+                   + "it cannot be translated safely. Let .NET evaluate the call to preserve its "
+                   + "ArgumentOutOfRangeException.";
+        }
+
+        if (ticks % fractional.TicksPerUnit != 0
+            && ticks % TimeSpan.TicksPerMillisecond != 0)
+        {
+            return $"The '{displayName}' argument produces a sub-millisecond tick offset that ClickHouse "
+                   + "cannot represent exactly without narrowing the supported DateTime64 range. Only exact "
+                   + "whole-unit or whole-millisecond offsets are translated.";
+        }
+
+        return null;
     }
+
+    private static bool CanTranslateDateTimeOffsetAdd(MethodInfo method, SqlExpression instance)
+        => method.DeclaringType != typeof(DateTimeOffset)
+           || instance.TypeMapping is ClickHouseDateTimeOffsetTypeMapping { HasFixedOffset: true };
 
     private SqlExpression AddFunction(string function, SqlExpression instance, SqlExpression value, Type returnType)
         => _sqlExpressionFactory.Function(

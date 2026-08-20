@@ -239,6 +239,7 @@ The standard .NET date/time members translate to ClickHouse functions, for `Date
 | `DateTime.UtcNow` | `now64(7, 'UTC')` |
 | `DateTime.Now` | `now64(7)` |
 | `DateTime.Today` | `toStartOfDay(now())` |
+| `DateTimeOffset.UtcNow` | `now64(7, 'UTC')` |
 
 ```csharp
 // Runs entirely on the server
@@ -253,17 +254,17 @@ var recent = await ctx.Events
     .ToListAsync();
 ```
 
-`DateOnly` gets the date components only, which are the members it declares. For a `DateTimeOffset` property the result is in the timezone the column declares, which the store type pins to UTC — that agrees with .NET, because a value read back carries the `+00:00` offset.
+`DateOnly` gets the date components only, which are the members it declares. For a `DateTimeOffset` property the result is in the timezone the column declares. The default mapping pins that timezone to UTC, while an explicit store type can select a named or fixed-offset timezone; the value read by .NET carries that same declared-zone offset.
 
-Five points are worth knowing:
+Points worth knowing:
 
 **`.DayOfWeek` needs no correction.** ClickHouse week mode 2 agrees with `System.DayOfWeek` exactly — Sunday is 0 through to Saturday 6 — so the value is used as it comes back. The mode argument is always sent, because the default mode starts the week on Monday.
 
-**`.Now` and `.Today` read the server clock**, so they follow the *server's* timezone, not the client's, and they come back with `DateTimeKind.Unspecified`. Use `DateTime.UtcNow` when you need an instant that does not depend on server configuration.
+**`DateTime.Now` and `DateTime.Today` read the server clock**, so they follow the *server's* timezone, not the client's, and they come back with `DateTimeKind.Unspecified`. Use `DateTime.UtcNow` when you need an instant that does not depend on server configuration. `DateTimeOffset.UtcNow` also reads a UTC-pinned server clock. `DateTimeOffset.Now` remains client-evaluated in a projection, because its observable local offset cannot be reconstructed from a UTC-pinned server value.
 
 **`.Date` narrows outside 1970–2106.** `toStartOfDay` returns a `DateTime`, and ClickHouse *wraps* a value outside that window instead of reporting it — so `.Date` on a `DateTime64` column holding a pre-1970 date reads back wrong. Enable [`enable_extended_results_for_datetime_functions`](https://clickhouse.com/docs/operations/settings/settings#enable_extended_results_for_datetime_functions) — for example `set_enable_extended_results_for_datetime_functions=1` in the connection string — to get a range-preserving `DateTime64` result.
 
-**A fractional `Add*` argument is exact or is not translated.** `AddDays` and the other time-based methods take a `double`, which .NET scales to whole *ticks* (100 ns), so `AddSeconds(0.1234567)` adds exactly 1 234 567 ticks. The ClickHouse `addDays` function takes a whole number of days and discards the rest, so it cannot be used directly. A constant argument is folded to ticks and then expressed in the coarsest unit that holds it exactly:
+**A fractional `Add*` argument is exact or is not translated.** `AddDays` and the other time-based methods take a `double`. .NET splits the integral and fractional parts, scales each to *ticks* (100 ns), and truncates any fractional tick toward zero, so `AddSeconds(0.1234567)` adds exactly 1 234 567 ticks. The ClickHouse `addDays` function takes a whole number of days and discards the rest, so it cannot be used directly. A constant argument is folded with the .NET algorithm and then expressed in the coarsest unit that holds it exactly:
 
 ```csharp
 e.Timestamp.AddDays(1)                // addDays(ts, 1)
@@ -274,9 +275,11 @@ e.Timestamp.AddDays(offsetVariable)    // not translated — cannot be checked f
 
 The natural function keeps the column's store type, and it is the only form that works on a `Date`/`Date32` column — ClickHouse rejects `addMilliseconds` on those. Anything the provider cannot express exactly is left untranslated rather than rounded to fit, so a projection still gives the correct .NET value through client evaluation, while a predicate reports why. `DateOnly.AddDays` takes an `int`, so it always emits `addDays`.
 
+**`DateTimeOffset.Add*` requires a UTC or fixed-offset column.** .NET preserves the instance's offset during addition. On a named timezone with daylight saving, ClickHouse applies calendar rules instead, so `addDays` across a clock change can advance the instant by 23 or 25 hours and return a different offset. The provider therefore translates these methods for the default `'UTC'` mapping and `Fixed/UTC±HH:MM:SS` mappings only. A named-zone or timezone-less source stays on the client in a projection and reports this limitation in a predicate.
+
 **Arithmetic on two date/time values is not translated.** `dt1 - dt2` and `time1 - time2` give a `TimeSpan`, and `date + timeSpan` mixes types ClickHouse rejects; `dateDiff` returns a count of whole units, and `Time64` subtraction returns a decimal number of seconds. In a projection EF Core reads the columns and does the arithmetic on the client, which gives the correct result. In a predicate there is no client fallback, so the query fails with an explanation.
 
-Not yet translated: `.Ticks`, `.AddTicks`, and the `.Microsecond`/`.Nanosecond` members.
+Not yet translated: `.Ticks`, `.AddTicks`, the `.Microsecond`/`.Nanosecond` members, and `DateTimeOffset.Now`.
 
 #### `toStartOf*` bucketing
 
