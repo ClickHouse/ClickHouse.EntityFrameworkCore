@@ -84,8 +84,28 @@ internal static class ClickHouseComponentConversion
     /// rebuilt.
     /// </para>
     /// </remarks>
+    /// <remarks>
+    /// <para>
+    /// The check recurses. A composite component carries no converter of its own — an
+    /// <c>Array(T)</c> read as <c>T[]</c> does not — so looking only at the immediate mapping would
+    /// report that an <c>Array(Array(T))</c> element needs nothing done, and the fast path would
+    /// return the driver's value with the innermost components left unconverted.
+    /// </para>
+    /// </remarks>
     public static bool CanPassThrough(RelationalTypeMapping mapping)
-        => mapping.Converter is null;
+    {
+        if (mapping.Converter is not null)
+            return false;
+
+        return mapping switch
+        {
+            ClickHouseNullableElementMapping nullable => CanPassThrough(nullable.Inner),
+            ClickHouseArrayTypeMapping array => CanPassThrough(array.ElementMapping),
+            ClickHouseMapTypeMapping map => CanPassThrough(map.KeyMapping) && CanPassThrough(map.ValueMapping),
+            ClickHouseTupleTypeMapping tuple => tuple.ElementMappings.All(CanPassThrough),
+            _ => true
+        };
+    }
 
     /// <summary>
     /// Returns an expression of type <c>Func&lt;object, TComponent&gt;</c> that reads one component,
@@ -99,13 +119,21 @@ internal static class ClickHouseComponentConversion
     /// convert are not usable from precompiled queries.
     /// </remarks>
     public static Expression CreateConverter(RelationalTypeMapping mapping, Type componentType)
-    {
-        var converter = ConverterCache.GetOrAdd(
+        => Expression.Constant(
+            GetConverter(mapping, componentType),
+            typeof(Func<,>).MakeGenericType(typeof(object), componentType));
+
+    /// <summary>
+    /// Returns the compiled reader for one component as a <c>Func&lt;object, object?&gt;</c>, for a
+    /// caller that holds the readers in an array rather than embedding each one separately.
+    /// </summary>
+    public static Func<object, object?> CreateComponentReader(RelationalTypeMapping mapping)
+        => (Func<object, object?>)GetConverter(mapping, typeof(object));
+
+    private static Delegate GetConverter(RelationalTypeMapping mapping, Type componentType)
+        => ConverterCache.GetOrAdd(
             (mapping, componentType),
             static key => Compile(key.Mapping, key.Target));
-
-        return Expression.Constant(converter, typeof(Func<,>).MakeGenericType(typeof(object), componentType));
-    }
 
     private static Delegate Compile(RelationalTypeMapping mapping, Type componentType)
     {

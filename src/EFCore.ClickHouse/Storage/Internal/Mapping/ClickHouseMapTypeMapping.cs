@@ -19,12 +19,21 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
     public RelationalTypeMapping KeyMapping { get; }
     public RelationalTypeMapping ValueMapping { get; }
 
+    // The CLR types this Map is built from. See ClickHouseNullableElementMapping.ComponentClrType
+    // for why the component mapping's own ClrType is not enough.
+    private Type KeyComponentClrType => ClickHouseNullableElementMapping.ComponentClrType(KeyMapping);
+    private Type ValueComponentClrType => ClickHouseNullableElementMapping.ComponentClrType(ValueMapping);
+
     public ClickHouseMapTypeMapping(RelationalTypeMapping keyMapping, RelationalTypeMapping valueMapping)
         : base(
             new RelationalTypeMappingParameters(
                 new CoreTypeMappingParameters(
-                    typeof(Dictionary<,>).MakeGenericType(keyMapping.ClrType, valueMapping.ClrType),
-                    comparer: CreateDictionaryComparer(keyMapping.ClrType, valueMapping.ClrType)),
+                    typeof(Dictionary<,>).MakeGenericType(
+                        ClickHouseNullableElementMapping.ComponentClrType(keyMapping),
+                        ClickHouseNullableElementMapping.ComponentClrType(valueMapping)),
+                    comparer: CreateDictionaryComparer(
+                        ClickHouseNullableElementMapping.ComponentClrType(keyMapping),
+                        ClickHouseNullableElementMapping.ComponentClrType(valueMapping))),
                 $"Map({keyMapping.StoreType}, {valueMapping.StoreType})",
                 dbType: System.Data.DbType.Object))
     {
@@ -60,10 +69,10 @@ public class ClickHouseMapTypeMapping : RelationalTypeMapping
         }
 
         Expression converted = Expression.Call(
-            ConvertMapMethod.MakeGenericMethod(KeyMapping.ClrType, ValueMapping.ClrType),
+            ConvertMapMethod.MakeGenericMethod(KeyComponentClrType, ValueComponentClrType),
             expression,
-            ClickHouseComponentConversion.CreateConverter(KeyMapping, KeyMapping.ClrType),
-            ClickHouseComponentConversion.CreateConverter(ValueMapping, ValueMapping.ClrType),
+            ClickHouseComponentConversion.CreateConverter(KeyMapping, KeyComponentClrType),
+            ClickHouseComponentConversion.CreateConverter(ValueMapping, ValueComponentClrType),
             Expression.Constant(
                 ClickHouseComponentConversion.CanPassThrough(KeyMapping)
                 && ClickHouseComponentConversion.CanPassThrough(ValueMapping)));

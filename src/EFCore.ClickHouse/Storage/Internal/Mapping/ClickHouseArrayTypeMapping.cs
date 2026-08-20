@@ -29,8 +29,8 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         : base(
             new RelationalTypeMappingParameters(
                 new CoreTypeMappingParameters(
-                    elementMapping.ClrType.MakeArrayType(),
-                    comparer: CreateArrayComparer(elementMapping.ClrType),
+                    ClickHouseNullableElementMapping.ComponentClrType(elementMapping).MakeArrayType(),
+                    comparer: CreateArrayComparer(ClickHouseNullableElementMapping.ComponentClrType(elementMapping)),
                     elementMapping: ExposableElementMapping(elementMapping)),
                 $"Array({elementMapping.StoreType})",
                 dbType: System.Data.DbType.Object))
@@ -92,7 +92,7 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         if (!ClickHouseComponentConversion.NeedsConversion(ElementMapping))
             return Expression.Convert(expression, targetType);
 
-        var elementType = ElementMapping.ClrType;
+        var elementType = ClickHouseNullableElementMapping.ComponentClrType(ElementMapping);
         Expression converted = Expression.Call(
             ConvertArrayMethod.MakeGenericMethod(elementType),
             expression,
