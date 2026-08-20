@@ -13,20 +13,29 @@ namespace ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
 /// Translates date/time method calls to ClickHouse SQL functions: the
 /// <c>EF.Functions.ToStartOf*</c> extension methods
 /// (<see cref="ClickHouseDateTimeDbFunctionsExtensions"/>), and the standard <c>Add*</c> methods of
-/// <see cref="DateTime"/>, <see cref="DateTimeOffset"/> and <see cref="DateOnly"/>. DateTimeOffset
-/// addition is limited to UTC and fixed-offset mappings so daylight-saving calendar rules cannot
-/// change .NET's offset-preserving semantics.
+/// <see cref="DateTime"/>, <see cref="DateTimeOffset"/> and <see cref="DateOnly"/>. Addition is
+/// limited to source columns whose declared timezone has one offset for every instant, so
+/// daylight-saving rules cannot make the server disagree with .NET — see
+/// <see cref="CanTranslateAdd"/>.
 /// </summary>
 public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
 {
     private readonly ISqlExpressionFactory _sqlExpressionFactory;
 
+    /// <summary>The bound .NET puts on the argument of <c>AddYears</c>, independently of the instance.</summary>
+    private const int MaxAddYears = 10_000;
+
+    /// <summary>The bound .NET puts on the argument of <c>AddMonths</c>, independently of the instance.</summary>
+    private const int MaxAddMonths = 120_000;
+
     /// <summary>
-    /// <c>Add*</c> methods that take an <see cref="int"/>, keyed to their ClickHouse function. An
-    /// integer count needs no precision check. <see cref="DateTimeOffset"/> calls still require a
-    /// fixed-offset source mapping so daylight-saving rules cannot change their semantics.
+    /// <c>Add*</c> methods that take an <see cref="int"/>, keyed to their ClickHouse function and the
+    /// largest count .NET accepts. An integer count needs no precision check, but it still needs the
+    /// range check: ClickHouse saturates at the end of its own range where .NET throws, so
+    /// <c>AddYears(20000)</c> would return the year 9999 instead of raising
+    /// <see cref="ArgumentOutOfRangeException"/>.
     /// </summary>
-    private static readonly Dictionary<MethodInfo, string> IntegralAddMethods = [];
+    private static readonly Dictionary<MethodInfo, (string Function, long MaxUnitCount)> IntegralAddMethods = [];
 
     /// <summary>
     /// <c>Add*</c> methods that take a <see cref="double"/>, keyed to their ClickHouse function and
@@ -147,16 +156,19 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
     /// map straight onto <c>addYears</c>/<c>addMonths</c>. The time-based methods take a
     /// <see cref="double"/> on <see cref="DateTime"/>, which needs the exactness check that
     /// <see cref="TranslateFractionalAdd"/> applies. On <see cref="DateOnly"/>, <c>AddDays</c> takes an
-    /// <see cref="int"/> instead, so it is registered as integral.
+    /// <see cref="int"/> instead, so it is registered as integral; its only bound is the end of the
+    /// <see cref="DateOnly"/> range.
     /// </remarks>
     private static void RegisterAddMethods(Type type, bool hasTimeComponents)
     {
-        IntegralAddMethods.Add(Method(type, nameof(DateTime.AddYears), typeof(int)), "addYears");
-        IntegralAddMethods.Add(Method(type, nameof(DateTime.AddMonths), typeof(int)), "addMonths");
+        IntegralAddMethods.Add(Method(type, nameof(DateTime.AddYears), typeof(int)), ("addYears", MaxAddYears));
+        IntegralAddMethods.Add(Method(type, nameof(DateTime.AddMonths), typeof(int)), ("addMonths", MaxAddMonths));
 
         if (!hasTimeComponents)
         {
-            IntegralAddMethods.Add(Method(type, nameof(DateOnly.AddDays), typeof(int)), "addDays");
+            IntegralAddMethods.Add(
+                Method(type, nameof(DateOnly.AddDays), typeof(int)),
+                ("addDays", DateOnly.MaxValue.DayNumber));
             return;
         }
 
@@ -189,14 +201,16 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
     {
         if (instance is not null)
         {
-            if (IsAddMethod(method) && !CanTranslateDateTimeOffsetAdd(method, instance))
+            if (IsAddMethod(method) && !CanTranslateAdd(method, instance))
             {
                 return null;
             }
 
-            if (IntegralAddMethods.TryGetValue(method, out var integralFunction))
+            if (IntegralAddMethods.TryGetValue(method, out var integral))
             {
-                return AddFunction(integralFunction, instance, arguments[0], method.ReturnType);
+                return IsWithinIntegralBound(arguments[0], integral.MaxUnitCount)
+                    ? AddFunction(integral.Function, instance, arguments[0], method.ReturnType)
+                    : null;
             }
 
             if (FractionalAddMethods.TryGetValue(method, out var fractional))
@@ -372,6 +386,15 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
         => IntegralAddMethods.ContainsKey(method) || FractionalAddMethods.ContainsKey(method);
 
     /// <summary>
+    /// Whether an integral <c>Add*</c> argument is inside the bound .NET applies to it regardless of the
+    /// instance. A non-constant argument cannot be checked, and is translated because an
+    /// <see cref="int"/> needs no exactness check.
+    /// </summary>
+    private static bool IsWithinIntegralBound(SqlExpression value, long maxUnitCount)
+        => value is not SqlConstantExpression { Value: int constantValue }
+           || Math.Abs((long)constantValue) <= maxUnitCount;
+
+    /// <summary>
     /// Returns a provider-specific explanation when a recognized <c>Add*</c> method was deliberately
     /// left untranslated.
     /// </summary>
@@ -387,15 +410,29 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
 
         var displayName = $"{method.DeclaringType?.Name}.{method.Name}";
 
-        if (!CanTranslateDateTimeOffsetAdd(method, instance))
+        if (!CanTranslateAdd(method, instance))
         {
-            var timezone = (instance.TypeMapping as ClickHouseDateTimeOffsetTypeMapping)?.Timezone;
+            var timezone = (instance.TypeMapping as IClickHouseTimezoneTypeMapping)?.Timezone;
             var timezoneDescription = timezone is null ? "no declared timezone" : $"timezone '{timezone}'";
 
-            return $"The '{displayName}' method cannot be translated for a DateTimeOffset column with "
-                   + $"{timezoneDescription}. .NET preserves the instance offset, while ClickHouse applies "
-                   + "the column timezone's calendar rules and may change the offset across a daylight-saving "
-                   + "transition. Use a UTC or Fixed/UTC offset store type, or perform the addition on the client.";
+            return method.DeclaringType == typeof(DateTimeOffset)
+                ? $"The '{displayName}' method cannot be translated for a DateTimeOffset column with "
+                  + $"{timezoneDescription}. .NET preserves the instance offset, while ClickHouse applies "
+                  + "the column timezone's calendar rules and may change the offset across a daylight-saving "
+                  + "transition. Use a UTC or Fixed/UTC offset store type, or perform the addition on the client."
+                : $"The '{displayName}' method cannot be translated for a column with {timezoneDescription}, "
+                  + "because that timezone changes offset. ClickHouse calendar arithmetic keeps the wall clock "
+                  + "but cannot produce the hour the clocks skip, and its absolute arithmetic shifts the wall "
+                  + "clock by an hour across a transition; .NET does neither. Use a UTC or Fixed/UTC offset "
+                  + "store type, or perform the addition on the client.";
+        }
+
+        if (IntegralAddMethods.TryGetValue(method, out var integral)
+            && !IsWithinIntegralBound(value, integral.MaxUnitCount))
+        {
+            return $"The '{displayName}' argument is outside the range that .NET accepts for that unit, so "
+                   + "it cannot be translated safely. ClickHouse saturates at the end of its own range where "
+                   + ".NET raises ArgumentOutOfRangeException. Let .NET evaluate the call to preserve it.";
         }
 
         if (!FractionalAddMethods.TryGetValue(method, out var fractional))
@@ -429,9 +466,27 @@ public class ClickHouseDateTimeMethodTranslator : IMethodCallTranslator
         return null;
     }
 
-    private static bool CanTranslateDateTimeOffsetAdd(MethodInfo method, SqlExpression instance)
-        => method.DeclaringType != typeof(DateTimeOffset)
-           || instance.TypeMapping is ClickHouseDateTimeOffsetTypeMapping { HasFixedOffset: true };
+    /// <summary>
+    /// Whether the source column's declared timezone lets an <c>Add*</c> method keep .NET semantics.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <see cref="DateTimeOffset"/> source must declare a fixed offset. .NET preserves the instance
+    /// offset, which a named zone's calendar rules can change, and a store type that declares no
+    /// timezone leaves the rendering to the server.
+    /// </para>
+    /// <para>
+    /// A <see cref="DateTime"/> or <see cref="DateOnly"/> source is read as a wall clock, so it only has
+    /// to avoid a zone that changes offset — see
+    /// <see cref="ClickHouseTimezones.MayObserveDaylightSaving"/> for the two ways that breaks. A store
+    /// type with no declared timezone is read as a UTC wall clock and stays translatable.
+    /// </para>
+    /// </remarks>
+    private static bool CanTranslateAdd(MethodInfo method, SqlExpression instance)
+        => method.DeclaringType == typeof(DateTimeOffset)
+            ? instance.TypeMapping is ClickHouseDateTimeOffsetTypeMapping { HasFixedOffset: true }
+            : !ClickHouseTimezones.MayObserveDaylightSaving(
+                (instance.TypeMapping as IClickHouseTimezoneTypeMapping)?.Timezone);
 
     private SqlExpression AddFunction(string function, SqlExpression instance, SqlExpression value, Type returnType)
         => _sqlExpressionFactory.Function(

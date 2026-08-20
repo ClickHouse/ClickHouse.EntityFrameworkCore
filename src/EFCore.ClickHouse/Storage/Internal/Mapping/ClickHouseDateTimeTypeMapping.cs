@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 
-public class ClickHouseDateTimeTypeMapping : RelationalTypeMapping
+public class ClickHouseDateTimeTypeMapping : RelationalTypeMapping, IClickHouseTimezoneTypeMapping
 {
     public string? Timezone { get; }
 

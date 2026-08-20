@@ -46,7 +46,8 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 /// On write, <see cref="ValidateWriteValue"/> refuses a value the store type cannot hold. ClickHouse
 /// wraps such a value rather than reporting it.
 /// </summary>
-public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClickHouseWriteValidatingTypeMapping
+public class ClickHouseDateTimeOffsetTypeMapping
+    : RelationalTypeMapping, IClickHouseWriteValidatingTypeMapping, IClickHouseTimezoneTypeMapping
 {
     /// <summary>
     /// One .NET tick is 100 ns, which is precision 7. This makes the round trip exact, so a
@@ -54,7 +55,7 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
     /// </summary>
     public const int DefaultPrecision = 7;
 
-    public const string DefaultTimezone = "UTC";
+    public const string DefaultTimezone = ClickHouseTimezones.Utc;
 
     /// <summary>.NET cannot render more than 7 fractional digits, because a tick is its smallest unit.</summary>
     private const int MaxFractionalDigits = 7;
@@ -68,11 +69,10 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
 
     /// <summary>
     /// ClickHouse spells a fixed-offset timezone <c>Fixed/UTC±HH:MM:SS</c>. See
-    /// <see cref="TryParseFixedOffset"/> for why the pattern is this strict.
+    /// <see cref="TryParseFixedOffset"/> for why the pattern is this strict. It is shared with the
+    /// query translators, which ask the same question about a source column.
     /// </summary>
-    private static readonly Regex FixedOffsetRegex = new(
-        @"^Fixed/UTC([+-])(\d{2}):(\d{2}):(\d{2})$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex FixedOffsetRegex = ClickHouseTimezones.FixedOffsetRegex;
 
     // DateTimeOffset holds an offset only within ±14 hours, and only in whole minutes. ClickHouse
     // accepts both a larger magnitude and a finer granularity, for example 'Fixed/UTC+00:00:42'.
@@ -101,9 +101,7 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
     /// preserve <see cref="DateTimeOffset"/> semantics for these mappings: named zones with daylight
     /// saving may change offset while .NET deliberately keeps the instance offset.
     /// </summary>
-    internal bool HasFixedOffset
-        => Timezone == DefaultTimezone
-           || Timezone is not null && FixedOffsetRegex.IsMatch(Timezone);
+    internal bool HasFixedOffset => ClickHouseTimezones.IsFixedOffset(Timezone);
 
     public ClickHouseDateTimeOffsetTypeMapping()
         : this(DefaultPrecision, DefaultTimezone)

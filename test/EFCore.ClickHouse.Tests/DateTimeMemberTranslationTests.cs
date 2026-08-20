@@ -17,6 +17,16 @@ public class DateTimeMemberEntity
     /// <summary>Mapped to ClickHouse <c>Date32</c>.</summary>
     public DateOnly Date { get; set; }
 
+    /// <summary>
+    /// A <see cref="DateTime"/> on a named timezone with daylight-saving transitions. The driver reads
+    /// this column as a wall clock in that zone, which is what makes ClickHouse arithmetic on it
+    /// disagree with .NET.
+    /// </summary>
+    public DateTime TimestampLondon { get; set; }
+
+    /// <summary>A <see cref="DateTime"/> on a timezone that declares one offset for every instant.</summary>
+    public DateTime TimestampUtc { get; set; }
+
     /// <summary>Mapped to ClickHouse <c>DateTime64(7, 'UTC')</c> by the DateTimeOffset mapping.</summary>
     public DateTimeOffset Offset { get; set; }
 
@@ -56,6 +66,10 @@ public class DateTimeMemberDbContext : DbContext
             entity.Property(e => e.Timestamp).HasColumnName("ts");
             entity.Property(e => e.Timestamp64).HasColumnName("ts64").HasColumnType("DateTime64(7)");
             entity.Property(e => e.Date).HasColumnName("d");
+            entity.Property(e => e.TimestampLondon).HasColumnName("ts_london")
+                .HasColumnType("DateTime64(7, 'Europe/London')");
+            entity.Property(e => e.TimestampUtc).HasColumnName("ts_utc")
+                .HasColumnType("DateTime64(7, 'UTC')");
             entity.Property(e => e.Offset).HasColumnName("off");
             entity.Property(e => e.OffsetLondon).HasColumnName("off_london")
                 .HasColumnType("DateTime64(7, 'Europe/London')");
@@ -81,6 +95,14 @@ public class DateTimeMemberFixture : IAsyncLifetime
     /// <summary>Row 1's time of day, to one tick.</summary>
     public static readonly TimeSpan InstantTimeOfDay = TimeSpan.FromTicks(496_521_234_567);
 
+    /// <summary>
+    /// Row 3's wall clock in <c>Europe/London</c>. The UK moves from +00:00 to +01:00 at 01:00 UTC on
+    /// 2026-03-29, so 01:30 on the following day does not exist. Both halves of the ClickHouse
+    /// <c>add*</c> family therefore disagree with .NET here: <c>addDays(x, 1)</c> keeps the wall clock
+    /// but cannot produce 01:30, and <c>addHours(x, 24)</c> moves the instant and lands on 02:30.
+    /// </summary>
+    public static readonly DateTime LondonBeforeTransition = new(2026, 3, 28, 1, 30, 0);
+
     public async Task InitializeAsync()
     {
         ConnectionString = await SharedContainer.GetConnectionStringAsync();
@@ -95,6 +117,8 @@ public class DateTimeMemberFixture : IAsyncLifetime
                                     ts DateTime,
                                     ts64 DateTime64(7),
                                     d Date32,
+                                    ts_london DateTime64(7, 'Europe/London'),
+                                    ts_utc DateTime64(7, 'UTC'),
                                     off DateTime64(7, 'UTC'),
                                     off_london DateTime64(7, 'Europe/London'),
                                     off_fixed DateTime64(7, 'Fixed/UTC+05:30:00'),
@@ -106,15 +130,24 @@ public class DateTimeMemberFixture : IAsyncLifetime
 
         using var insertCmd = connection.CreateCommand();
         // Row 2 is the last day of a month, so AddMonths and AddYears have a day to clamp.
+        // Row 3 sits just before a daylight-saving transition, so its Add* results land on a wall clock
+        // that ClickHouse and .NET disagree about. See DateTimeMemberFixture.LondonBeforeTransition.
         insertCmd.CommandText = """
                                 INSERT INTO datetime_member_test
-                                    (id, ts, ts64, d, off, off_london, off_fixed, off_naive) VALUES
+                                    (id, ts, ts64, d, ts_london, ts_utc,
+                                     off, off_london, off_fixed, off_naive) VALUES
                                 (1, '2026-08-16 13:47:32', '2026-08-16 13:47:32.1234567', '2026-08-16',
+                                    '2026-08-16 13:47:32.1234567', '2026-08-16 13:47:32.1234567',
                                     '2026-08-16 13:47:32.1234567', '2026-08-16 13:47:32.1234567+00:00',
                                     '2026-08-16 13:47:32.1234567+00:00', '2026-08-16 13:47:32.1234567'),
                                 (2, '2026-01-31 00:00:00', '2026-01-31 00:00:00.0000000', '2026-01-31',
+                                    '2026-01-31 00:00:00.0000000', '2026-01-31 00:00:00.0000000',
                                     '2026-01-31 00:00:00.0000000', '2026-03-28 12:00:00.0000000+00:00',
-                                    '2026-01-31 00:00:00.0000000+00:00', '2026-01-31 00:00:00.0000000')
+                                    '2026-01-31 00:00:00.0000000+00:00', '2026-01-31 00:00:00.0000000'),
+                                (3, '2026-03-28 01:30:00', '2026-03-28 01:30:00.0000000', '2026-03-28',
+                                    '2026-03-28 01:30:00.0000000', '2026-03-28 01:30:00.0000000',
+                                    '2026-03-28 01:30:00.0000000', '2026-03-28 01:30:00.0000000+00:00',
+                                    '2026-03-28 01:30:00.0000000+00:00', '2026-03-28 01:30:00.0000000')
                                 """;
         await insertCmd.ExecuteNonQueryAsync();
     }
@@ -407,7 +440,7 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
             .Select(e => e.Id);
 
         Assert.Contains("now64", query.ToQueryString());
-        Assert.Equal([1L, 2L], await query.OrderBy(id => id).ToListAsync());
+        Assert.Equal([1L, 2L, 3L], await query.OrderBy(id => id).ToListAsync());
     }
 
     // ---------------------------------------------------------------- Add*
@@ -634,6 +667,163 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => query.SingleAsync());
     }
 
+    // ------------------------------------------------- Add* on a daylight-saving DateTime column
+
+    [Fact]
+    public async Task AddDays_on_a_dst_mapping_uses_client_semantics_through_the_skipped_hour()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var source = await context.Events.AsNoTracking().Where(e => e.Id == 3)
+            .Select(e => e.TimestampLondon).SingleAsync();
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 3)
+            .Select(e => e.TimestampLondon.AddDays(1));
+
+        // 2026-03-29 01:30 does not exist in London: the clocks go straight from 01:00 to 02:00.
+        // ClickHouse addDays keeps the wall clock but cannot land there, and answers 00:30 instead.
+        Assert.Equal(DateTimeMemberFixture.LondonBeforeTransition, source);
+        Assert.DoesNotContain("addDays", query.ToQueryString());
+        Assert.Equal(new DateTime(2026, 3, 29, 1, 30, 0), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddHours_on_a_dst_mapping_uses_client_semantics_across_the_transition()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 3)
+            .Select(e => e.TimestampLondon.AddHours(24));
+
+        // addHours moves the instant, so the server would render 02:30 where .NET keeps the wall
+        // clock and gives 01:30.
+        Assert.DoesNotContain("addHours", query.ToQueryString());
+        Assert.Equal(new DateTime(2026, 3, 29, 1, 30, 0), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddDays_with_a_fraction_on_a_dst_mapping_uses_client_semantics()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 3)
+            .Select(e => e.TimestampLondon.AddDays(1.5));
+
+        // The addMilliseconds fallback is absolute too, so the whole family stays on the client.
+        Assert.DoesNotContain("addMilliseconds", query.ToQueryString());
+        Assert.Equal(
+            DateTimeMemberFixture.LondonBeforeTransition.AddDays(1.5), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddDays_on_a_dst_mapping_in_a_predicate_reports_the_reason()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.TimestampLondon.AddDays(1) > e.TimestampLondon);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("timezone 'Europe/London'", exception.Message);
+        Assert.Contains("changes offset", exception.Message);
+    }
+
+    [Fact]
+    public async Task AddHours_on_a_utc_mapping_still_translates()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 3)
+            .Select(e => e.TimestampUtc.AddHours(24));
+
+        // A declared UTC zone has one offset for every instant, so the gate must not catch it.
+        Assert.Contains("addHours", query.ToQueryString());
+        Assert.Equal(new DateTime(2026, 3, 29, 1, 30, 0), await query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddDays_on_a_timezone_less_mapping_still_translates()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 3)
+            .Select(e => e.Timestamp64.AddDays(1));
+
+        // The driver reads a timezone-less column as a UTC wall clock, so this stays translatable.
+        Assert.Contains("addDays", query.ToQueryString());
+        Assert.Equal(new DateTime(2026, 3, 29, 1, 30, 0), await query.SingleAsync());
+    }
+
+    // ------------------------------------------------- integral Add* range
+
+    [Fact]
+    public async Task AddYears_above_the_dotnet_bound_is_not_translated()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddYears(20_000));
+
+        // ClickHouse saturates at the year 9999; .NET raises instead, and that is what must survive.
+        Assert.DoesNotContain("addYears", query.ToQueryString());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddMonths_above_the_dotnet_bound_is_not_translated()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddMonths(500_000));
+
+        Assert.DoesNotContain("addMonths", query.ToQueryString());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task DateOnly_AddDays_above_the_dotnet_bound_is_not_translated()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Date.AddDays(4_000_000));
+
+        Assert.DoesNotContain("addDays", query.ToQueryString());
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => query.SingleAsync());
+    }
+
+    [Fact]
+    public async Task AddYears_above_the_dotnet_bound_in_a_predicate_reports_the_reason()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.Timestamp64.AddYears(20_000) > e.Timestamp64);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("outside the range that .NET accepts", exception.Message);
+    }
+
+    [Fact]
+    public async Task AddYears_at_the_dotnet_bound_still_translates()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+
+        // The bound is inclusive, and only the argument is checked here — the instance decides whether
+        // the result also fits, and that cannot be known during translation.
+        Assert.Contains(
+            "addYears",
+            context.Events.AsNoTracking().Where(e => e.Id == 1)
+                .Select(e => e.Timestamp64.AddYears(10_000)).ToQueryString());
+    }
+
+    [Fact]
+    public async Task AddYears_with_a_parameter_still_translates()
+    {
+        var years = 1;
+
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking().Where(e => e.Id == 1)
+            .Select(e => e.Timestamp64.AddYears(years));
+
+        // An int needs no exactness check, so a parameter is translated even though its magnitude
+        // cannot be checked.
+        Assert.Contains("addYears", query.ToQueryString());
+        Assert.Equal(DateTimeMemberFixture.Instant.AddYears(1), await query.SingleAsync());
+    }
+
     [Fact]
     public async Task Add_composes_with_a_component_member()
         => Assert.Equal(2027, await SelectSingleAsync(q => q.Select(e => e.Timestamp64.AddYears(1).Year)));
@@ -651,7 +841,7 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
 
         // If EF Core evaluated DateTime.UtcNow on the client, the SQL would carry a literal instead.
         Assert.Contains("now64", query.ToQueryString());
-        Assert.Equal([1L, 2L], await query.OrderBy(id => id).ToListAsync());
+        Assert.Equal([1L, 2L, 3L], await query.OrderBy(id => id).ToListAsync());
 
         var none = await context.Events.AsNoTracking()
             .Where(e => e.Timestamp64 < DateTime.UtcNow.AddYears(-100))
@@ -705,6 +895,51 @@ public class DateTimeMemberTranslationTest : IClassFixture<DateTimeMemberFixture
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
 
         Assert.Contains("Arithmetic on two date or time values", exception.Message);
+    }
+
+    [Fact]
+    public async Task Subtracting_a_TimeSpan_in_a_predicate_points_at_the_Add_methods()
+    {
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+
+        // 'x - TimeSpan.FromDays(7)' is a common way to write a rolling window, and the advice for
+        // subtracting two dates does not fit it: AddDays(-7) translates.
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.Timestamp64 > DateTime.UtcNow - TimeSpan.FromDays(7));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        Assert.Contains("Use the Add* methods instead", exception.Message);
+        Assert.Contains("AddDays(-7)", exception.Message);
+    }
+
+    [Fact]
+    public async Task A_repeated_untranslatable_call_reports_its_reason_once()
+    {
+        var days = 1.5;
+
+        await using var context = new DateTimeMemberDbContext(_fixture.ConnectionString);
+        var query = context.Events.AsNoTracking()
+            .Where(e => e.Timestamp64.AddDays(days) > e.Timestamp
+                        && e.Timestamp64.AddDays(days) < e.Timestamp);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => query.ToListAsync());
+
+        const string reason = "argument must be a constant";
+        Assert.Equal(1, CountOccurrences(exception.Message, reason));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal);
+             i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]

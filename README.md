@@ -233,7 +233,7 @@ The standard .NET date/time members translate to ClickHouse functions, for `Date
 | `.DayOfYear` | `toDayOfYear` |
 | `.DayOfWeek` | `toDayOfWeek(x, 2)` |
 | `.Date` | `toStartOfDay` |
-| `.TimeOfDay` | `toTime64(x, 7)` |
+| `.TimeOfDay` | `toTime64(x, 7)` (needs ClickHouse 25.6 or later) |
 | `.AddYears(n)` `.AddMonths(n)` | `addYears` `addMonths` |
 | `.AddDays(n)` `.AddHours(n)` `.AddMinutes(n)` `.AddSeconds(n)` `.AddMilliseconds(n)` | `addDays` `addHours` … (see below) |
 | `DateTime.UtcNow` | `now64(7, 'UTC')` |
@@ -275,9 +275,19 @@ e.Timestamp.AddDays(offsetVariable)    // not translated — cannot be checked f
 
 The natural function keeps the column's store type, and it is the only form that works on a `Date`/`Date32` column — ClickHouse rejects `addMilliseconds` on those. Anything the provider cannot express exactly is left untranslated rather than rounded to fit, so a projection still gives the correct .NET value through client evaluation, while a predicate reports why. `DateOnly.AddDays` takes an `int`, so it always emits `addDays`.
 
-**`DateTimeOffset.Add*` requires a UTC or fixed-offset column.** .NET preserves the instance's offset during addition. On a named timezone with daylight saving, ClickHouse applies calendar rules instead, so `addDays` across a clock change can advance the instant by 23 or 25 hours and return a different offset. The provider therefore translates these methods for the default `'UTC'` mapping and `Fixed/UTC±HH:MM:SS` mappings only. A named-zone or timezone-less source stays on the client in a projection and reports this limitation in a predicate.
+**`.TimeOfDay` needs ClickHouse 25.6 or later.** It maps to `toTime64`, which arrived with the `Time64` type in 25.6. On an earlier server the query fails with `Function with name 'toTime64' does not exist`. Every other function on this page works on 24.8 LTS.
+
+**An integral `Add*` argument outside the .NET bound is not translated.** .NET rejects more than 10 000 years or 120 000 months whatever the instance holds, while ClickHouse saturates at the end of its own range — `addYears(x, 20000)` answers the year 9999. Such a call is therefore left on the client, so the `ArgumentOutOfRangeException` still happens. Note that only the argument can be checked during translation: whether the *result* also fits depends on the column value, and a result past the year 9999 still saturates on the server.
+
+**`Add*` requires a column whose timezone has one offset.** ClickHouse arithmetic follows the timezone the column declares, and a named zone with daylight saving disagrees with .NET in two ways. The calendar functions (`addDays`, `addMonths`, `addYears`) keep the wall clock, but cannot produce the hour the clocks skip: on a `DateTime64(7, 'Europe/London')` column holding `2026-03-28 01:30`, `addDays(x, 1)` answers `00:30` where .NET answers `01:30`. The absolute functions (`addHours` … `addMilliseconds`) move the instant, so any interval that crosses a transition shifts the wall clock by an hour. For a `DateTimeOffset` there is a third difference: .NET preserves the instance's offset, which the column's zone can change.
+
+The provider therefore translates `Add*` only when the store type declares `'UTC'` or a `Fixed/UTC±HH:MM:SS` offset — plus, for `DateTime` and `DateOnly`, when it declares no timezone at all, because the driver reads such a column as a UTC wall clock. Anything else stays on the client in a projection and reports the limitation in a predicate.
+
+> **One residual limit.** A `DateTime` column that declares no timezone still has its *calendar* arithmetic (`AddDays`, `AddMonths`, `AddYears`) evaluated in the server's `session_timezone`, which the provider cannot see while translating. If that setting names a zone with daylight saving, those results can differ from .NET by an hour. Declare the timezone in the store type — for example `HasColumnType("DateTime64(3, 'UTC')")` — to remove the ambiguity. `DateTimeOffset` is not affected, because its default store type already pins `'UTC'`.
 
 **Arithmetic on two date/time values is not translated.** `dt1 - dt2` and `time1 - time2` give a `TimeSpan`, and `date + timeSpan` mixes types ClickHouse rejects; `dateDiff` returns a count of whole units, and `Time64` subtraction returns a decimal number of seconds. In a projection EF Core reads the columns and does the arithmetic on the client, which gives the correct result. In a predicate there is no client fallback, so the query fails with an explanation.
+
+For a rolling window, use the `Add*` methods rather than a `TimeSpan`. `x > DateTime.UtcNow.AddDays(-7)` translates; `x > DateTime.UtcNow - TimeSpan.FromDays(7)` does not, and says so.
 
 Not yet translated: `.Ticks`, `.AddTicks`, the `.Microsecond`/`.Nanosecond` members, and `DateTimeOffset.Now`.
 
