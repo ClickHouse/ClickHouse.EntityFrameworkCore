@@ -35,6 +35,9 @@ public class DateTimeOffsetPrecisionEntity
 {
     public long Id { get; set; }
     public DateTimeOffset Millis { get; set; }
+
+    /// <summary>Precision 9 reaches only 1678-2262, so it cannot hold every DateTimeOffset.</summary>
+    public DateTimeOffset Nanos { get; set; }
 }
 
 /// <summary>
@@ -117,6 +120,7 @@ public class DateTimeOffsetDbContext : DbContext
             e.Property(x => x.Id).HasColumnName("id");
             // Precision only — no HasColumnType, so the UTC pin must be kept.
             e.Property(x => x.Millis).HasColumnName("millis").HasPrecision(3);
+            e.Property(x => x.Nanos).HasColumnName("nanos").HasColumnType("DateTime64(9, 'UTC')");
         });
 
         modelBuilder.Entity<DateTimeOffsetFixedEntity>(e =>
@@ -711,19 +715,40 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
     }
 
     /// <summary>
-    /// Documents the known limit. In a zone where both candidate offsets are non-zero the offset
-    /// that the driver dropped cannot be recovered, so the reading keeps standard time. Europe/Paris
-    /// goes back from +02:00 to +01:00, so an ambiguous wall clock reads as +01:00 either way.
+    /// In a zone where both candidate offsets are non-zero, the offset the driver dropped cannot be
+    /// recovered. Picking standard time silently moved the instant and mapped two distinct instants
+    /// onto one, so the read now throws instead. Europe/Paris goes back from +02:00 to +01:00.
     /// </summary>
     [Fact]
-    public void Ambiguous_wall_clock_keeps_standard_time_when_both_offsets_are_non_zero()
+    public void Ambiguous_wall_clock_throws_when_both_offsets_are_non_zero()
     {
         // 02:30 on 2026-10-25 is ambiguous in Europe/Paris: +02:00 or +01:00.
         var wallClock = new DateTime(2026, 10, 25, 2, 30, 0, DateTimeKind.Unspecified);
 
-        var result = ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, "Europe/Paris");
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, "Europe/Paris"));
 
-        Assert.Equal(TimeSpan.FromHours(1), result.Offset);
+        Assert.Contains("Europe/Paris", ex.Message);
+        Assert.Contains("ambiguous", ex.Message);
+        Assert.Contains("+02:00", ex.Message);
+        Assert.Contains("+01:00", ex.Message);
+    }
+
+    /// <summary>
+    /// Before standard time a zone's offset is Local Mean Time, recorded to the second, which
+    /// TimeZoneInfo may round to whole minutes. Asia/Tokyo is +09:18:59. The instant would come back
+    /// shifted by up to a minute, so such a value is refused rather than read wrong.
+    /// </summary>
+    [Fact]
+    public void A_value_before_standard_time_throws_rather_than_drifting()
+    {
+        var wallClock = new DateTime(2, 1, 2, 9, 18, 59, DateTimeKind.Unspecified);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, "Asia/Tokyo"));
+
+        Assert.Contains("Asia/Tokyo", ex.Message);
+        Assert.Contains("Local Mean Time", ex.Message);
     }
 
     [Fact]
@@ -790,26 +815,47 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
 
     /// <summary>
     /// ClickHouse accepts offsets that <see cref="DateTimeOffset"/> cannot hold: it caps the
-    /// magnitude at 14 hours and requires whole minutes. Both must report the column rather than
-    /// let the constructor throw naming only the rule it enforces.
+    /// magnitude at 14 hours and requires whole minutes. The instant is still exact, because the
+    /// offset is known and fixed, so the value is reported at offset zero rather than refused.
+    /// This mapping does not keep the offset in any case.
     /// </summary>
+    /// <param name="offsetFromName">The offset the timezone name spells, which the server applied
+    /// to produce the wall clock.</param>
     [Theory]
-    [InlineData("Fixed/UTC+15:00:00", "plus or minus 14 hours")]
-    [InlineData("Fixed/UTC-15:00:00", "plus or minus 14 hours")]
-    [InlineData("Fixed/UTC+24:00:00", "plus or minus 14 hours")]
-    [InlineData("Fixed/UTC+00:00:42", "whole minutes")]
-    [InlineData("Fixed/UTC+05:30:30", "whole minutes")]
-    [InlineData("Fixed/UTC+09:99:99", "whole minutes")]
-    public void An_unrepresentable_fixed_offset_reports_the_timezone_and_the_limit(
-        string timezone, string expectedReason)
+    [InlineData("Fixed/UTC+15:00:00", 15 * 60)]
+    [InlineData("Fixed/UTC-15:00:00", -15 * 60)]
+    [InlineData("Fixed/UTC+24:00:00", 24 * 60)]
+    [InlineData("Fixed/UTC+05:30:30", 5 * 60 + 30)]
+    public void An_unrepresentable_fixed_offset_still_reports_the_exact_instant(
+        string timezone, int offsetFromName)
+    {
+        var wallClock = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
+        // Fixed/UTC+05:30:30 carries 30 seconds that the whole-minute InlineData cannot express.
+        var extraSeconds = timezone == "Fixed/UTC+05:30:30" ? 30 : 0;
+        var appliedOffset = TimeSpan.FromMinutes(offsetFromName) + TimeSpan.FromSeconds(extraSeconds);
+
+        var result = ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, timezone);
+
+        // The instant is recovered exactly: wall clock minus the offset the server applied.
+        Assert.Equal(wallClock - appliedOffset, result.UtcDateTime);
+        Assert.Equal(TimeSpan.Zero, result.Offset);
+    }
+
+    /// <summary>
+    /// ClickHouse carries minutes and seconds above 59, but the driver does not read such a name and
+    /// returns a UTC wall clock instead of one in the column's timezone. Recovering the instant would
+    /// depend on that driver quirk, so this spelling is still refused.
+    /// </summary>
+    [Fact]
+    public void A_fixed_offset_the_driver_cannot_read_still_throws()
     {
         var wallClock = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, timezone));
+            () => ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, "Fixed/UTC+09:99:99"));
 
-        Assert.Contains(timezone, ex.Message);
-        Assert.Contains(expectedReason, ex.Message);
+        Assert.Contains("Fixed/UTC+09:99:99", ex.Message);
+        Assert.Contains("does not support", ex.Message);
     }
 
     /// <summary>
@@ -1013,5 +1059,71 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
         var result = ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(value, "UTC");
 
         Assert.Equal(value, result);
+    }
+
+    // --- write range ---------------------------------------------------------
+
+    /// <summary>
+    /// A DateTime64(P) is an Int64 count of 10^-P seconds. A value that does not fit wraps rather
+    /// than reporting, so the row would read back with an unrelated date. Precision 7 spans about
+    /// 29 000 years and holds every DateTimeOffset; a finer precision does not.
+    /// </summary>
+    [Theory]
+    [InlineData(9)]
+    [InlineData(8)]
+    public void A_value_the_precision_cannot_hold_is_refused_rather_than_wrapped(int precision)
+    {
+        var mapping = new ClickHouseDateTimeOffsetTypeMapping(precision, "UTC");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => mapping.GenerateSqlLiteral(DateTimeOffset.MaxValue));
+
+        Assert.Contains($"DateTime64({precision}, 'UTC')", ex.Message);
+        Assert.Contains("wrap", ex.Message);
+    }
+
+    /// <summary>The finer precisions stay usable for the range they can hold.</summary>
+    [Theory]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    public void A_value_inside_the_precision_range_is_accepted(int precision)
+    {
+        var mapping = new ClickHouseDateTimeOffsetTypeMapping(precision, "UTC");
+
+        var literal = mapping.GenerateSqlLiteral(new DateTimeOffset(2026, 1, 15, 10, 30, 45, TimeSpan.Zero));
+
+        Assert.Contains("2026-01-15 10:30:45", literal);
+    }
+
+    /// <summary>Precision 7 covers the whole DateTimeOffset range, which is why it is the default.</summary>
+    [Theory]
+    [InlineData(7)]
+    public void The_default_precision_holds_the_whole_datetimeoffset_range(int precision)
+    {
+        var mapping = new ClickHouseDateTimeOffsetTypeMapping(precision, "UTC");
+
+        Assert.NotNull(mapping.GenerateSqlLiteral(DateTimeOffset.MinValue));
+        Assert.NotNull(mapping.GenerateSqlLiteral(DateTimeOffset.MaxValue));
+    }
+
+    /// <summary>
+    /// The bulk insert path gives the driver model values without consulting the type mapping, so it
+    /// asks the mapping to check the range itself. Without that, SaveChanges wrote a wrapped date.
+    /// </summary>
+    [Fact]
+    public async Task SaveChanges_refuses_a_value_the_column_precision_cannot_hold()
+    {
+        using var ctx = new DateTimeOffsetDbContext(_fixture.ConnectionString);
+        ctx.PrecisionEntities.Add(new DateTimeOffsetPrecisionEntity
+        {
+            Id = 9001,
+            Millis = new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.Zero),
+            Nanos = DateTimeOffset.MaxValue
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => ctx.SaveChangesAsync());
+
+        Assert.Contains("wrap", ex.Message);
     }
 }

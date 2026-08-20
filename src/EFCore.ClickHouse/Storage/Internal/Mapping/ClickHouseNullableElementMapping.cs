@@ -36,6 +36,30 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
 {
     public RelationalTypeMapping Inner { get; }
 
+    /// <summary>
+    /// The CLR type a composite should give this component: <c>Nullable&lt;T&gt;</c>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RelationalTypeMapping.ClrType"/> cannot be trusted for this. When the inner
+    /// mapping carries a <see cref="Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter"/>
+    /// — an <c>Enum8</c> component does — EF Core takes the mapping's CLR type from the converter's
+    /// model type, which is the non-nullable <c>T</c>, and the <c>Nullable&lt;T&gt;</c> asked for in
+    /// the constructor is discarded. A composite built from <c>ClrType</c> alone would then be
+    /// <c>T[]</c> where the property is <c>T?[]</c>, and the query would fail to compile.
+    /// </remarks>
+    public Type NullableClrType
+        => Nullable.GetUnderlyingType(ClrType) is not null
+            ? ClrType
+            : typeof(Nullable<>).MakeGenericType(ClrType);
+
+    /// <summary>
+    /// The CLR type <paramref name="mapping"/> contributes as a component of a composite. Prefer
+    /// this over <see cref="RelationalTypeMapping.ClrType"/> wherever an <c>Array</c>, <c>Map</c>,
+    /// <c>Tuple</c> or <c>Variant</c> builds its own CLR type from its components.
+    /// </summary>
+    public static Type ComponentClrType(RelationalTypeMapping mapping)
+        => mapping is ClickHouseNullableElementMapping wrapper ? wrapper.NullableClrType : mapping.ClrType;
+
     public ClickHouseNullableElementMapping(RelationalTypeMapping inner)
         : base(BuildParameters(inner))
     {
@@ -85,19 +109,9 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
     /// <c>Nested type Nullable(T) cannot be inside Nullable type</c>.
     /// </remarks>
     private static string FormatStoreType(string innerStoreType)
-        => DenotesNullable(innerStoreType) ? innerStoreType : $"Nullable({innerStoreType})";
-
-    private static bool DenotesNullable(string storeType)
-    {
-        var s = storeType.AsSpan().Trim();
-
-        // LowCardinality is the only wrapper ClickHouse allows outside Nullable, so Nullable( is not always first.
-        // LowCardinality(Nullable(T)) is already nullable; the wrapper must not be added again.
-        if (s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase) && s.EndsWith(")"))
-            s = s["LowCardinality(".Length..^1].Trim();
-
-        return s.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase);
-    }
+        => ClickHouseStoreTypeName.IsNullable(innerStoreType)
+            ? innerStoreType
+            : $"Nullable({innerStoreType})";
 
     protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters)
         => new ClickHouseNullableElementMapping(parameters, Inner);

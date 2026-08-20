@@ -126,9 +126,12 @@ b.Property(e => e.RecordedAt).HasColumnType("DateTime64(3, 'UTC')");   // millis
 b.Property(e => e.RecordedAt).HasPrecision(3);                         // the same thing
 ```
 
-Do not go above precision 7. .NET cannot represent more than 7 fractional digits, and the driver
-overflows an `Int64` at precision 8 or 9 for dates far from the epoch, which corrupts the value
-without an error.
+Precision 8 and 9 are accepted, but they hold a narrower range of dates. ClickHouse stores a
+`DateTime64(P)` as an `Int64` count of 10^-P seconds, so precision 9 reaches only 1678 to 2262 and
+precision 8 about 1970 ± 2900 years. A value outside the range wraps rather than reporting, so the
+provider checks it and throws on write instead. Precision 7 has no such limit — it spans roughly
+29 000 years, which is why it is the default. Note also that .NET cannot represent more than 7
+fractional digits, so the extra precision stores no extra detail.
 
 **Keep `'UTC'` in the store type** unless you have a reason to change it. For a timezone-less type
 such as `DateTime64(7)`, the server reads the query parameter in its `session_timezone`, which moves
@@ -142,11 +145,13 @@ correctly and returns that zone's offset. Two limits apply to such a column:
 - In a zone with daylight saving, the repeated hour when clocks go back is ambiguous, because the
   driver gives a wall clock and drops the offset. The provider recovers the instant where the zone's
   standard offset is zero, such as `Europe/London`. Where both candidate offsets are non-zero, such
-  as `Europe/Paris`, the value can read back one hour early.
-- Dates at the far ends of the `DateTimeOffset` range do not survive, as described above. A named
-  zone is worse than a fixed offset here: zones carry a Local Mean Time offset for year 1
-  (`+09:18:59` for `Asia/Tokyo`), so a value near `DateTimeOffset.MinValue` reads back quietly
-  shifted rather than reporting an error.
+  as `Europe/Paris`, the instant cannot be recovered and the read throws — reporting one of the two
+  would move the instant and give the same result for two different ones.
+- A value before 1900 in a named zone throws. Before standard time a zone's offset is Local Mean
+  Time, which IANA records to the second (`+09:18:59` for `Asia/Tokyo`) while `TimeZoneInfo` may
+  round it to the minute, so the instant cannot be reproduced exactly. Store such a value in a
+  `'UTC'` column, which has no such offset.
+- Dates at the far ends of the `DateTimeOffset` range do not survive, as described above.
 
 A column can also declare a fixed UTC offset instead of a named zone. ClickHouse spells this
 `Fixed/UTC±HH:MM:SS`, with two digits in every field — the server rejects `Fixed/UTC+5:30:00` and
@@ -156,17 +161,16 @@ A column can also declare a fixed UTC offset instead of a named zone. ClickHouse
 b.Property(e => e.RecordedAt).HasColumnType("DateTime64(7, 'Fixed/UTC+05:30:00')");
 ```
 
-Neither limit above applies here: the host needs no timezone data, and a fixed offset is never
-ambiguous. Two limits of its own do, and each reports the timezone and the reason rather than
-failing obscurely:
+None of the limits above applies here: the host needs no timezone data, a fixed offset is never
+ambiguous, and it does not change before 1900. Two points of its own do:
 
-- `DateTimeOffset` holds an offset only within plus or minus 14 hours, and only in whole minutes.
-  ClickHouse accepts more, so `Fixed/UTC+15:00:00` and `Fixed/UTC+00:00:42` cannot be read into one.
+- `DateTimeOffset` holds an offset only within plus or minus 14 hours, and only in whole minutes,
+  while ClickHouse accepts more. Such a column still reads correctly — the instant is exact, because
+  the offset is known — but the value comes back at offset `+00:00` rather than the column's offset.
+  This mapping does not keep the offset in any case.
 - ClickHouse does not hold the minutes and seconds fields to 59 — it carries the excess, so
-  `Fixed/UTC+05:60:00` is a legal name for `+06:00`. The driver reads only the plain spelling, so
-  declare that offset as `Fixed/UTC+06:00:00`.
-
-Map such a column as `DateTime` if you cannot change how it is declared.
+  `Fixed/UTC+05:60:00` is a legal name for `+06:00`. The driver does not read such a name, so the
+  read throws rather than depend on that. Declare the offset as `Fixed/UTC+06:00:00` instead.
 
 `DateTimeOffset` also composes into the collection types, so `DateTimeOffset[]`,
 `List<DateTimeOffset>`, `Dictionary<string, DateTimeOffset>` and `Tuple<DateTimeOffset, …>` all

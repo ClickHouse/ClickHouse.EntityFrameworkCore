@@ -542,9 +542,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         // the wrapper below re-apply it.
         var hint = clrTypeHint is null ? null : Nullable.GetUnderlyingType(clrTypeHint) ?? clrTypeHint;
 
-        var inner = hint is null
-            ? FindMapping(innerStoreType)
-            : FindMapping(hint, innerStoreType) ?? FindMapping(innerStoreType);
+        var inner = hint is null ? FindMapping(innerStoreType) : FindComponentMappingForHint(hint, innerStoreType);
 
         if (inner is null)
             return null;
@@ -562,32 +560,48 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     }
 
     /// <summary>
+    /// Resolves a component mapping for an explicit store type, for a component whose CLR type the
+    /// model states.
+    /// </summary>
+    /// <remarks>
+    /// Asking for the store type and the CLR type together is not enough on its own. A resolver
+    /// keyed on the store type may answer with its own default CLR type and ignore the one asked
+    /// for — <c>Date32</c> answers <see cref="DateOnly"/> whether or not the property is a
+    /// <see cref="DateTime"/>. The composite would then be built from the wrong element type, and
+    /// the query would fail to compile with a coercion error naming a type the user never wrote.
+    /// So the answer is checked, and a mapping that did not honour the request is not used.
+    /// </remarks>
+    private RelationalTypeMapping? FindComponentMappingForHint(Type hint, string innerStoreType)
+    {
+        var withHint = FindMapping(hint, innerStoreType);
+        if (withHint is not null && withHint.ClrType == hint)
+            return withHint;
+
+        // The store type did not yield the requested CLR type. Ask for the CLR type alone, then
+        // keep the store type the model asked for, which is what the column actually is.
+        var byClrType = FindMapping(hint);
+        if (byClrType is not null)
+        {
+            if (string.Equals(byClrType.StoreType, innerStoreType, StringComparison.Ordinal))
+                return byClrType;
+
+            RelationalTypeMappingInfo? cloneInfo = new RelationalTypeMappingInfo(
+                type: hint,
+                storeTypeName: innerStoreType,
+                storeTypeNameBase: null);
+            return byClrType.Clone(in cloneInfo, storeTypePostfix: StoreTypePostfix.None);
+        }
+
+        return withHint ?? FindMapping(innerStoreType);
+    }
+
+    /// <summary>
     /// Returns true when <paramref name="storeType"/> directly or indirectly wraps with
     /// <c>Nullable(...)</c>. LowCardinality is a storage-only wrapper, but composes with
     /// Nullable (<c>LowCardinality(Nullable(T))</c>) so we strip it to check the inner.
     /// </summary>
     private static bool HasNullableElementWrapper(string storeType)
-    {
-        var s = storeType.AsSpan().TrimStart();
-        while (true)
-        {
-            if (s.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase))
-                return true;
-            if (s.StartsWith("LowCardinality(", StringComparison.OrdinalIgnoreCase))
-            {
-                // Drop the LowCardinality( and matching ) and look at the inner.
-                var openParen = s.IndexOf('(');
-                if (openParen < 0)
-                    return false;
-                s = s[(openParen + 1)..];
-                // Trim the trailing matching paren (no need to find the exact match — any
-                // Nullable( inside will be detected by the StartsWith check on the next loop).
-                s = s.TrimStart();
-                continue;
-            }
-            return false;
-        }
-    }
+        => ClickHouseStoreTypeName.IsNullable(storeType);
 
     private static Type? GetCollectionElementType(Type? clrType)
     {
@@ -866,38 +880,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     }
 
     private static bool TryUnwrapPrefix(string s, string prefix, out string inner)
-    {
-        inner = s;
-        if (s.Length <= prefix.Length + 2 // need at least prefix + "(X)"
-            || !s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            || s[prefix.Length] != '(')
-            return false;
-
-        // Find matching close paren for the one at prefix.Length
-        var depth = 0;
-        for (var i = prefix.Length; i < s.Length; i++)
-        {
-            if (s[i] == '(')
-                depth++;
-            else if (s[i] == ')')
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    // Only unwrap if this closing paren is the last character
-                    if (i == s.Length - 1)
-                    {
-                        inner = s[(prefix.Length + 1)..i].Trim();
-                        return true;
-                    }
-
-                    return false;
-                }
-            }
-        }
-
-        return false;
-    }
+        => ClickHouseStoreTypeName.TryUnwrap(s, prefix, out inner);
 
     /// <summary>
     /// Extracts the single inner type from a parameterized store type like Array(Int32).

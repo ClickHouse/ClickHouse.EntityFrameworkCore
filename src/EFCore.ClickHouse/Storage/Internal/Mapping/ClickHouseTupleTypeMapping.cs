@@ -26,7 +26,9 @@ public class ClickHouseTupleTypeMapping : RelationalTypeMapping
         : base(
             new RelationalTypeMappingParameters(
                 new CoreTypeMappingParameters(
-                    MakeTupleType(elementMappings.Select(m => m.ClrType).ToArray(), useValueTuple)),
+                    MakeTupleType(
+                        elementMappings.Select(ClickHouseNullableElementMapping.ComponentClrType).ToArray(),
+                        useValueTuple)),
                 FormatStoreType(elementMappings),
                 dbType: System.Data.DbType.Object))
     {
@@ -57,10 +59,12 @@ public class ClickHouseTupleTypeMapping : RelationalTypeMapping
         if (!ClrType.IsValueType && !needsComponentConversion)
             return Expression.Convert(expression, ClrType);
 
-        var componentConverters = Expression.NewArrayInit(
-            typeof(Func<object, object?>),
-            ElementMappings.Select(
-                mapping => (Expression)ClickHouseComponentConversion.CreateConverter(mapping, typeof(object))));
+        // Build the delegate array once and embed it as a constant. Expression.NewArrayInit would
+        // instead make the allocation part of the materializer, so every row read would allocate a
+        // fresh array of the same delegates — about 40 bytes per row on a two-component tuple.
+        var componentConverters = Expression.Constant(
+            ElementMappings.Select(ClickHouseComponentConversion.CreateComponentReader).ToArray(),
+            typeof(Func<object, object?>[]));
 
         return Expression.Call(
             ConvertMethod.MakeGenericMethod(ClrType),
