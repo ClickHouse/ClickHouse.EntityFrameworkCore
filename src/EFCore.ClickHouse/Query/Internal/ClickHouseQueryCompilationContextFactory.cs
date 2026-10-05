@@ -1,3 +1,5 @@
+#pragma warning disable EF9100
+
 using Microsoft.EntityFrameworkCore.Query;
 
 namespace ClickHouse.EntityFrameworkCore.Query.Internal;
@@ -16,5 +18,8 @@ public class ClickHouseQueryCompilationContextFactory : IQueryCompilationContext
     }
 
     public QueryCompilationContext Create(bool async)
-        => new ClickHouseQueryCompilationContext(_dependencies, _relationalDependencies, async);
+        => new ClickHouseQueryCompilationContext(_dependencies, _relationalDependencies, async, precompiling: false);
+
+    public QueryCompilationContext CreatePrecompiled(bool async)
+        => new ClickHouseQueryCompilationContext(_dependencies, _relationalDependencies, async, precompiling: true);
 }

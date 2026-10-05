@@ -1,5 +1,8 @@
+#pragma warning disable EF9100
+
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
+using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
@@ -38,8 +41,9 @@ internal static class ClickHouseComponentConversion
 {
     // Keyed by (mapping, target type). The compiled converter is embedded in the materializer as a
     // constant, so it is built once per mapping rather than once per row.
-    private static readonly ConcurrentDictionary<(RelationalTypeMapping Mapping, Type Target), Delegate> ConverterCache = new();
+    private sealed record ComponentReader(LambdaExpression Quotable, Delegate Compiled);
 
+    private static readonly ConcurrentDictionary<(RelationalTypeMapping Mapping, Type Target), ComponentReader> ReaderCache = new();
     private static readonly ConcurrentDictionary<RelationalTypeMapping, bool> NeedsConversionCache = new();
 
     /// <summary>
@@ -119,21 +123,84 @@ internal static class ClickHouseComponentConversion
     /// convert are not usable from precompiled queries.
     /// </remarks>
     public static Expression CreateConverter(RelationalTypeMapping mapping, Type componentType)
-        => Expression.Constant(
-            GetConverter(mapping, componentType),
-            typeof(Func<,>).MakeGenericType(typeof(object), componentType));
+    {
+        var reader = GetReader(mapping, componentType);
+        return Lift(reader.Compiled, reader.Quotable, "componentReader");
+    }
 
     /// <summary>
-    /// Returns the compiled reader for one component as a <c>Func&lt;object, object?&gt;</c>, for a
-    /// caller that holds the readers in an array rather than embedding each one separately.
+    /// Returns an expression of type <c>Func&lt;object, object?&gt;[]</c> holding one reader per mapping.
     /// </summary>
-    public static Func<object, object?> CreateComponentReader(RelationalTypeMapping mapping)
-        => (Func<object, object?>)GetConverter(mapping, typeof(object));
+    public static Expression CreateComponentReaders(IReadOnlyList<RelationalTypeMapping> mappings)
+    {
+        var readers = mappings.Select(m => GetReader(m, typeof(object))).ToArray();
 
-    private static Delegate GetConverter(RelationalTypeMapping mapping, Type componentType)
-        => ConverterCache.GetOrAdd(
+        var compiled = readers.Select(r => (Func<object, object?>)r.Compiled).ToArray();
+        var resolver = Expression.NewArrayInit(
+            typeof(Func<object, object?>),
+            readers.Select(Expression (r) => r.Quotable));
+
+        return Lift(compiled, resolver, "componentReaders");
+    }
+
+
+    private static LiftableConstantExpression Lift(object runtimeValue, Expression resolverBody, string variableName)
+    {
+        var context = Expression.Parameter(typeof(MaterializerLiftableConstantContext), "context");
+
+        return new LiftableConstantExpression(
+            runtimeValue,
+            Expression.Lambda(resolverBody, context),
+            variableName,
+            resolverBody.Type);
+    }
+
+    private static ComponentReader BuildReader(RelationalTypeMapping mapping, Type componentType)
+    {
+        var parameter = Expression.Parameter(typeof(object), "component");
+        var body = mapping.CustomizeDataReaderExpression(parameter);
+
+        if (mapping.Converter is { } valueConverter)
+        {
+            body = Coerce(body, valueConverter.ProviderClrType, mapping, componentType);
+            body = Expression.Invoke(valueConverter.ConvertFromProviderExpression, body);
+        }
+
+        body = Coerce(body, componentType, mapping, componentType);
+
+        var delegateType = typeof(Func<,>).MakeGenericType(typeof(object), componentType);
+
+        // A nested composite's own CustomizeDataReaderExpression already returned liftable constants.
+        // Neither lambda can keep them: the compiled one would not compile, and the quotable one
+        // must not hold a constant. So each gets the matching replacement.
+        var runtime = Expression.Lambda(delegateType, new LiftedConstantInliner(useResolvers: false).Visit(body), parameter);
+        var quotable = Expression.Lambda(delegateType, new LiftedConstantInliner(useResolvers: true).Visit(body), parameter);
+
+        return new ComponentReader(quotable, runtime.Compile());
+    }
+    
+    private sealed class LiftedConstantInliner(bool useResolvers) : ExpressionVisitor
+    {
+        protected override Expression VisitExtension(Expression node)
+        {
+            if (node is not LiftableConstantExpression lifted)
+                return base.VisitExtension(node);
+
+            // Runtime path: back to the prebuilt delegate, so a nested reader costs nothing per row.
+            if (!useResolvers)
+                return Expression.Constant(lifted.OriginalExpression, lifted.Type);
+
+            // Quotable path: the resolver body. It runs once, when the outer reader is created.
+            // Resolvers built by Lift() never reference their context parameter, so the body can be
+            // used directly.
+            return Visit(lifted.ResolverExpression.Body);
+        }
+    }
+
+    private static ComponentReader GetReader(RelationalTypeMapping mapping, Type componentType)
+        => ReaderCache.GetOrAdd(
             (mapping, componentType),
-            static key => Compile(key.Mapping, key.Target));
+            static key => BuildReader(key.Mapping, key.Target));
 
     private static Delegate Compile(RelationalTypeMapping mapping, Type componentType)
     {
