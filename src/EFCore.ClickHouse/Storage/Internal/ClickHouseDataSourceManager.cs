@@ -20,7 +20,11 @@ public class ClickHouseDataSourceManager : IDisposable, IAsyncDisposable
             _ => null
         };
 
-    private ClickHouseDataSource GetOrCreateDataSource(string connectionString, bool joinNullSemanticsDisabled)
+    /// <summary>
+    /// Returns the provider-owned data source for a connection string. There is one data source,
+    /// and one HTTP connection pool, for each effective connection string.
+    /// </summary>
+    public ClickHouseDataSource GetOrCreateDataSource(string connectionString, bool joinNullSemanticsDisabled)
     {
         var effectiveConnectionString = joinNullSemanticsDisabled
             ? connectionString

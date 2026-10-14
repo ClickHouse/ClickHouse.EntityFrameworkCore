@@ -10,8 +10,14 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
 
 public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseRelationalConnection
 {
-    private readonly DbDataSource? _dataSource;
+    private readonly ClickHouseDataSourceManager? _dataSourceManager;
     private readonly bool _joinNullSemanticsDisabled;
+    private DbDataSource? _dataSource;
+
+    // Insert client for a ClickHouseConnection that has no ClickHouseDataSource, and the
+    // connection settings object that it copies.
+    private ClickHouseClient? _connectionClient;
+    private ClickHouseClientSettings? _connectionClientSource;
 
     public ClickHouseRelationalConnection(
         RelationalConnectionDependencies dependencies,
@@ -19,6 +25,7 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         : base(dependencies)
     {
         var extension = dependencies.ContextOptions.FindExtension<ClickHouseOptionsExtension>();
+        _dataSourceManager = dataSourceManager;
         _dataSource = dataSourceManager.GetDataSource(extension);
         _joinNullSemanticsDisabled = extension?.JoinNullSemanticsDisabled ?? false;
     }
@@ -26,12 +33,59 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     // Used by CreateMasterConnection only
     private ClickHouseRelationalConnection(
         RelationalConnectionDependencies dependencies,
-        DbDataSource? dataSource,
         bool joinNullSemanticsDisabled)
         : base(dependencies)
     {
-        _dataSource = dataSource;
         _joinNullSemanticsDisabled = joinNullSemanticsDisabled;
+    }
+
+    /// <summary>
+    /// Sets the connection string, and uses the provider-owned data source for it. This removes a
+    /// <see cref="DbDataSource"/> that was configured with <c>UseClickHouse(DbDataSource)</c>.
+    /// </summary>
+    public override string? ConnectionString
+    {
+        get => base.ConnectionString;
+        set
+        {
+            var dataSource = string.IsNullOrWhiteSpace(value)
+                ? null
+                : _dataSourceManager?.GetOrCreateDataSource(value, _joinNullSemanticsDisabled);
+
+            base.ConnectionString = value;
+            _dataSource = dataSource;
+            DisposeConnectionClient();
+        }
+    }
+
+    /// <summary>
+    /// Sets the connection. A connection that is not null replaces the configured data source,
+    /// so reads, writes and the master connection all use it.
+    /// </summary>
+    public override void SetDbConnection(DbConnection? value, bool contextOwnsConnection)
+    {
+        base.SetDbConnection(value, contextOwnsConnection);
+
+        if (value is not null)
+            _dataSource = null;
+
+        DisposeConnectionClient();
+    }
+
+    // Dispose and DisposeAsync call these with disposeDbConnection: true. A pooled context keeps
+    // its connection between leases, so it keeps the insert client too.
+    protected override void ResetState(bool disposeDbConnection)
+    {
+        base.ResetState(disposeDbConnection);
+        if (disposeDbConnection)
+            DisposeConnectionClient();
+    }
+
+    protected override async ValueTask ResetStateAsync(bool disposeDbConnection)
+    {
+        await base.ResetStateAsync(disposeDbConnection).ConfigureAwait(false);
+        if (disposeDbConnection)
+            DisposeConnectionClient();
     }
 
     protected override DbConnection CreateDbConnection()
@@ -120,7 +174,6 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
         return new ClickHouseRelationalConnection(
             Dependencies with { ContextOptions = optionsBuilder.Options },
-            dataSource: null,
             _joinNullSemanticsDisabled);
     }
 
@@ -157,13 +210,45 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         CancellationToken cancellationToken = default)
         => Task.FromResult<IDbContextTransaction>(new ClickHouseTransaction());
 
+    /// <summary>
+    /// Returns the client for inserts. With a <see cref="ClickHouseDataSource"/>, this is the data
+    /// source client. With a <see cref="ClickHouseConnection"/>, the driver does not make the
+    /// connection client public, so this is a client that this connection owns. It uses a copy of
+    /// the connection settings and the database of the connection, because inserts go to the client
+    /// database and queries go to <see cref="System.Data.Common.DbConnection.Database"/>.
+    /// </summary>
     public IClickHouseClient GetClickHouseClient()
     {
         if (_dataSource is ClickHouseDataSource clickHouseDataSource)
             return clickHouseDataSource.GetClient();
 
-        throw new InvalidOperationException(
-            "Cannot obtain IClickHouseClient. The connection must be configured with a connection string " +
-            "or ClickHouseDataSource, not a raw DbConnection.");
+        var connection = DbConnection;
+        if (connection is not ClickHouseConnection clickHouseConnection)
+        {
+            throw new InvalidOperationException(
+                $"Inserts need a {nameof(ClickHouseConnection)}, but the connection is a " +
+                $"'{connection.GetType().Name}'. Configure the context with a connection string, a " +
+                $"{nameof(ClickHouseDataSource)} or a {nameof(ClickHouseConnection)}.");
+        }
+
+        var settings = clickHouseConnection.Settings;
+        var database = clickHouseConnection.Database;
+        if (_connectionClient is null
+            || !ReferenceEquals(_connectionClientSource, settings)
+            || _connectionClient.Settings.Database != database)
+        {
+            DisposeConnectionClient();
+            _connectionClient = new ClickHouseClient(new ClickHouseClientSettings(settings) { Database = database });
+            _connectionClientSource = settings;
+        }
+
+        return _connectionClient;
+    }
+
+    private void DisposeConnectionClient()
+    {
+        _connectionClient?.Dispose();
+        _connectionClient = null;
+        _connectionClientSource = null;
     }
 }
