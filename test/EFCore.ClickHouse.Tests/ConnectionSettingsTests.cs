@@ -102,9 +102,7 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
     public async Task UseClickHouse_DbConnection_PreservesCodeOnlySettings()
     {
         // Settings that only exist in code (no connection-string equivalent) must survive the
-        // join_use_nulls injection performed on Open. Previously
-        // the provider rewrote ConnectionString, which rebuilt the driver's settings from the
-        // string alone and silently dropped SkipServerCertificateValidation.
+        // join_use_nulls injection performed on Open.
         var settings = new ClickHouseClientSettings(_fixture.ConnectionString)
         {
             SkipServerCertificateValidation = true

@@ -45,31 +45,13 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     protected override bool SupportsAmbientTransactions => false;
 
     /// <summary>
-    /// Ensures <c>join_use_nulls=1</c> is applied to the underlying connection before it is
-    /// opened. Required because ClickHouse's default (0) makes LEFT JOIN return column defaults
-    /// rather than NULL, which breaks EF Core's null-based navigation detection. For a
-    /// <see cref="ClickHouseConnection"/> the setting is recorded on its
-    /// <see cref="ClickHouseConnection.Settings"/>; the connection-string fallback is used only
-    /// for a non-ClickHouse <see cref="DbConnection"/>.
-    ///
-    /// The ClickHouse.Driver HTTP protocol is stateless by default (<c>UseSession=False</c>):
-    /// a standalone <c>SET join_use_nulls = 1</c> statement does not persist to subsequent
-    /// queries. Instead the driver applies <c>set_*</c> parameters (the driver's
-    /// <c>CustomSettings</c>) as URL parameters on every query, so we must record the setting on
-    /// the connection before it is opened.
-    ///
-    /// Applies on all paths. For the connection-string path the setting is already baked in by
-    /// <see cref="ClickHouseDataSourceManager.EnsureDefaultSettings"/>; this override covers
-    /// the <see cref="DbConnection"/> and <see cref="DbDataSource"/> paths where EF hands us
-    /// connection objects we didn't construct. We only mutate when the connection is Closed
-    /// and the user has not explicitly configured <c>join_use_nulls</c>.
-    ///
-    /// For a <see cref="ClickHouseConnection"/> we inject the setting by copying and reassigning
-    /// its <see cref="ClickHouseConnection.Settings"/> rather than rewriting
-    /// <see cref="DbConnection.ConnectionString"/>. Assigning the connection string rebuilds the
-    /// driver's settings purely from the string, silently discarding code-only settings such as
-    /// <c>SkipServerCertificateValidation</c> or a custom <c>HttpClient</c>. Only the string
-    /// fallback (for a non-ClickHouse <see cref="DbConnection"/>) mutates the connection string.
+    /// Applies <c>join_use_nulls=1</c> to a closed connection before it opens, unless the user set
+    /// <c>join_use_nulls</c> or disabled join null semantics. With the ClickHouse default (0), a
+    /// LEFT JOIN returns column defaults instead of NULL, and EF Core cannot detect a missing
+    /// navigation. The setting must be on the connection, because the driver sends it as a URL
+    /// parameter with each HTTP request; a <c>SET</c> statement does not persist between requests.
+    /// The connection-string path already has the setting from
+    /// <see cref="ClickHouseDataSourceManager.EnsureDefaultSettings"/>.
     /// </summary>
     public override bool Open(bool errorsExpected = false)
     {
@@ -88,9 +70,8 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         if (_joinNullSemanticsDisabled || DbConnection.State != ConnectionState.Closed)
             return;
 
-        // Prefer mutating the strongly-typed settings so that code-only settings (which have no
-        // connection-string equivalent) are preserved. Rewriting ConnectionString would rebuild
-        // the driver's settings from the string alone and drop them.
+        // Assigning ConnectionString rebuilds the driver settings from the string, which loses
+        // settings that have no connection-string key, such as SkipServerCertificateValidation.
         if (DbConnection is ClickHouseConnection clickHouseConnection)
         {
             var settings = clickHouseConnection.Settings;
@@ -121,13 +102,8 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
         if (TryGetClickHouseClientSettings(out var settings))
         {
-            // Clone the driver settings and only swap the database. Round-tripping through a
-            // connection string here would drop code-only settings that have no connection-string
-            // representation (SkipServerCertificateValidation, BearerToken, HttpClient,
-            // HttpClientFactory, LoggerFactory, CustomHeaders, ApplicationInfo, EnableDebugMode,
-            // and the parameter/read converters), breaking database create/drop against servers
-            // that depend on them (e.g. a self-signed certificate). The connection is owned by the
-            // context so it is disposed with the master connection.
+            // Copy the settings object, not the connection string, to keep settings that have no
+            // connection-string key. The master connection owns the new connection and disposes it.
             var masterSettings = new ClickHouseClientSettings(settings) { Database = "default" };
             optionsBuilder.UseClickHouse(new ClickHouseConnection(masterSettings), contextOwnsConnection: true);
         }
