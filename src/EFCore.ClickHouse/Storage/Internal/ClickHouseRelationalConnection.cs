@@ -14,7 +14,11 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     private readonly bool _joinNullSemanticsDisabled;
     private DbDataSource? _dataSource;
 
-    // Insert client for a ClickHouseConnection that has no ClickHouseDataSource, and the
+    // The connection that CreateDbConnection got from _dataSource. Only this connection can use
+    // the data source client and settings.
+    private DbConnection? _dataSourceConnection;
+
+    // Insert client for a ClickHouseConnection that does not use the data source client, and the
     // connection settings object that it copies.
     private ClickHouseClient? _connectionClient;
     private ClickHouseClientSettings? _connectionClientSource;
@@ -52,15 +56,17 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
                 ? null
                 : _dataSourceManager?.GetOrCreateDataSource(value, _joinNullSemanticsDisabled);
 
+            // The base setter also applies the string to the current connection, if there is one.
+            // That connection then does not come from the new data source.
             base.ConnectionString = value;
             _dataSource = dataSource;
+            _dataSourceConnection = null;
             DisposeConnectionClient();
         }
     }
 
     /// <summary>
-    /// Sets the connection. A connection that is not null replaces the configured data source,
-    /// so reads, writes and the master connection all use it.
+    /// Sets the connection. A connection that is not null replaces the configured data source.
     /// </summary>
     public override void SetDbConnection(DbConnection? value, bool contextOwnsConnection)
     {
@@ -69,6 +75,7 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         if (value is not null)
             _dataSource = null;
 
+        _dataSourceConnection = null;
         DisposeConnectionClient();
     }
 
@@ -89,12 +96,16 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     }
 
     protected override DbConnection CreateDbConnection()
-        => _dataSource?.CreateConnection()
-           ?? new ClickHouseConnection(
-               ClickHouseClientIdentity.CreateSettings(
-                   _joinNullSemanticsDisabled
-                       ? ConnectionString!
-                       : ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!)));
+    {
+        if (_dataSource is not null)
+            return _dataSourceConnection = _dataSource.CreateConnection();
+
+        return new ClickHouseConnection(
+            ClickHouseClientIdentity.CreateSettings(
+                _joinNullSemanticsDisabled
+                    ? ConnectionString!
+                    : ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!)));
+    }
 
     protected override bool SupportsAmbientTransactions => false;
 
@@ -179,13 +190,14 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
     private bool TryGetClickHouseClientSettings(out ClickHouseClientSettings settings)
     {
-        if (_dataSource is ClickHouseDataSource clickHouseDataSource)
+        var connection = DbConnection;
+        if (GetDataSourceOfConnection(connection) is { } dataSource)
         {
-            settings = clickHouseDataSource.Settings;
+            settings = dataSource.Settings;
             return true;
         }
 
-        if (DbConnection is ClickHouseConnection clickHouseConnection)
+        if (connection is ClickHouseConnection clickHouseConnection)
         {
             settings = clickHouseConnection.Settings;
             return true;
@@ -193,6 +205,27 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
         settings = null!;
         return false;
+    }
+
+    /// <summary>
+    /// Returns the <see cref="ClickHouseDataSource"/> that has the same target as the connection, or
+    /// null. A <see cref="ClickHouseConnection"/> must come from the data source and still have the
+    /// data source database, because <c>ChangeDatabase</c> and a new connection string change the
+    /// target of the connection only. Another connection type (for example, a connection that an
+    /// interceptor wraps) cannot give its settings, so it uses the data source.
+    /// </summary>
+    private ClickHouseDataSource? GetDataSourceOfConnection(DbConnection connection)
+    {
+        if (_dataSource is not ClickHouseDataSource dataSource)
+            return null;
+
+        if (connection is not ClickHouseConnection)
+            return dataSource;
+
+        return ReferenceEquals(connection, _dataSourceConnection)
+               && connection.Database == dataSource.Settings.Database
+            ? dataSource
+            : null;
     }
 
     public override IDbContextTransaction BeginTransaction(IsolationLevel isolationLevel)
@@ -211,18 +244,18 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         => Task.FromResult<IDbContextTransaction>(new ClickHouseTransaction());
 
     /// <summary>
-    /// Returns the client for inserts. With a <see cref="ClickHouseDataSource"/>, this is the data
-    /// source client. With a <see cref="ClickHouseConnection"/>, the driver does not make the
-    /// connection client public, so this is a client that this connection owns. It uses a copy of
-    /// the connection settings and the database of the connection, because inserts go to the client
-    /// database and queries go to <see cref="System.Data.Common.DbConnection.Database"/>.
+    /// Returns the client for inserts, with the same target as the current connection. Inserts go to
+    /// the client database and queries go to <see cref="System.Data.Common.DbConnection.Database"/>.
+    /// For a connection from the <see cref="ClickHouseDataSource"/>, this is the data source client.
+    /// For another <see cref="ClickHouseConnection"/>, the driver does not make the connection client
+    /// public, so this object owns a client with a copy of the connection settings and database.
     /// </summary>
     public IClickHouseClient GetClickHouseClient()
     {
-        if (_dataSource is ClickHouseDataSource clickHouseDataSource)
-            return clickHouseDataSource.GetClient();
-
         var connection = DbConnection;
+        if (GetDataSourceOfConnection(connection) is { } dataSource)
+            return dataSource.GetClient();
+
         if (connection is not ClickHouseConnection clickHouseConnection)
         {
             throw new InvalidOperationException(

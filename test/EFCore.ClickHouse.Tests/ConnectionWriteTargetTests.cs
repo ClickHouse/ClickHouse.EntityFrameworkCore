@@ -67,6 +67,38 @@ public class ConnectionWriteTargetTests : IClassFixture<ConnectionWriteTargetFix
     }
 
     [Fact]
+    public async Task SaveChanges_ConnectionString_UsesChangedDatabase()
+    {
+        const string marker = nameof(SaveChanges_ConnectionString_UsesChangedDatabase);
+        await using var ctx = new WriteTargetContext(o => o.UseClickHouse(_fixture.ConnectionStringA));
+        ctx.Database.GetDbConnection().ChangeDatabase(_fixture.DatabaseB);
+
+        ctx.Rows.Add(Row(1, marker));
+        await ctx.SaveChangesAsync();
+        await ctx.BulkInsertAsync([Row(2, marker)]);
+
+        Assert.Equal(2, await ctx.Rows.CountAsync(r => r.Marker == marker));
+        await AssertRowsInTargetBAsync(marker, 2);
+    }
+
+    [Fact]
+    public async Task SetConnectionString_DbConnection_KeepsChangedDatabase()
+    {
+        // The driver keeps the ChangeDatabase value when the connection string changes.
+        const string marker = nameof(SetConnectionString_DbConnection_KeepsChangedDatabase);
+        await using var connection = new ClickHouseConnection(_fixture.ConnectionStringA);
+        connection.ChangeDatabase(_fixture.DatabaseB);
+        await using var ctx = new WriteTargetContext(o => o.UseClickHouse(connection));
+
+        ctx.Database.SetConnectionString(_fixture.ConnectionStringA);
+        ctx.Rows.Add(Row(1, marker));
+        await ctx.SaveChangesAsync();
+
+        Assert.Equal(1, await ctx.Rows.CountAsync(r => r.Marker == marker));
+        await AssertRowsInTargetBAsync(marker, 1);
+    }
+
+    [Fact]
     public async Task SetConnectionString_BeforeFirstUse_WritesToNewTarget()
     {
         const string marker = nameof(SetConnectionString_BeforeFirstUse_WritesToNewTarget);

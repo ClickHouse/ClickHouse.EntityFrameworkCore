@@ -1,7 +1,9 @@
+using System.Data.Common;
 using ClickHouse.Driver;
 using ClickHouse.Driver.ADO;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using Xunit;
@@ -37,6 +39,14 @@ public class ConnectionTargetTests
             : base(options)
         {
         }
+    }
+
+    private sealed class WrappingInterceptor : DbConnectionInterceptor
+    {
+        public override InterceptionResult<DbConnection> ConnectionCreating(
+            ConnectionCreatingEventData eventData,
+            InterceptionResult<DbConnection> result)
+            => InterceptionResult<DbConnection>.SuppressWithResult(new FakeDbConnection(TargetA));
     }
 
     private static IClickHouseClient WriteClient(DbContext ctx)
@@ -161,6 +171,46 @@ public class ConnectionTargetTests
     }
 
     [Fact]
+    public void GetClickHouseClient_ConnectionString_UsesChangedDatabase()
+    {
+        using var ctx = new TargetContext(o => o.UseClickHouse(TargetA));
+        var dataSourceClient = WriteClient(ctx);
+
+        ctx.Database.GetDbConnection().ChangeDatabase("db_changed");
+
+        Assert.NotSame(dataSourceClient, WriteClient(ctx));
+        Assert.Equal("db_changed", WriteSettings(ctx).Database);
+        Assert.Equal("host-a", WriteSettings(ctx).Host);
+    }
+
+    [Fact]
+    public void GetClickHouseClient_DataSource_KeepsDataSourceClientAfterOpen()
+    {
+        // Open adds join_use_nulls to a copy of the connection settings. The connection still
+        // comes from the data source, so inserts still use the data source client.
+        using var dataSource = new ClickHouseDataSource(TargetA);
+        using var ctx = new TargetContext(o => o.UseClickHouse(dataSource));
+
+        ctx.Database.OpenConnection();
+        ctx.Database.CloseConnection();
+
+        Assert.NotSame(dataSource.Settings, ReadSettings(ctx));
+        Assert.Same(dataSource.GetClient(), WriteClient(ctx));
+        Assert.Equal("host-a", MasterSettings(ctx).Host);
+    }
+
+    [Fact]
+    public void GetClickHouseClient_WrappedConnection_UsesDataSourceClient()
+    {
+        using var ctx = new TargetContext(o => o
+            .UseClickHouse(TargetA)
+            .AddInterceptors(new WrappingInterceptor()));
+
+        Assert.IsType<FakeDbConnection>(ctx.Database.GetDbConnection());
+        Assert.Equal("host-a", WriteSettings(ctx).Host);
+    }
+
+    [Fact]
     public void GetClickHouseClient_NonClickHouseConnection_Throws()
     {
         using var connection = new FakeDbConnection(TargetA);
@@ -244,6 +294,43 @@ public class ConnectionTargetTests
         Assert.Equal("host-b", connection.Settings.Host);
         Assert.Equal("host-b", WriteSettings(ctx).Host);
         Assert.Equal("host-b", MasterSettings(ctx).Host);
+    }
+
+    [Fact]
+    public void SetConnectionString_DbConnection_KeepsChangedDatabase()
+    {
+        // The driver keeps the ChangeDatabase value when the connection string changes.
+        using var connection = new ClickHouseConnection(TargetA);
+        connection.ChangeDatabase("db_changed");
+        using var ctx = new TargetContext(o => o.UseClickHouse(connection));
+
+        ctx.Database.SetConnectionString(TargetB);
+
+        Assert.Equal("db_changed", connection.Database);
+        Assert.Equal("host-b", WriteSettings(ctx).Host);
+        Assert.Equal("db_changed", WriteSettings(ctx).Database);
+    }
+
+    [Fact]
+    public void SetConnectionString_DbConnection_SameString_KeepsCodeOnlySettings()
+    {
+        // The base setter does not change a connection that already has the string, so the
+        // connection keeps its code-only settings, and inserts and the master connection must too.
+        var settings = new ClickHouseClientSettings(TargetA)
+        {
+            SkipServerCertificateValidation = true,
+            BearerToken = "token-abc",
+        };
+        using var connection = new ClickHouseConnection(settings);
+        using var ctx = new TargetContext(o => o.UseClickHouse(connection));
+
+        ctx.Database.SetConnectionString(connection.ConnectionString);
+
+        Assert.Equal("token-abc", connection.Settings.BearerToken);
+        Assert.Equal("token-abc", WriteSettings(ctx).BearerToken);
+        Assert.True(WriteSettings(ctx).SkipServerCertificateValidation);
+        Assert.Equal("token-abc", MasterSettings(ctx).BearerToken);
+        Assert.True(MasterSettings(ctx).SkipServerCertificateValidation);
     }
 
     [Fact]
