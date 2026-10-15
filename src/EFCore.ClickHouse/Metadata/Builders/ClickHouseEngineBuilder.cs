@@ -16,6 +16,10 @@ public abstract class ClickHouseEngineBuilder
         entityType.SetEngine(engineName);
     }
 
+    /// <summary>
+    /// Sets the table's sorting key (<c>ORDER BY</c>). In ClickHouse the sorting key also serves as the
+    /// primary key unless an explicit one is set via <see cref="WithPrimaryKey"/>.
+    /// </summary>
     public ClickHouseEngineBuilder WithOrderBy(params string[] columns)
     {
         ArgumentNullException.ThrowIfNull(columns);
@@ -30,6 +34,11 @@ public abstract class ClickHouseEngineBuilder
         return this;
     }
 
+    /// <summary>
+    /// Sets an explicit primary key (<c>PRIMARY KEY</c>) distinct from the sorting key. Only needed when the
+    /// primary index should differ from <c>ORDER BY</c>; otherwise the sorting key is used as the primary key.
+    /// ClickHouse requires these columns to be a prefix of the <see cref="WithOrderBy"/> columns.
+    /// </summary>
     public ClickHouseEngineBuilder WithPrimaryKey(params string[] columns)
     {
         ArgumentNullException.ThrowIfNull(columns);
