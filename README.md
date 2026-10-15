@@ -186,6 +186,8 @@ long rowsInserted = await ctx.BulkInsertAsync(events);
 
 This calls `InsertBinaryAsync` directly, bypassing EF Core's change tracker entirely. Entities are **not** tracked after insert.
 
+`SaveChanges` and `BulkInsertAsync` work with a connection string, a `ClickHouseDataSource` or a `ClickHouseConnection`, and insert into the server and database of the current connection. With a `ClickHouseConnection`, inserts use a separate client with a copy of the connection settings and the database of the connection (including `ChangeDatabase`). That client has its own HTTP connection pool, unless the settings have an `HttpClient` or `HttpClientFactory`. After `context.Database.SetConnectionString(...)` or `SetDbConnection(...)`, inserts go to the new target.
+
 ### JSON Columns
 
 The provider supports ClickHouse's `Json` column type, mapping to `System.Text.Json.Nodes.JsonNode` or `string`.
