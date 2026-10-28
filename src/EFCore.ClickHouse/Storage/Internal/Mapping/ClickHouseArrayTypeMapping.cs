@@ -15,7 +15,7 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
         typeof(DbDataReader).GetRuntimeMethod(nameof(DbDataReader.GetValue), [typeof(int)])!;
 
     private static readonly MethodInfo ConvertArrayMethod =
-        typeof(ClickHouseArrayTypeMapping).GetMethod(nameof(ConvertArray), BindingFlags.Static | BindingFlags.NonPublic)!;
+        typeof(ClickHouseCompositeMaterialization).GetMethod(nameof(ClickHouseCompositeMaterialization.ConvertArray))!;
 
     public RelationalTypeMapping ElementMapping { get; }
 
@@ -100,33 +100,6 @@ public class ClickHouseArrayTypeMapping : RelationalTypeMapping
             Expression.Constant(ClickHouseComponentConversion.CanPassThrough(ElementMapping)));
 
         return converted.Type == targetType ? converted : Expression.Convert(converted, targetType);
-    }
-
-    /// <summary>
-    /// Rebuilds the driver's array as <c>TElement[]</c>, converting each element. Nested composites
-    /// compose through this: an <c>Array(Array(DateTime64))</c> element mapping is itself a
-    /// <see cref="ClickHouseArrayTypeMapping"/>, so its own conversion runs per element.
-    /// </summary>
-    private static TElement[] ConvertArray<TElement>(
-        object value,
-        Func<object, TElement> convertElement,
-        bool canPassThrough)
-    {
-        // The driver often already produces the target type, for example Array(Int32) -> int[].
-        // See ClickHouseComponentConversion.CanPassThrough for when that proves there is no work
-        // left to do.
-        if (canPassThrough && value is TElement[] alreadyTyped)
-            return alreadyTyped;
-
-        var source = (Array)value;
-        var result = new TElement[source.Length];
-        for (var i = 0; i < source.Length; i++)
-        {
-            var element = source.GetValue(i);
-            result[i] = element is null or DBNull ? default! : convertElement(element);
-        }
-
-        return result;
     }
 
     protected override string GenerateNonNullSqlLiteral(object value)

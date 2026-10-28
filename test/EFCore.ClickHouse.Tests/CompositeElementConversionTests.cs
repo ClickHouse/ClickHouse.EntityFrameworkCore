@@ -1,7 +1,10 @@
+#pragma warning disable EF9100
+
 using System.Linq.Expressions;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Xunit;
@@ -400,16 +403,17 @@ public class CompositeElementConversionTests : IClassFixture<CompositeElementCon
     }
 
     /// <summary>
-    /// The per-component converter must be embedded as a constant, not as an inline lambda. An inline
-    /// lambda is rebuilt on every materialization, which allocates a delegate per row for every
-    /// composite column that converts — including ones where the runtime fast path then returns the
-    /// driver's array untouched.
+    /// The per-component converter must be embedded as a liftable constant, not as an inline lambda.
+    /// An inline lambda is rebuilt on every materialization, which allocates a delegate per row for
+    /// every composite column that converts — including ones where the runtime fast path then returns
+    /// the driver's array untouched. A liftable constant keeps the compiled delegate as the runtime
+    /// value and still lets EF render the converter into precompiled query source.
     /// </summary>
     [Theory]
     [InlineData(nameof(CompositeElementEntity.Offsets))]
     [InlineData(nameof(CompositeElementEntity.Ints))]
     [InlineData(nameof(CompositeElementEntity.OffsetsByName))]
-    public void Component_converters_are_embedded_as_constants(string propertyName)
+    public void Component_converters_are_embedded_as_liftable_constants(string propertyName)
     {
         using var ctx = new CompositeElementDbContext(_fixture.ConnectionString);
         var mapping = ctx.Model
@@ -420,10 +424,17 @@ public class CompositeElementConversionTests : IClassFixture<CompositeElementCon
         var read = (MethodCallExpression)mapping.CustomizeDataReaderExpression(
             Expression.Parameter(typeof(object), "v"));
 
-        // Argument 0 is the raw value; every argument after it is a component converter.
+        // Argument 0 is the raw value; every argument after it is either the plain bool flag
+        // or a component converter, which must be lifted.
         Assert.All(
             read.Arguments.Skip(1),
-            argument => Assert.Equal(ExpressionType.Constant, argument.NodeType));
+            argument =>
+            {
+                if (argument.Type == typeof(bool))
+                    Assert.Equal(ExpressionType.Constant, argument.NodeType);
+                else
+                    Assert.IsType<LiftableConstantExpression>(argument);
+            });
     }
 
     // --- components carrying a ValueConverter -------------------------------
@@ -655,9 +666,20 @@ public class CompositeElementConversionTests : IClassFixture<CompositeElementCon
     private static T Read<T>(RelationalTypeMapping mapping, object driverValue)
     {
         var parameter = Expression.Parameter(typeof(object), "value");
-        var body = mapping.CustomizeDataReaderExpression(parameter);
+
+        // EF inlines liftable constants before compiling a materializer; do the same here, since a
+        // LiftableConstantExpression cannot be compiled on its own.
+        var body = new InlineLiftables().Visit(mapping.CustomizeDataReaderExpression(parameter));
 
         return Expression.Lambda<Func<object, T>>(Expression.Convert(body, typeof(T)), parameter)
             .Compile()(driverValue);
+    }
+
+    private sealed class InlineLiftables : ExpressionVisitor
+    {
+        protected override Expression VisitExtension(Expression node)
+            => node is LiftableConstantExpression lifted
+                ? lifted.OriginalExpression
+                : base.VisitExtension(node);
     }
 }
