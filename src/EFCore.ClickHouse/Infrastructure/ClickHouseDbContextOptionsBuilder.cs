@@ -13,7 +13,7 @@ public class ClickHouseDbContextOptionsBuilder
     }
 
     /// <summary>
-    /// Disables automatic injection of <c>set_join_use_nulls=1</c> into connection strings.
+    /// Disables the automatic <c>join_use_nulls=1</c> setting on the queries that EF Core runs.
     /// Use this when the ClickHouse server or user profile forbids changing that setting
     /// (e.g. <c>readonly=1</c> profiles). With auto-injection disabled, LEFT JOINs return
     /// column defaults (0, "") for non-matching rows rather than NULL, and EF Core's
