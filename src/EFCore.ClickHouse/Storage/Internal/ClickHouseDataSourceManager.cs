@@ -10,16 +10,6 @@ public class ClickHouseDataSourceManager : IDisposable, IAsyncDisposable
     private readonly ConcurrentDictionary<string, ClickHouseDataSource> _dataSources = new();
     private volatile int _isDisposed;
 
-    public DbDataSource? GetDataSource(ClickHouseOptionsExtension? extension)
-        => extension switch
-        {
-            { DataSource: { } dataSource } => dataSource,
-            { Connection: not null } => null,
-            { ConnectionString: { } connectionString }
-                => GetOrCreateDataSource(connectionString, extension.JoinNullSemanticsDisabled),
-            _ => null
-        };
-
     /// <summary>
     /// Returns the provider-owned data source for a connection string. There is one data source, and
     /// one HTTP connection pool, for each effective connection string.

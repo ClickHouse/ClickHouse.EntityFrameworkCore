@@ -82,10 +82,11 @@ public class ConnectionWriteTargetTests : IClassFixture<ConnectionWriteTargetFix
     }
 
     [Fact]
-    public async Task SetConnectionString_DbConnection_KeepsChangedDatabase()
+    public async Task SetConnectionString_DbConnection_InsertsWhereQueriesRead()
     {
-        // The driver keeps the ChangeDatabase value when the connection string changes.
-        const string marker = nameof(SetConnectionString_DbConnection_KeepsChangedDatabase);
+        // EF Core writes the string into the connection of the user. Whichever database the driver
+        // then selects, the inserted rows must be in the database that queries read.
+        const string marker = nameof(SetConnectionString_DbConnection_InsertsWhereQueriesRead);
         await using var connection = new ClickHouseConnection(_fixture.ConnectionStringA);
         connection.ChangeDatabase(_fixture.DatabaseB);
         await using var ctx = new WriteTargetContext(o => o.UseClickHouse(connection));
@@ -95,7 +96,8 @@ public class ConnectionWriteTargetTests : IClassFixture<ConnectionWriteTargetFix
         await ctx.SaveChangesAsync();
 
         Assert.Equal(1, await ctx.Rows.CountAsync(r => r.Marker == marker));
-        await AssertRowsInTargetBAsync(marker, 1);
+        var queried = connection.Database == _fixture.DatabaseB ? _fixture.ConnectionStringB : _fixture.ConnectionStringA;
+        Assert.Equal(1, await CountAsync(queried, marker));
     }
 
     [Fact]

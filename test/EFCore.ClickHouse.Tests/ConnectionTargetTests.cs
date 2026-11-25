@@ -50,6 +50,12 @@ public class ConnectionTargetTests
             => InterceptionResult<DbConnection>.SuppressWithResult(new FakeDbConnection(TargetA));
     }
 
+    private sealed class WrapCreatedConnectionInterceptor : DbConnectionInterceptor
+    {
+        public override DbConnection ConnectionCreated(ConnectionCreatedEventData eventData, DbConnection result)
+            => new WrappedDbConnection(result);
+    }
+
     private static IClickHouseClient WriteClient(DbContext ctx)
         => ctx.GetService<IClickHouseRelationalConnection>().GetClickHouseClient();
 
@@ -324,18 +330,31 @@ public class ConnectionTargetTests
     }
 
     [Fact]
-    public void SetConnectionString_DbConnection_KeepsChangedDatabase()
+    public void SetConnectionString_DbConnection_InsertsUseDatabaseOfConnection()
     {
-        // The driver keeps the ChangeDatabase value when the connection string changes.
+        // EF Core writes the string into the connection of the user. Whichever database the driver
+        // then selects, inserts must use the database that queries use.
         using var connection = new ClickHouseConnection(TargetA);
         connection.ChangeDatabase("db_changed");
         using var ctx = new TargetContext(o => o.UseClickHouse(connection));
 
         ctx.Database.SetConnectionString(TargetB);
 
-        Assert.Equal("db_changed", connection.Database);
         Assert.Equal("host-b", WriteSettings(ctx).Host);
-        Assert.Equal("db_changed", WriteDatabase(ctx));
+        Assert.Equal(connection.Database, WriteDatabase(ctx));
+    }
+
+    [Fact]
+    public void SetConnectionString_KeepsCommandTimeout()
+    {
+        using var ctx = new TargetContext(o => o.UseClickHouse(TargetA));
+        ctx.Database.SetCommandTimeout(123);
+        Assert.Equal("host-a", ReadSettings(ctx).Host);
+
+        ctx.Database.SetConnectionString(TargetB);
+
+        Assert.Equal("host-b", ReadSettings(ctx).Host);
+        Assert.Equal(123, ctx.Database.GetCommandTimeout());
     }
 
     [Fact]
@@ -406,6 +425,51 @@ public class ConnectionTargetTests
     }
 
     [Fact]
+    public void SetDbConnection_WrapperConnection_DropsDataSource()
+    {
+        // A wrapper cannot give its client. Inserts must fail, not go to the old data source.
+        using var ctx = new TargetContext(o => o.UseClickHouse(TargetA));
+        Assert.Equal("host-a", WriteSettings(ctx).Host);
+
+        using var wrapper = new WrappedDbConnection(new ClickHouseConnection(TargetB));
+        ctx.Database.SetDbConnection(wrapper);
+
+        Assert.Throws<InvalidOperationException>(() => WriteClient(ctx));
+    }
+
+    [Fact]
+    public void SetDbConnection_ThenSetConnectionString_WritesStringIntoThatConnection()
+    {
+        using var ctx = new TargetContext(o => o.UseClickHouse(TargetA));
+        Assert.Equal("host-a", ReadSettings(ctx).Host);
+
+        using var connection = new ClickHouseConnection(TargetA);
+        ctx.Database.SetDbConnection(connection);
+        ctx.Database.SetConnectionString(TargetB);
+
+        Assert.Same(connection, ctx.Database.GetDbConnection());
+        Assert.Equal("host-b", connection.Settings.Host);
+        Assert.Same(connection.GetClient(), WriteClient(ctx));
+    }
+
+    [Fact]
+    public void SetDbConnection_CurrentWrapper_KeepsDataSource()
+    {
+        // An interceptor wraps the connection that the provider gets from the data source. Setting
+        // that wrapper again does not change the connection, so inserts keep the data source.
+        using var ctx = new TargetContext(o => o
+            .UseClickHouse(TargetA)
+            .AddInterceptors(new WrapCreatedConnectionInterceptor()));
+        var wrapper = ctx.Database.GetDbConnection();
+        Assert.IsType<WrappedDbConnection>(wrapper);
+
+        ctx.Database.SetDbConnection(wrapper);
+
+        Assert.Same(wrapper, ctx.Database.GetDbConnection());
+        Assert.Equal("host-a", WriteSettings(ctx).Host);
+    }
+
+    [Fact]
     public void SetDbConnection_Null_ThenSetConnectionString_UsesNewTarget()
     {
         using var ctx = new TargetContext(o => o.UseClickHouse(TargetA));
@@ -439,5 +503,41 @@ public class ConnectionTargetTests
             Assert.Equal(ReadSettings(ctx).Host, WriteSettings(ctx).Host);
             Assert.Equal(ReadSettings(ctx).Host, MasterSettings(ctx).Host);
         }
+    }
+}
+
+/// <summary>
+/// A <see cref="DbConnection"/> that sends every call to the connection it wraps, as a profiler does.
+/// </summary>
+internal sealed class WrappedDbConnection(DbConnection inner) : DbConnection
+{
+    [System.Diagnostics.CodeAnalysis.AllowNull]
+    public override string ConnectionString { get => inner.ConnectionString; set => inner.ConnectionString = value; }
+
+    public override string Database => inner.Database;
+
+    public override string DataSource => inner.DataSource;
+
+    public override string ServerVersion => inner.ServerVersion;
+
+    public override System.Data.ConnectionState State => inner.State;
+
+    public override void ChangeDatabase(string databaseName) => inner.ChangeDatabase(databaseName);
+
+    public override void Open() => inner.Open();
+
+    public override void Close() => inner.Close();
+
+    protected override DbTransaction BeginDbTransaction(System.Data.IsolationLevel isolationLevel)
+        => inner.BeginTransaction(isolationLevel);
+
+    protected override DbCommand CreateDbCommand() => inner.CreateCommand();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            inner.Dispose();
+
+        base.Dispose(disposing);
     }
 }

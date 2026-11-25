@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using ClickHouse.Driver;
 using ClickHouse.Driver.ADO;
 using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
@@ -12,10 +13,16 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 {
     private readonly ClickHouseDataSourceManager? _dataSourceManager;
     private readonly bool _joinNullSemanticsDisabled;
-    private DbDataSource? _dataSource;
 
-    // The connection that CreateDbConnection got from _dataSource, until SetDbConnection replaces it.
+    // The data source for new connections. A connection string gets a provider-owned data source,
+    // which DataSource creates on first need from _dataSourceConnectionString.
+    private DbDataSource? _dataSource;
+    private string? _dataSourceConnectionString;
+
+    // The connection that CreateDbConnection got from the data source, until SetDbConnection
+    // replaces it, and the connection that EF Core uses, which can be a wrapper around it.
     private DbConnection? _dataSourceConnection;
+    private DbConnection? _currentConnection;
 
     public ClickHouseRelationalConnection(
         RelationalConnectionDependencies dependencies,
@@ -24,8 +31,11 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     {
         var extension = dependencies.ContextOptions.FindExtension<ClickHouseOptionsExtension>();
         _dataSourceManager = dataSourceManager;
-        _dataSource = dataSourceManager.GetDataSource(extension);
         _joinNullSemanticsDisabled = extension?.JoinNullSemanticsDisabled ?? false;
+        _dataSource = extension?.DataSource;
+
+        if (_dataSource is null && extension?.Connection is null)
+            _dataSourceConnectionString = extension?.ConnectionString;
     }
 
     // Used by CreateMasterConnection only
@@ -37,10 +47,33 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         _joinNullSemanticsDisabled = joinNullSemanticsDisabled;
     }
 
+    private DbDataSource? DataSource
+    {
+        get
+        {
+            if (_dataSource is null
+                && !string.IsNullOrWhiteSpace(_dataSourceConnectionString)
+                && _dataSourceManager is not null)
+            {
+                _dataSource = _dataSourceManager.GetOrCreateDataSource(
+                    _dataSourceConnectionString, _joinNullSemanticsDisabled);
+            }
+
+            return _dataSource;
+        }
+    }
+
+    [AllowNull]
+    public override DbConnection DbConnection
+    {
+        get => _currentConnection = base.DbConnection;
+        set => base.DbConnection = value;
+    }
+
     protected override DbConnection CreateDbConnection()
     {
-        if (_dataSource is not null)
-            return _dataSourceConnection = _dataSource.CreateConnection();
+        if (DataSource is { } dataSource)
+            return _dataSourceConnection = dataSource.CreateConnection();
 
         return new ClickHouseConnection(
             ClickHouseClientIdentity.CreateSettings(
@@ -62,37 +95,48 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         get => base.ConnectionString;
         set
         {
-            var dataSource = string.IsNullOrWhiteSpace(value) || _dataSourceManager is null
-                ? null
-                : _dataSourceManager.GetOrCreateDataSource(value, _joinNullSemanticsDisabled);
+            var useDataSource = !string.IsNullOrWhiteSpace(value) && _dataSourceManager is not null;
 
             // EF Core writes the string into a connection whose string is different, and the string of
             // a driver connection is normalized, so even the same string would rebuild the client.
-            if (dataSource is not null && _dataSourceConnection is { State: ConnectionState.Closed })
+            if (useDataSource && _dataSourceConnection is { State: ConnectionState.Closed })
             {
                 // Remove the connection, so that EF Core gets the next one from CreateDbConnection.
+                // Removing it resets the command timeout, which a new connection string must keep.
+                var commandTimeout = CommandTimeout;
                 base.SetDbConnection(null, contextOwnsConnection: true);
+                CommandTimeout = commandTimeout;
                 _dataSourceConnection = null;
+                _currentConnection = null;
             }
 
             base.ConnectionString = value;
-            _dataSource = dataSource;
+            _dataSource = null;
+            _dataSourceConnectionString = useDataSource ? value : null;
         }
     }
 
     /// <summary>
-    /// Sets the connection. A connection that is not null replaces the configured data source, and
-    /// inserts use the client of that connection.
+    /// Sets the connection. A connection that is not null and is not the current connection replaces
+    /// the configured data source, and inserts use the client of that connection.
     /// </summary>
     public override void SetDbConnection(DbConnection? value, bool contextOwnsConnection)
     {
+        var isCurrent = value is not null && ReferenceEquals(value, _currentConnection);
+
         base.SetDbConnection(value, contextOwnsConnection);
 
-        if (!ReferenceEquals(value, _dataSourceConnection))
-            _dataSourceConnection = null;
+        if (isCurrent)
+            return;
 
-        if (value is not null && _dataSourceConnection is null)
+        _currentConnection = value;
+        _dataSourceConnection = null;
+
+        if (value is not null)
+        {
             _dataSource = null;
+            _dataSourceConnectionString = null;
+        }
     }
 
     protected override bool SupportsAmbientTransactions => false;
@@ -259,7 +303,7 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         if (connection is ClickHouseConnection clickHouseConnection)
             return clickHouseConnection.GetClient();
 
-        if (_dataSource is ClickHouseDataSource clickHouseDataSource)
+        if (DataSource is ClickHouseDataSource clickHouseDataSource)
             return clickHouseDataSource.GetClient();
 
         throw new InvalidOperationException(
