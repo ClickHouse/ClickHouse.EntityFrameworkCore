@@ -15,6 +15,7 @@ namespace EFCore.ClickHouse.Tests;
 public class ReplicationIntegrationTests : IClassFixture<ClickHouseClusterFixture>
 {
     private const string Cluster = ClickHouseClusterFixture.ClusterName;
+    private const string TwoShards = ClickHouseClusterFixture.TwoShardClusterName;
 
     private readonly ClickHouseClusterFixture _cluster;
 
@@ -122,6 +123,41 @@ public class ReplicationIntegrationTests : IClassFixture<ClickHouseClusterFixtur
     }
 
     [Fact]
+    public async Task Migrations_share_one_history_across_shards_that_reuse_replica_names()
+    {
+        // ch1 (shard 01) and ch3 (shard 02) both have the replica name r1.
+        var db = _cluster.NewDatabaseName();
+
+        await using (var ctx = new MigrationsContext(Options(_cluster.Node1(db), o => o.UseCluster(TwoShards))))
+            await ctx.GetService<IMigrator>().MigrateAsync(CreateEventsMigration.MigrationId);
+
+        // One history table with a replica on each of the three hosts.
+        Assert.Equal(3, await QueryScalarAsync<byte>(_cluster.Node3ConnectionString,
+            $"SELECT total_replicas FROM system.replicas WHERE database = '{db}' AND table = '__EFMigrationsHistory'"));
+
+        await SyncReplicaAsync(_cluster.Node3ConnectionString, db, "__EFMigrationsHistory");
+
+        // The host on the second shard sees the first migration as applied and applies only the second one.
+        await using (var ctx = new MigrationsContext(Options(_cluster.Node3(db), o => o.UseCluster(TwoShards))))
+        {
+            Assert.Equal([AddScoreMigration.MigrationId], await ctx.Database.GetPendingMigrationsAsync());
+            await ctx.Database.MigrateAsync();
+        }
+
+        await SyncReplicaAsync(_cluster.Node1ConnectionString, db, "__EFMigrationsHistory");
+
+        await using (var ctx = new MigrationsContext(Options(_cluster.Node1(db), o => o.UseCluster(TwoShards))))
+            Assert.Empty(await ctx.Database.GetPendingMigrationsAsync());
+
+        foreach (var connectionString in new[]
+            { _cluster.Node1ConnectionString, _cluster.Node2ConnectionString, _cluster.Node3ConnectionString })
+        {
+            Assert.Equal(1UL, await QueryScalarAsync<ulong>(connectionString,
+                $"SELECT count() FROM system.columns WHERE database = '{db}' AND table = 'events' AND name = 'Score'"));
+        }
+    }
+
+    [Fact]
     public async Task Explicit_zookeeper_path_and_cluster_macro_are_used()
     {
         var db = _cluster.NewDatabaseName();
@@ -132,7 +168,7 @@ public class ReplicationIntegrationTests : IClassFixture<ClickHouseClusterFixtur
         Assert.Equal($"/clickhouse/tables/01/{db}/explicit_path", await QueryScalarAsync<string>(
             _cluster.Node2ConnectionString,
             $"SELECT zookeeper_path FROM system.replicas WHERE database = '{db}' AND table = 'explicit_path'"));
-        Assert.Equal("ch2", await QueryScalarAsync<string>(_cluster.Node2ConnectionString,
+        Assert.Equal("r2", await QueryScalarAsync<string>(_cluster.Node2ConnectionString,
             $"SELECT replica_name FROM system.replicas WHERE database = '{db}' AND table = 'explicit_path'"));
         Assert.Equal(2, await QueryScalarAsync<byte>(_cluster.Node2ConnectionString,
             $"SELECT total_replicas FROM system.replicas WHERE database = '{db}' AND table = 'explicit_path'"));
