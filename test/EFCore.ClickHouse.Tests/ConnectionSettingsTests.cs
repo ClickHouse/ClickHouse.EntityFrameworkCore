@@ -49,23 +49,36 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
     private static (MinimalContext Context, IAsyncDisposable? Owned) CreateContext(
         ConfigurationPath path,
         string connectionString,
-        Action<global::ClickHouse.EntityFrameworkCore.Infrastructure.ClickHouseDbContextOptionsBuilder>? clickHouseOptions = null)
+        Action<global::ClickHouse.EntityFrameworkCore.Infrastructure.ClickHouseDbContextOptionsBuilder>? clickHouseOptions = null,
+        Action<DbContextOptionsBuilder>? configure = null)
     {
         switch (path)
         {
             case ConfigurationPath.ConnectionString:
-                return (new MinimalContext(o => o.UseClickHouse(connectionString, clickHouseOptions)), null);
+                return (new MinimalContext(o =>
+                {
+                    o.UseClickHouse(connectionString, clickHouseOptions);
+                    configure?.Invoke(o);
+                }), null);
 
             case ConfigurationPath.DbConnection:
             {
                 var connection = new ClickHouseConnection(connectionString);
-                return (new MinimalContext(o => o.UseClickHouse(connection, clickHouseOptions)), connection);
+                return (new MinimalContext(o =>
+                {
+                    o.UseClickHouse(connection, clickHouseOptions);
+                    configure?.Invoke(o);
+                }), connection);
             }
 
             default:
             {
                 var dataSource = new ClickHouseDataSource(connectionString);
-                return (new MinimalContext(o => o.UseClickHouse(dataSource, clickHouseOptions)), dataSource);
+                return (new MinimalContext(o =>
+                {
+                    o.UseClickHouse(dataSource, clickHouseOptions);
+                    configure?.Invoke(o);
+                }), dataSource);
             }
         }
     }
@@ -118,6 +131,26 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
     }
 
     [Theory]
+    [InlineData(ConfigurationPath.ConnectionString)]
+    [InlineData(ConfigurationPath.DbConnection)]
+    [InlineData(ConfigurationPath.DbDataSource)]
+    public async Task UseClickHouse_AppliesJoinUseNulls_WhenAnInterceptorWrapsCommands(ConfigurationPath path)
+    {
+        // A profiler can replace each command with a wrapper in CommandCreated. The provider must
+        // add the settings to the driver command before that happens.
+        var interceptor = new WrappingCommandInterceptor();
+        var (ctx, owned) = CreateContext(path, _fixture.ConnectionString, configure: o => o.AddInterceptors(interceptor));
+        await using (owned)
+        await using (ctx)
+        {
+            Assert.True(await GetJoinUseNullsAsync(ctx));
+            Assert.Null(await GetLeftJoinValueAsync(ctx));
+            Assert.True(interceptor.WrappedCommands > 0);
+        }
+    }
+
+    [Theory]
+    [InlineData(ConfigurationPath.ConnectionString)]
     [InlineData(ConfigurationPath.DbConnection)]
     [InlineData(ConfigurationPath.DbDataSource)]
     public async Task UseClickHouse_KeepsUserJoinUseNullsValue(ConfigurationPath path)
@@ -453,6 +486,79 @@ internal sealed class FakeDbCommand : DbCommand
 
     protected override DbDataReader ExecuteDbDataReader(System.Data.CommandBehavior behavior)
         => throw new NotSupportedException();
+}
+
+/// <summary>
+/// Replaces each command with a <see cref="WrappedDbCommand"/>, as a profiler does.
+/// </summary>
+internal sealed class WrappingCommandInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+{
+    public int WrappedCommands { get; private set; }
+
+    public override DbCommand CommandCreated(
+        Microsoft.EntityFrameworkCore.Diagnostics.CommandEndEventData eventData, DbCommand result)
+    {
+        WrappedCommands++;
+        return new WrappedDbCommand(result);
+    }
+}
+
+/// <summary>
+/// A <see cref="DbCommand"/> that sends every call to the command it wraps.
+/// </summary>
+internal sealed class WrappedDbCommand(DbCommand inner) : DbCommand
+{
+    [System.Diagnostics.CodeAnalysis.AllowNull]
+    public override string CommandText { get => inner.CommandText; set => inner.CommandText = value; }
+
+    public override int CommandTimeout { get => inner.CommandTimeout; set => inner.CommandTimeout = value; }
+
+    public override System.Data.CommandType CommandType { get => inner.CommandType; set => inner.CommandType = value; }
+
+    public override bool DesignTimeVisible { get => inner.DesignTimeVisible; set => inner.DesignTimeVisible = value; }
+
+    public override System.Data.UpdateRowSource UpdatedRowSource
+    {
+        get => inner.UpdatedRowSource;
+        set => inner.UpdatedRowSource = value;
+    }
+
+    protected override DbConnection? DbConnection { get => inner.Connection; set => inner.Connection = value; }
+
+    protected override DbParameterCollection DbParameterCollection => inner.Parameters;
+
+    protected override DbTransaction? DbTransaction { get => inner.Transaction; set => inner.Transaction = value; }
+
+    public override void Cancel() => inner.Cancel();
+
+    public override int ExecuteNonQuery() => inner.ExecuteNonQuery();
+
+    public override object? ExecuteScalar() => inner.ExecuteScalar();
+
+    public override Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
+        => inner.ExecuteNonQueryAsync(cancellationToken);
+
+    public override Task<object?> ExecuteScalarAsync(CancellationToken cancellationToken)
+        => inner.ExecuteScalarAsync(cancellationToken);
+
+    public override void Prepare() => inner.Prepare();
+
+    protected override DbParameter CreateDbParameter() => inner.CreateParameter();
+
+    protected override DbDataReader ExecuteDbDataReader(System.Data.CommandBehavior behavior)
+        => inner.ExecuteReader(behavior);
+
+    protected override Task<DbDataReader> ExecuteDbDataReaderAsync(
+        System.Data.CommandBehavior behavior, CancellationToken cancellationToken)
+        => inner.ExecuteReaderAsync(behavior, cancellationToken);
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            inner.Dispose();
+
+        base.Dispose(disposing);
+    }
 }
 
 /// <summary>

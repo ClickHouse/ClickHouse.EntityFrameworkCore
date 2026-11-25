@@ -5,7 +5,9 @@ using Microsoft.EntityFrameworkCore.Storage;
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
 
 /// <summary>
-/// A relational command that adds the provider's query settings to each driver command it creates.
+/// A relational command that adds the provider query settings to each driver command it creates.
+/// <see cref="ClickHouseCommandSettingsInterceptor"/> adds them before the interceptors of the
+/// application run. This class also covers a command that EF Core creates without interceptors.
 /// </summary>
 public class ClickHouseRelationalCommand : RelationalCommand
 {
