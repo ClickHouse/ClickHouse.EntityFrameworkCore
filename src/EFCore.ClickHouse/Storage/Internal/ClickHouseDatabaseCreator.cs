@@ -31,7 +31,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         try
         {
             _connection.Open();
-            return DatabaseExists(_connection.DbConnection, GetDatabaseName());
+            return DatabaseExists(_connection, GetDatabaseName());
         }
         catch
         {
@@ -48,7 +48,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         try
         {
             await _connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            return await DatabaseExistsAsync(_connection.DbConnection, GetDatabaseName(), cancellationToken)
+            return await DatabaseExistsAsync(_connection, GetDatabaseName(), cancellationToken)
                 .ConfigureAwait(false);
         }
         catch
@@ -66,7 +66,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         _connection.Open();
         try
         {
-            return HasTablesCore(_connection.DbConnection, GetDatabaseName());
+            return HasTablesCore(_connection, GetDatabaseName());
         }
         finally
         {
@@ -79,7 +79,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         await _connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await HasTablesCoreAsync(_connection.DbConnection, GetDatabaseName(), cancellationToken)
+            return await HasTablesCoreAsync(_connection, GetDatabaseName(), cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
@@ -94,7 +94,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         masterConnection.Open();
         try
         {
-            using var command = masterConnection.DbConnection.CreateCommand();
+            using var command = CreateCommand(masterConnection);
             command.CommandText = $"CREATE DATABASE IF NOT EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
             command.ExecuteNonQuery();
         }
@@ -112,7 +112,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
             await masterConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var command = masterConnection.DbConnection.CreateCommand();
+                var command = CreateCommand(masterConnection);
                 await using (command.ConfigureAwait(false))
                 {
                     command.CommandText = $"CREATE DATABASE IF NOT EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
@@ -132,7 +132,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         masterConnection.Open();
         try
         {
-            using var command = masterConnection.DbConnection.CreateCommand();
+            using var command = CreateCommand(masterConnection);
             command.CommandText = $"DROP DATABASE IF EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
             command.ExecuteNonQuery();
         }
@@ -150,7 +150,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
             await masterConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var command = masterConnection.DbConnection.CreateCommand();
+                var command = CreateCommand(masterConnection);
                 await using (command.ConfigureAwait(false))
                 {
                     command.CommandText = $"DROP DATABASE IF EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
@@ -164,17 +164,17 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         }
     }
 
-    private bool DatabaseExists(DbConnection connection, string databaseName)
+    private bool DatabaseExists(IClickHouseRelationalConnection connection, string databaseName)
     {
-        using var command = connection.CreateCommand();
+        using var command = CreateCommand(connection);
         command.CommandText = $"EXISTS DATABASE {_sqlGenerationHelper.DelimitIdentifier(databaseName)}";
         return Convert.ToBoolean(command.ExecuteScalar());
     }
 
     private async Task<bool> DatabaseExistsAsync(
-        DbConnection connection, string databaseName, CancellationToken cancellationToken)
+        IClickHouseRelationalConnection connection, string databaseName, CancellationToken cancellationToken)
     {
-        var command = connection.CreateCommand();
+        var command = CreateCommand(connection);
         await using (command.ConfigureAwait(false))
         {
             command.CommandText = $"EXISTS DATABASE {_sqlGenerationHelper.DelimitIdentifier(databaseName)}";
@@ -182,9 +182,9 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         }
     }
 
-    private static bool HasTablesCore(DbConnection connection, string databaseName)
+    private static bool HasTablesCore(IClickHouseRelationalConnection connection, string databaseName)
     {
-        using var command = connection.CreateCommand();
+        using var command = CreateCommand(connection);
         var param = command.CreateParameter();
         param.ParameterName = "db";
         param.Value = databaseName;
@@ -194,9 +194,9 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
     }
 
     private static async Task<bool> HasTablesCoreAsync(
-        DbConnection connection, string databaseName, CancellationToken cancellationToken)
+        IClickHouseRelationalConnection connection, string databaseName, CancellationToken cancellationToken)
     {
-        var command = connection.CreateCommand();
+        var command = CreateCommand(connection);
         await using (command.ConfigureAwait(false))
         {
             var param = command.CreateParameter();
@@ -206,5 +206,16 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
             command.CommandText = $"SELECT count() > 0 FROM system.tables WHERE database = {((ClickHouseDbParameter)param).QueryForm}";
             return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
         }
+    }
+
+    /// <summary>
+    /// Creates a driver command with the provider query settings, which every statement that the
+    /// provider sends must carry.
+    /// </summary>
+    private static DbCommand CreateCommand(IClickHouseRelationalConnection connection)
+    {
+        var command = connection.DbConnection.CreateCommand();
+        connection.ApplyQuerySettings(command);
+        return command;
     }
 }

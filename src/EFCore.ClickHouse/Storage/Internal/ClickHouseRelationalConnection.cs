@@ -47,24 +47,56 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     private const string JoinUseNullsSetting = "join_use_nulls";
 
     /// <summary>
-    /// Adds <c>join_use_nulls=1</c> to a command that EF Core runs, unless join null semantics are
-    /// disabled or the connection settings already set <c>join_use_nulls</c>. With the ClickHouse
-    /// default (0), a LEFT JOIN returns column defaults instead of NULL, and EF Core cannot detect a
-    /// missing navigation. The driver sends command settings with the HTTP request and lets them
-    /// override connection settings. The provider does not change the connection settings, because
-    /// the driver then makes a new client, with a new HTTP connection pool, for the connection.
+    /// Returns the ClickHouse settings that EF Core semantics need. Every statement that the
+    /// provider sends must carry them: <see cref="ApplyQuerySettings"/> adds them to a command, and
+    /// <see cref="CreateInsertOptions"/> adds them to an insert. The provider sends them with each
+    /// statement and does not change the settings of a connection or data source, because the
+    /// driver then makes a new client, with a new HTTP connection pool, for the connection.
     /// </summary>
-    public virtual void ApplyJoinNullSemantics(DbCommand command)
+    /// <remarks>
+    /// <c>join_use_nulls=1</c>: with the ClickHouse default (0), a LEFT JOIN returns column defaults
+    /// instead of NULL, and EF Core cannot detect a missing navigation.
+    /// <c>DisableJoinNullSemantics()</c> removes it.
+    /// </remarks>
+    protected virtual IEnumerable<KeyValuePair<string, object>> GetQuerySettings()
     {
-        if (_joinNullSemanticsDisabled
-            || command is not ClickHouseCommand clickHouseCommand
-            || command.Connection is ClickHouseConnection connection
-               && connection.Settings.CustomSettings.ContainsKey(JoinUseNullsSetting))
-        {
+        if (!_joinNullSemanticsDisabled)
+            yield return new(JoinUseNullsSetting, "1");
+    }
+
+    /// <summary>
+    /// Adds the provider query settings to a driver command. A setting that the connection settings
+    /// already contain is left out, so the user value wins. The driver sends command settings with
+    /// the HTTP request and lets them override connection settings.
+    /// </summary>
+    public virtual void ApplyQuerySettings(DbCommand command)
+    {
+        if (command is not ClickHouseCommand clickHouseCommand)
             return;
+
+        var connectionSettings = (command.Connection as ClickHouseConnection)?.Settings;
+        foreach (var (name, value) in GetQuerySettings())
+        {
+            if (connectionSettings?.CustomSettings.ContainsKey(name) != true)
+                clickHouseCommand.CustomSettings.TryAdd(name, value);
+        }
+    }
+
+    /// <summary>
+    /// Returns the options for an insert through <paramref name="client"/>, with the provider query
+    /// settings that the client settings do not already contain. Returns null when no setting is
+    /// missing, so the driver uses its default options.
+    /// </summary>
+    public virtual InsertOptions? CreateInsertOptions(IClickHouseClient client)
+    {
+        Dictionary<string, object>? settings = null;
+        foreach (var (name, value) in GetQuerySettings())
+        {
+            if (!client.Settings.CustomSettings.ContainsKey(name))
+                (settings ??= new Dictionary<string, object>())[name] = value;
         }
 
-        clickHouseCommand.CustomSettings.TryAdd(JoinUseNullsSetting, "1");
+        return settings is null ? null : new InsertOptions { CustomSettings = settings };
     }
 
     public override bool Open(bool errorsExpected = false)

@@ -26,7 +26,7 @@ public class ClickHouseRelationalCommand : RelationalCommand
         var command = base.CreateDbCommand(parameterObject, commandId, commandMethod);
 
         if (parameterObject.Connection is IClickHouseRelationalConnection connection)
-            connection.ApplyJoinNullSemantics(command);
+            connection.ApplyQuerySettings(command);
 
         return command;
     }

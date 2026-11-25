@@ -293,13 +293,13 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
     }
 
     [Fact]
-    public void ApplyJoinNullSemantics_NonClickHouseCommand_IsIgnored()
+    public void ApplyQuerySettings_NonClickHouseCommand_IsIgnored()
     {
         using var connection = new FakeDbConnection("Host=localhost;Port=8123");
         using var ctx = new MinimalContext(o => o.UseClickHouse(connection));
 
         // Must not throw: a wrapper command gets the setting from the connection string instead.
-        ctx.Database.GetService<IClickHouseRelationalConnection>().ApplyJoinNullSemantics(new FakeDbCommand());
+        ctx.Database.GetService<IClickHouseRelationalConnection>().ApplyQuerySettings(new FakeDbCommand());
     }
 
     [Fact]
