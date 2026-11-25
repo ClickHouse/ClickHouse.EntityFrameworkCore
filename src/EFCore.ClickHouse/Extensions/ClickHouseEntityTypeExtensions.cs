@@ -110,6 +110,30 @@ public static class ClickHouseEntityTypeExtensions
     public static void SetGraphiteMergeTreeConfigSection(this IMutableEntityType entityType, string? configSection)
         => entityType.SetOrRemoveAnnotation(ClickHouseAnnotationNames.GraphiteMergeTreeConfigSection, configSection);
 
+    // Replication (MergeTree family engines)
+
+    /// <summary>
+    /// Returns true when the table uses the Replicated variant of its MergeTree family engine,
+    /// for example <c>ReplicatedReplacingMergeTree</c> for <c>ReplacingMergeTree</c>.
+    /// </summary>
+    public static bool IsReplicated(this IReadOnlyEntityType entityType)
+        => entityType[ClickHouseAnnotationNames.Replicated] is true;
+
+    public static void SetReplicated(this IMutableEntityType entityType, bool replicated)
+        => entityType.SetOrRemoveAnnotation(ClickHouseAnnotationNames.Replicated, replicated ? true : null);
+
+    public static string? GetReplicatedZooKeeperPath(this IReadOnlyEntityType entityType)
+        => (string?)entityType[ClickHouseAnnotationNames.ReplicatedZooKeeperPath];
+
+    public static void SetReplicatedZooKeeperPath(this IMutableEntityType entityType, string? zooKeeperPath)
+        => entityType.SetOrRemoveAnnotation(ClickHouseAnnotationNames.ReplicatedZooKeeperPath, zooKeeperPath);
+
+    public static string? GetReplicatedReplicaName(this IReadOnlyEntityType entityType)
+        => (string?)entityType[ClickHouseAnnotationNames.ReplicatedReplicaName];
+
+    public static void SetReplicatedReplicaName(this IMutableEntityType entityType, string? replicaName)
+        => entityType.SetOrRemoveAnnotation(ClickHouseAnnotationNames.ReplicatedReplicaName, replicaName);
+
     // Settings (prefix-based key-value)
 
     public static Dictionary<string, string> GetSettings(this IReadOnlyEntityType entityType)
