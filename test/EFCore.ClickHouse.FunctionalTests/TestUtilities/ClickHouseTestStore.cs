@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using ClickHouse.Driver.ADO;
+using ClickHouse.EntityFrameworkCore.Infrastructure;
 
 namespace Microsoft.EntityFrameworkCore.TestUtilities;
 
@@ -48,10 +49,16 @@ public class ClickHouseTestStore : RelationalTestStore
             Database = databaseName
         }.ToString();
 
+    // The EF Core test stores for SQL Server and SQLite also set SingleQuery. Without it, a query
+    // that includes more than one collection logs MultipleCollectionIncludeWarning, and the test
+    // infrastructure turns that warning into an exception.
     public override DbContextOptionsBuilder AddProviderOptions(DbContextOptionsBuilder builder)
         => UseConnectionString
-            ? builder.UseClickHouse(ConnectionString)
-            : builder.UseClickHouse(Connection);
+            ? builder.UseClickHouse(ConnectionString, ApplyConfiguration)
+            : builder.UseClickHouse(Connection, ApplyConfiguration);
+
+    private static void ApplyConfiguration(ClickHouseDbContextOptionsBuilder builder)
+        => builder.UseQuerySplittingBehavior(QuerySplittingBehavior.SingleQuery);
 
     public int ExecuteNonQuery(string sql)
     {

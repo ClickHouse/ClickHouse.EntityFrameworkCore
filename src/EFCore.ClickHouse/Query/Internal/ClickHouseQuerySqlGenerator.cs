@@ -12,9 +12,47 @@ namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 
 public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
 {
+    private int _selectDepth;
+
     public ClickHouseQuerySqlGenerator(QuerySqlGeneratorDependencies dependencies)
         : base(dependencies)
     {
+    }
+
+    protected override Expression VisitSelect(SelectExpression selectExpression)
+    {
+        _selectDepth++;
+        try
+        {
+            return base.VisitSelect(selectExpression);
+        }
+        finally
+        {
+            _selectDepth--;
+        }
+    }
+
+    /// <summary>
+    /// EF Core does not write the alias of a projected column when the alias is equal to the
+    /// column name. ClickHouse names an unaliased <c>t.col</c> as <c>t.col</c>, not <c>col</c>,
+    /// when an earlier table in the same FROM clause also has a column <c>col</c>. An outer query
+    /// that reads <c>s.col</c> from the subquery then fails with <c>UNKNOWN_IDENTIFIER</c>.
+    /// Write the alias of each column in a nested SELECT. EF Core makes these aliases unique: a
+    /// subquery in FROM or JOIN and each operand of a set operation (also of a top-level one) get
+    /// unique aliases, and a scalar, IN or EXISTS subquery has one column.
+    /// The top-level SELECT keeps the default: it is read by position, its aliases can repeat,
+    /// and ClickHouse refuses two expressions with the same alias.
+    /// </summary>
+    protected override Expression VisitProjection(ProjectionExpression projectionExpression)
+    {
+        if (_selectDepth <= 1 || projectionExpression.Alias.Length == 0)
+            return base.VisitProjection(projectionExpression);
+
+        Visit(projectionExpression.Expression);
+        Sql.Append(AliasSeparator)
+           .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(projectionExpression.Alias));
+
+        return projectionExpression;
     }
 
     protected override Expression VisitExtension(Expression extensionExpression)

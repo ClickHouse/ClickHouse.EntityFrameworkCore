@@ -10,16 +10,6 @@ public class NorthwindSetOperationsQueryClickHouseTest
     {
     }
 
-    // ClickHouse cannot resolve identifiers from a UNION subquery alias in correlated subqueries
-    // (lateral join / OUTER APPLY pattern). Server error: "Identifier 'u.CustomerID' cannot be resolved"
-    public override Task Union_on_entity_with_correlated_collection(bool async)
-        => Assert.ThrowsAsync<ClickHouse.Driver.ClickHouseServerException>(
-            () => base.Union_on_entity_with_correlated_collection(async));
-
-    public override Task Union_on_entity_plus_other_column_with_correlated_collection(bool async)
-        => Assert.ThrowsAsync<ClickHouse.Driver.ClickHouseServerException>(
-            () => base.Union_on_entity_plus_other_column_with_correlated_collection(async));
-
     // Client evaluation before set operations is not translatable (same as Npgsql)
     public override async Task Client_eval_Union_FirstOrDefault(bool async)
         => Assert.Equal(

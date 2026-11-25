@@ -92,6 +92,8 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 `Join` (INNER JOIN), `GroupJoin` + `SelectMany` + `DefaultIfEmpty` (LEFT JOIN), `SelectMany` (CROSS JOIN), and self-joins. Joining a local sequence (`int[]`, `string[]`, `byte[]`) also works, as does `Contains` against a local collection (`T[]`, `List<T>`, and the `ICollection`/`IList`/`IReadOnlyList` interfaces), which becomes an `IN` predicate.
 
+`Include` / `ThenInclude` load reference and collection navigations, over more than one level.
+
 ClickHouse returns column defaults (`0`, `""`) instead of `NULL` for unmatched LEFT JOIN rows unless `join_use_nulls=1` is set. The provider adds this setting to the connection automatically so LEFT JOIN gives the .NET semantics you expect. To opt out, use `DisableJoinNullSemantics()`:
 
 ```csharp
@@ -328,8 +330,9 @@ dotnet ef database update
 - Server-generated values — identity columns, `RETURNING`, computed defaults read back after insert
 - Reverse engineering / scaffolding (`dotnet ef dbcontext scaffold`)
 - Owned entities mapped to JSON (`.ToJson()`)
-- Queries that EF Core lowers to `CROSS APPLY` / `OUTER APPLY`, which ClickHouse has no equivalent for. This covers correlated `SelectMany` that selects the outer element or entity, `Take` inside a collection projection, and correlated collections over a `UNION` source.
+- Queries that EF Core lowers to `CROSS APPLY` / `OUTER APPLY`, which ClickHouse has no equivalent for. This covers correlated `SelectMany` that selects the outer element or entity, and `Take` inside a collection projection.
 - Set operations after a client projection (for example `Union(...).FirstOrDefault()` on a client-evaluated shape)
+- Ordering by a correlated subquery (for example `OrderBy(c => c.Orders.FirstOrDefault().OrderDate)`), because ClickHouse does not support correlated subqueries in `ORDER BY`
 
 ## Building
 

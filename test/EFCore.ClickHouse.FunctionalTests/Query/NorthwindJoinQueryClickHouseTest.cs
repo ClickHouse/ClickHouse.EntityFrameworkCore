@@ -32,10 +32,6 @@ public class NorthwindJoinQueryClickHouseTest
     public override Task Take_in_collection_projection_with_FirstOrDefault_on_top_level(bool async)
         => AssertUnsupported(() => base.Take_in_collection_projection_with_FirstOrDefault_on_top_level(async));
 
-    // ClickHouse cannot resolve identifiers from outer scope in APPLY-style subqueries
-    public override Task SelectMany_with_client_eval_with_constructor(bool async)
-        => AssertUnsupported(() => base.SelectMany_with_client_eval_with_constructor(async));
-
     // Complex LINQ pattern not translatable
     public override Task GroupJoin_aggregate_anonymous_key_selectors2(bool async)
         => Assert.ThrowsAsync<InvalidOperationException>(
