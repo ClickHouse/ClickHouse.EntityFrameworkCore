@@ -1,3 +1,4 @@
+using System.Globalization;
 using ClickHouse.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -264,16 +265,31 @@ public class DateTimeFunctionsTranslationTest : IClassFixture<DateTimeFixture>
     }
 
     [Fact]
-    public async Task ToStartOfInterval_on_pre_1970_datetime64_is_not_preserved_by_default()
+    public async Task ToStartOfInterval_on_pre_1970_datetime64_by_default_depends_on_the_server_version()
     {
         await using var context = new DateTimeDbContext(_fixture.ConnectionString);
 
-        // toStartOfInterval returns DateTime (1970-2106) by default, so a 1920 value is not preserved.
         var result = await context.Events.AsNoTracking().Where(e => e.Id == 2)
             .Select(e => EF.Functions.ToStartOfInterval(e.Timestamp64, 15, ClickHouseInterval.Minute))
             .SingleAsync();
 
-        Assert.NotEqual(1920, result.Year);
+        // From ClickHouse 26.11, toStartOfInterval returns DateTime64 for a DateTime64 source and keeps the
+        // 1920 value. Earlier versions return DateTime (1970-2106), which cannot hold it.
+        if (await GetServerVersionAsync() >= new Version(26, 11))
+            Assert.Equal(new DateTime(1920, 5, 15, 12, 30, 0), result);
+        else
+            Assert.NotEqual(1920, result.Year);
+    }
+
+    private async Task<Version> GetServerVersionAsync()
+    {
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT version()";
+        var version = (string)(await command.ExecuteScalarAsync())!;
+        var parts = version.Split('.');
+        return new Version(int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture));
     }
 
     [Fact]
