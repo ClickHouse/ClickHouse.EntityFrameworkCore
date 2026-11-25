@@ -34,6 +34,9 @@ public static class ClickHouseAnnotationNames
     public const string SkippingIndexGranularity = Prefix + "SkippingIndex:Granularity";
     public const string SkippingIndexParams = Prefix + "SkippingIndex:Params";
 
+    // Query-level annotations on TableExpression
+    public const string Final = Prefix + "Final";
+
     // Engine name constants
     public const string MergeTree = "MergeTree";
     public const string ReplacingMergeTree = "ReplacingMergeTree";

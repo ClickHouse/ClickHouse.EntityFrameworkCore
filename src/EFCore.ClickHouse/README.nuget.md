@@ -63,6 +63,8 @@ All MergeTree-family engines (MergeTree, ReplacingMergeTree, SummingMergeTree, A
 
 Column-level features: CODEC, TTL, COMMENT, DEFAULT values. Data-skipping indexes with configurable type and granularity.
 
+Read the merged rows of merging engines such as ReplacingMergeTree with `context.Events.Final()`, which adds the `FINAL` modifier to the table in the query.
+
 ## Migrations
 
 Full `dotnet ef migrations` support: CREATE TABLE with ENGINE clauses, ALTER TABLE (ADD/DROP/MODIFY/RENAME COLUMN), RENAME TABLE, CREATE/DROP DATABASE, data-skipping index management.

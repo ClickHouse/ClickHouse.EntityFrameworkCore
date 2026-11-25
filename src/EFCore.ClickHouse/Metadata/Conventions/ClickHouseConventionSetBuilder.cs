@@ -31,6 +31,8 @@ public class ClickHouseConventionSetBuilder : RelationalConventionSetBuilder
         conventionSet.SkipNavigationForeignKeyChangedConventions.Clear();
 
         conventionSet.ModelFinalizingConventions.Add(new ClickHouseDefaultEngineConvention());
+        conventionSet.Replace<RelationalQueryFilterRewritingConvention>(
+            new ClickHouseQueryFilterRewritingConvention(Dependencies, RelationalDependencies));
 
         return conventionSet;
     }

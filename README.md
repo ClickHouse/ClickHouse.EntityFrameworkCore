@@ -298,6 +298,26 @@ modelBuilder.Entity<SensorReading>(b =>
 
 **Default behavior:** If no engine is configured, the provider defaults to `MergeTree` with the EF primary key as `ORDER BY`.
 
+### Reading merged rows with `FINAL`
+
+ClickHouse merges the rows of `ReplacingMergeTree`, `CollapsingMergeTree` and the other merging engines in the background, at a time that you cannot control. Until a merge occurs, a query can return more than one row for the same sorting key. Call `Final()` on a `DbSet` to add the [`FINAL` modifier](https://clickhouse.com/docs/sql-reference/statements/select/from#final-modifier) to its table in the query. ClickHouse then applies the merge logic of the table engine at query time, for example one row for each sorting key of a `ReplacingMergeTree` table:
+
+```csharp
+var readings = await context.SensorReadings
+    .Final()
+    .Where(r => r.Location == "Lab 1")
+    .ToListAsync();
+```
+
+```sql
+SELECT ... FROM `sensor_readings` AS `s` FINAL WHERE `s`.`Location` = 'Lab 1'
+```
+
+- `FINAL` applies to all tables of the entity type (TPT, TPC and entity splitting), but not to other entity types in the query. Navigations, `Include` and owned types in other tables read their tables without `FINAL`. Call `Final()` on each `DbSet` that needs it, for example on the two sides of a join. `Final()` also works in subqueries and in query filters.
+- To apply `FINAL` to all tables that support it, set the ClickHouse `final` setting, for example with `set_final=1` in the connection string.
+- ClickHouse rejects `FINAL` on engines that do not merge rows, for example `MergeTree` (the provider default), `Log` and `Memory`, with the `ILLEGAL_FINAL` error. On a view that is not materialized, ClickHouse accepts `FINAL` but ignores it.
+- Queries with `FINAL` can be slower than queries without it.
+
 ### Migrations
 
 The provider supports `dotnet ef migrations` for creating and applying migrations:
