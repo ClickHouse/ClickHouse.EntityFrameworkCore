@@ -100,6 +100,29 @@ public class DotnetEfCliTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Database_update_uses_connection_option()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully
+
+        // The context configures _connectionString. dotnet-ef applies --connection with
+        // SetConnectionString before the first query, and the migration must use it.
+        var otherConnectionString = await SharedContainer.GetConnectionStringAsync();
+
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+        await RunDotnetEfSuccessfully("database", "update", "--connection", otherConnectionString);
+
+        using var other = new global::ClickHouse.Driver.ADO.ClickHouseConnection(otherConnectionString);
+        await other.OpenAsync();
+        Assert.Equal(1UL, await QueryScalar<ulong>(other, "SELECT count() FROM `__EFMigrationsHistory`"));
+
+        using var configured = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_connectionString);
+        await configured.OpenAsync();
+        Assert.Equal(0UL, await QueryScalar<ulong>(configured,
+            "SELECT count() FROM system.tables WHERE database = currentDatabase()"));
+    }
+
+    [Fact]
     public async Task Idempotent_script_is_rejected()
     {
         if (!_dotnetEfAvailable)

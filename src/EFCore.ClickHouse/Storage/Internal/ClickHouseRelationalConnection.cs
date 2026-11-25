@@ -10,8 +10,12 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
 
 public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseRelationalConnection
 {
-    private readonly DbDataSource? _dataSource;
+    private readonly ClickHouseDataSourceManager? _dataSourceManager;
     private readonly bool _joinNullSemanticsDisabled;
+    private DbDataSource? _dataSource;
+
+    // The connection that CreateDbConnection got from _dataSource, until SetDbConnection replaces it.
+    private DbConnection? _dataSourceConnection;
 
     public ClickHouseRelationalConnection(
         RelationalConnectionDependencies dependencies,
@@ -19,6 +23,7 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         : base(dependencies)
     {
         var extension = dependencies.ContextOptions.FindExtension<ClickHouseOptionsExtension>();
+        _dataSourceManager = dataSourceManager;
         _dataSource = dataSourceManager.GetDataSource(extension);
         _joinNullSemanticsDisabled = extension?.JoinNullSemanticsDisabled ?? false;
     }
@@ -26,21 +31,69 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     // Used by CreateMasterConnection only
     private ClickHouseRelationalConnection(
         RelationalConnectionDependencies dependencies,
-        DbDataSource? dataSource,
         bool joinNullSemanticsDisabled)
         : base(dependencies)
     {
-        _dataSource = dataSource;
         _joinNullSemanticsDisabled = joinNullSemanticsDisabled;
     }
 
     protected override DbConnection CreateDbConnection()
-        => _dataSource?.CreateConnection()
-           ?? new ClickHouseConnection(
-               ClickHouseClientIdentity.CreateSettings(
-                   _joinNullSemanticsDisabled
-                       ? ConnectionString!
-                       : ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!)));
+    {
+        if (_dataSource is not null)
+            return _dataSourceConnection = _dataSource.CreateConnection();
+
+        return new ClickHouseConnection(
+            ClickHouseClientIdentity.CreateSettings(
+                _joinNullSemanticsDisabled
+                    ? ConnectionString!
+                    : ClickHouseDataSourceManager.EnsureDefaultSettings(ConnectionString!)));
+    }
+
+    /// <summary>
+    /// Sets the connection string. The provider uses its own data source for the string, with one
+    /// client and HTTP connection pool for each distinct string, as for <c>UseClickHouse(string)</c>.
+    /// The new data source replaces a data source from <c>UseClickHouse(DbDataSource)</c>. When the
+    /// current connection came from a data source and is closed, the provider replaces it with a
+    /// connection from the new data source, so it keeps the shared client. Otherwise EF Core writes
+    /// the string into the current connection.
+    /// </summary>
+    public override string? ConnectionString
+    {
+        get => base.ConnectionString;
+        set
+        {
+            var dataSource = string.IsNullOrWhiteSpace(value) || _dataSourceManager is null
+                ? null
+                : _dataSourceManager.GetOrCreateDataSource(value, _joinNullSemanticsDisabled);
+
+            // EF Core writes the string into a connection whose string is different, and the string of
+            // a driver connection is normalized, so even the same string would rebuild the client.
+            if (dataSource is not null && _dataSourceConnection is { State: ConnectionState.Closed })
+            {
+                // Remove the connection, so that EF Core gets the next one from CreateDbConnection.
+                base.SetDbConnection(null, contextOwnsConnection: true);
+                _dataSourceConnection = null;
+            }
+
+            base.ConnectionString = value;
+            _dataSource = dataSource;
+        }
+    }
+
+    /// <summary>
+    /// Sets the connection. A connection that is not null replaces the configured data source, and
+    /// inserts use the client of that connection.
+    /// </summary>
+    public override void SetDbConnection(DbConnection? value, bool contextOwnsConnection)
+    {
+        base.SetDbConnection(value, contextOwnsConnection);
+
+        if (!ReferenceEquals(value, _dataSourceConnection))
+            _dataSourceConnection = null;
+
+        if (value is not null && _dataSourceConnection is null)
+            _dataSource = null;
+    }
 
     protected override bool SupportsAmbientTransactions => false;
 
@@ -83,9 +136,11 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
     }
 
     /// <summary>
-    /// Returns the options for an insert through <paramref name="client"/>, with the provider query
-    /// settings that the client settings do not already contain. Returns null when no setting is
-    /// missing, so the driver uses its default options.
+    /// Returns the options for an insert through <paramref name="client"/>: the provider query
+    /// settings that the client settings do not already contain, and the database of the current
+    /// connection when it is not the database of the client, for example after
+    /// <see cref="DbConnection.ChangeDatabase(string)"/>. Returns null when neither is needed, so the
+    /// driver uses its default options.
     /// </summary>
     public virtual InsertOptions? CreateInsertOptions(IClickHouseClient client)
     {
@@ -96,7 +151,13 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
                 (settings ??= new Dictionary<string, object>())[name] = value;
         }
 
-        return settings is null ? null : new InsertOptions { CustomSettings = settings };
+        var database = DbConnection.Database;
+        if (string.IsNullOrEmpty(database) || database == client.Settings.Database)
+            database = null;
+
+        return settings is null && database is null
+            ? null
+            : new InsertOptions { CustomSettings = settings, Database = database };
     }
 
     public override bool Open(bool errorsExpected = false)
@@ -167,7 +228,6 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
         return new ClickHouseRelationalConnection(
             Dependencies with { ContextOptions = optionsBuilder.Options },
-            dataSource: null,
             _joinNullSemanticsDisabled);
     }
 
@@ -186,13 +246,25 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         CancellationToken cancellationToken = default)
         => Task.FromResult<IDbContextTransaction>(new ClickHouseTransaction());
 
+    /// <summary>
+    /// Returns the client for inserts. For a <see cref="ClickHouseConnection"/>, this is the client of
+    /// the current connection, so inserts use its server, settings and HTTP connection pool, and
+    /// follow <c>SetConnectionString</c> and <c>SetDbConnection</c>. <see cref="CreateInsertOptions"/>
+    /// adds the database of the connection. For another connection type, for example a wrapper, this
+    /// is the client of the configured <see cref="ClickHouseDataSource"/>.
+    /// </summary>
     public IClickHouseClient GetClickHouseClient()
     {
+        var connection = DbConnection;
+        if (connection is ClickHouseConnection clickHouseConnection)
+            return clickHouseConnection.GetClient();
+
         if (_dataSource is ClickHouseDataSource clickHouseDataSource)
             return clickHouseDataSource.GetClient();
 
         throw new InvalidOperationException(
-            "Cannot obtain IClickHouseClient. The connection must be configured with a connection string " +
-            "or ClickHouseDataSource, not a raw DbConnection.");
+            $"Inserts need a {nameof(ClickHouseConnection)}, but the connection is a '{connection.GetType().Name}' " +
+            $"and no {nameof(ClickHouseDataSource)} is configured. Configure the context with a connection " +
+            $"string, a {nameof(ClickHouseDataSource)} or a {nameof(ClickHouseConnection)}.");
     }
 }

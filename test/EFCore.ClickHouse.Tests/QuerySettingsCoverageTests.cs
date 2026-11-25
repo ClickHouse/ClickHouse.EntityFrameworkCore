@@ -10,9 +10,10 @@ namespace EFCore.ClickHouse.Tests;
 /// <summary>
 /// Checks in <c>system.query_log</c> that every statement the provider sends carries the provider
 /// query settings (see <c>ClickHouseRelationalConnection.GetQuerySettings</c>). The context uses a
-/// <see cref="ClickHouseDataSource"/> whose settings do not contain them, so only the settings that
-/// the provider adds to each statement can make the test pass. When you add a code path that sends
-/// SQL to ClickHouse, add an operation that uses it to this test.
+/// <see cref="ClickHouseDataSource"/> or a <see cref="ClickHouseConnection"/> whose settings do not
+/// contain them, so only the settings that the provider adds to each statement can make the test
+/// pass. When you add a code path that sends SQL to ClickHouse, add an operation that uses it to
+/// this test.
 /// </summary>
 public class QuerySettingsCoverageTests : IClassFixture<ConnectionSettingsFixture>
 {
@@ -36,13 +37,13 @@ public class QuerySettingsCoverageTests : IClassFixture<ConnectionSettingsFixtur
         public string Label { get; set; } = string.Empty;
     }
 
-    private sealed class CoverageContext(ClickHouseDataSource dataSource) : DbContext
+    private sealed class CoverageContext(Action<DbContextOptionsBuilder> configure) : DbContext
     {
         public DbSet<CoverageParent> Parents => Set<CoverageParent>();
         public DbSet<CoverageChild> Children => Set<CoverageChild>();
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-            => optionsBuilder.UseClickHouse(dataSource);
+            => configure(optionsBuilder);
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -59,8 +60,10 @@ public class QuerySettingsCoverageTests : IClassFixture<ConnectionSettingsFixtur
         }
     }
 
-    [Fact]
-    public async Task Every_statement_carries_the_provider_query_settings()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Every_statement_carries_the_provider_query_settings(bool useDbConnection)
     {
         var marker = $"query_settings_{Guid.NewGuid():N}";
         var databaseName = $"cov_{Guid.NewGuid():N}";
@@ -71,8 +74,15 @@ public class QuerySettingsCoverageTests : IClassFixture<ConnectionSettingsFixtur
         // log_comment tags each statement of this test in system.query_log.
         settings.CustomSettings["log_comment"] = marker;
 
-        await using (var dataSource = new ClickHouseDataSource(settings))
-        await using (var ctx = new CoverageContext(dataSource))
+        await using var dataSource = new ClickHouseDataSource(settings);
+        await using var connection = new ClickHouseConnection(settings);
+        await using (var ctx = new CoverageContext(o =>
+        {
+            if (useDbConnection)
+                o.UseClickHouse(connection);
+            else
+                o.UseClickHouse(dataSource);
+        }))
         {
             var creator = ctx.GetService<IRelationalDatabaseCreator>();
 
