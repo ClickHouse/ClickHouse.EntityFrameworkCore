@@ -1,4 +1,5 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -48,10 +49,22 @@ public class ClickHouseHistoryRepository : HistoryRepository
     {
         history.Property<string>(h => h.MigrationId).HasMaxLength(150);
         history.Property<string>(h => h.ProductVersion).HasMaxLength(32).IsRequired();
-        history.ToTable(TableName, table => table
-            .HasMergeTreeEngine()
-            .WithOrderBy("MigrationId"));
+        history.ToTable(TableName, table =>
+        {
+            var engine = table
+                .HasMergeTreeEngine()
+                .WithOrderBy("MigrationId");
+
+            // A history table that is not replicated has different rows on each replica. Then a migration
+            // that ran through one replica looks unapplied on the other replicas.
+            if (IsReplicated)
+                engine.WithReplication();
+        });
     }
+
+    private bool IsReplicated
+        => Dependencies.Options.FindExtension<ClickHouseOptionsExtension>() is { } options
+            && (options.ClusterName is not null || options.ReplicatedMigrationsHistoryTable);
 
     public override LockReleaseBehavior LockReleaseBehavior => LockReleaseBehavior.Connection;
 

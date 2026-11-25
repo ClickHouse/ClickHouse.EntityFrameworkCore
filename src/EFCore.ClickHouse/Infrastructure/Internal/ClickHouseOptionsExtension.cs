@@ -20,6 +20,18 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     /// </summary>
     public bool JoinNullSemanticsDisabled { get; private set; }
 
+    /// <summary>
+    /// The cluster for <c>ON CLUSTER</c> in the DDL that the provider generates, or <see langword="null"/>
+    /// to run DDL only on the server of the connection.
+    /// </summary>
+    public string? ClusterName { get; private set; }
+
+    /// <summary>
+    /// When true, the migrations history table uses <c>ReplicatedMergeTree</c>. The history table is also
+    /// replicated when <see cref="ClusterName"/> is set.
+    /// </summary>
+    public bool ReplicatedMigrationsHistoryTable { get; private set; }
+
     public ClickHouseOptionsExtension()
     {
     }
@@ -29,6 +41,8 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     {
         DataSource = copyFrom.DataSource;
         JoinNullSemanticsDisabled = copyFrom.JoinNullSemanticsDisabled;
+        ClusterName = copyFrom.ClusterName;
+        ReplicatedMigrationsHistoryTable = copyFrom.ReplicatedMigrationsHistoryTable;
     }
 
     protected override RelationalOptionsExtension Clone()
@@ -45,6 +59,20 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     {
         var clone = (ClickHouseOptionsExtension)Clone();
         clone.JoinNullSemanticsDisabled = disabled;
+        return clone;
+    }
+
+    public ClickHouseOptionsExtension WithClusterName(string? clusterName)
+    {
+        var clone = (ClickHouseOptionsExtension)Clone();
+        clone.ClusterName = clusterName;
+        return clone;
+    }
+
+    public ClickHouseOptionsExtension WithReplicatedMigrationsHistoryTable(bool replicated)
+    {
+        var clone = (ClickHouseOptionsExtension)Clone();
+        clone.ReplicatedMigrationsHistoryTable = replicated;
         return clone;
     }
 

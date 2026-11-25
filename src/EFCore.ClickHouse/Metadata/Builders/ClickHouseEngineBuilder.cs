@@ -58,4 +58,29 @@ public abstract class ClickHouseEngineBuilder
         EntityType.SetSetting(key, value);
         return this;
     }
+
+    /// <summary>
+    /// Marks the table as replicated. With no arguments, ClickHouse uses the server settings
+    /// <c>default_replica_path</c> and <c>default_replica_name</c>.
+    /// </summary>
+    protected void SetReplication()
+    {
+        EntityType.SetReplicated(true);
+        EntityType.SetReplicatedZooKeeperPath(null);
+        EntityType.SetReplicatedReplicaName(null);
+    }
+
+    /// <summary>
+    /// Marks the table as replicated with an explicit ZooKeeper (ClickHouse Keeper) path and replica name.
+    /// Both values can contain macros such as <c>{shard}</c>, <c>{replica}</c>, <c>{database}</c>,
+    /// <c>{table}</c> and <c>{uuid}</c>.
+    /// </summary>
+    protected void SetReplication(string zooKeeperPath, string replicaName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(zooKeeperPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(replicaName);
+        EntityType.SetReplicated(true);
+        EntityType.SetReplicatedZooKeeperPath(zooKeeperPath);
+        EntityType.SetReplicatedReplicaName(replicaName);
+    }
 }

@@ -45,4 +45,24 @@ public class ClickHouseMergeTreeEngineBuilder : ClickHouseEngineBuilder
         base.WithSetting(key, value);
         return this;
     }
+
+    /// <summary>
+    /// Uses the <c>ReplicatedMergeTree</c> engine with the ZooKeeper path and replica name from the server
+    /// settings <c>default_replica_path</c> and <c>default_replica_name</c>.
+    /// </summary>
+    public ClickHouseMergeTreeEngineBuilder WithReplication()
+    {
+        SetReplication();
+        return this;
+    }
+
+    /// <summary>
+    /// Uses the <c>ReplicatedMergeTree</c> engine with an explicit ZooKeeper (ClickHouse Keeper) path and replica name,
+    /// for example <c>"/clickhouse/tables/{shard}/{database}/{table}"</c> and <c>"{replica}"</c>.
+    /// </summary>
+    public ClickHouseMergeTreeEngineBuilder WithReplication(string zooKeeperPath, string replicaName)
+    {
+        SetReplication(zooKeeperPath, replicaName);
+        return this;
+    }
 }

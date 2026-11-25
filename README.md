@@ -298,6 +298,40 @@ modelBuilder.Entity<SensorReading>(b =>
 
 **Default behavior:** If no engine is configured, the provider defaults to `MergeTree` with the EF primary key as `ORDER BY`.
 
+### Replication and Clusters
+
+Each MergeTree family engine builder has `.WithReplication()`. It changes the engine to its Replicated variant, for example `ReplacingMergeTree` to `ReplicatedReplacingMergeTree`. Rows that you write to one replica are then copied to the other replicas of the shard.
+
+```csharp
+modelBuilder.Entity<SensorReading>(b =>
+{
+    b.ToTable("sensor_readings", t => t
+        .HasReplacingMergeTreeEngine("Version")
+        .WithOrderBy("Id")
+        .WithReplication());
+});
+```
+
+- `.WithReplication()` gives ``ReplicatedReplacingMergeTree(`Version`)``. ClickHouse then uses the server settings `default_replica_path` (by default `/clickhouse/tables/{uuid}/{shard}`) and `default_replica_name` (by default `{replica}`).
+- `.WithReplication("/clickhouse/tables/{shard}/{database}/{table}", "{replica}")` gives ``ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}', `Version`)``. Set both values or neither.
+
+Prefer the defaults, or keep `{uuid}` in your path. If you drop a table and then create it again with the same path, the create fails with `REPLICA_ALREADY_EXISTS` until ClickHouse removes the old replica. By default, ClickHouse waits 8 minutes (`database_atomic_delay_before_drop_table_sec`) before it removes it.
+
+A Replicated engine copies rows, but it does not create the table on the other replicas. Each statement that creates, changes or drops a table must run on all hosts. There are two ways to do this:
+
+- **`ON CLUSTER`.** Use `UseCluster`. The provider then adds `ON CLUSTER` to the DDL that migrations, `EnsureCreated()` and `EnsureDeleted()` generate: `CREATE`/`DROP DATABASE`, `CREATE`/`DROP`/`RENAME TABLE`, and `ALTER TABLE` for columns and data-skipping indices.
+
+  ```csharp
+  optionsBuilder.UseClickHouse(connectionString, o => o.UseCluster("my_cluster"));
+  ```
+
+  The cluster must be in the `remote_servers` server setting. You can also use a macro, for example `UseCluster("{cluster}")`. If a host is not available, ClickHouse waits up to `distributed_ddl_task_timeout` (180 seconds by default) and the migration then fails.
+- **A database with the `Replicated` engine.** ClickHouse replicates the DDL itself and refuses `ON CLUSTER`, so do not use `UseCluster`. Use `UseReplicatedMigrationsHistoryTable()` instead. In such a database, ClickHouse also refuses an explicit path and replica name, so use `.WithReplication()` without arguments.
+
+The migrations history table (`__EFMigrationsHistory`) is a `MergeTree` table by default. With `UseCluster` or `UseReplicatedMigrationsHistoryTable()`, it is a `ReplicatedMergeTree` table with the server default path and replica name. Then all replicas see the same applied migrations, and a migration that ran through one replica is not applied again through another. To use other settings for the history table, derive from `ClickHouseHistoryRepository`, override `ConfigureTable`, and register your class with `ReplaceService<IHistoryRepository, YourHistoryRepository>()`.
+
+The provider does not create `Distributed` tables. On ClickHouse Cloud you do not need these settings: ClickHouse Cloud replicates DDL itself and stores MergeTree family tables as `SharedMergeTree`.
+
 ### Migrations
 
 The provider supports `dotnet ef migrations` for creating and applying migrations:
@@ -310,13 +344,14 @@ dotnet ef database update
 `EnsureCreated()` / `EnsureDeleted()` also work for quick setup without migrations.
 
 **Supported migration operations:**
-- CREATE TABLE with full ENGINE clause (all engine types, ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS, codecs, comments, data-skipping indices)
+- CREATE TABLE with full ENGINE clause (all engine types and their Replicated variants, ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS, codecs, comments, data-skipping indices)
 - ADD COLUMN, DROP COLUMN, MODIFY COLUMN, RENAME COLUMN, RENAME TABLE
 - DROP TABLE, CREATE/DROP INDEX (data-skipping)
 - Custom `ClickHouseCreateDatabaseOperation` / `ClickHouseDropDatabaseOperation`
+- `ON CLUSTER` on all of the above with `UseCluster` (see [Replication and Clusters](#replication-and-clusters))
 
 **ClickHouse limitations reflected in migrations:**
-- ALTER TABLE cannot change engine, ORDER BY, PARTITION BY, or other structural metadata — the provider throws `NotSupportedException` with a clear message
+- ALTER TABLE cannot change engine, replication, ORDER BY, PARTITION BY, or other structural metadata — the provider throws `NotSupportedException` with a clear message
 - Foreign keys, unique constraints, and sequences throw `NotSupportedException`
 - Primary key add/drop is a no-op (ClickHouse PK is structural, not a constraint)
 - Idempotent scripts (`--idempotent`) are not supported (ClickHouse has no conditional SQL blocks)
