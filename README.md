@@ -333,7 +333,7 @@ A Replicated engine copies rows, but it does not create the table on the other r
 The provider writes the applied migrations to the `__EFMigrationsHistory` table. By default, this table is a `MergeTree` table on the server of the connection, so each host has its own history. The two options change this:
 
 - With `UseCluster`, the history table is `ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{shard}-{replica}')`. Its path has no `{shard}`, so all hosts of all shards share one history.
-- With `UseReplicatedMigrationsHistoryTable()`, the history table is `ReplicatedMergeTree()` with the server default path and replica name.
+- With `UseReplicatedMigrationsHistoryTable()`, the history table is `ReplicatedMergeTree()` with the server default path and replica name. In a `Replicated` database, ClickHouse refuses a replicated table that the shards share, so each shard has its own history. If the database has more than one shard, run the migrations through the hosts of one shard only. Through a host of another shard, the applied migrations look pending, and the provider tries to apply them again.
 
 In both cases, the provider turns off insert deduplication for the history table, so a migration that you revert and apply again gets its history row back. A host sees a migration as applied when the history row has replicated to it. The provider has no migration lock, so run the migrations from one place at a time.
 

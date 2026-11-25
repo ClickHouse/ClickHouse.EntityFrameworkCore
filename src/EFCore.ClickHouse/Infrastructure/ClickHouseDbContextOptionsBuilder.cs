@@ -50,6 +50,11 @@ public class ClickHouseDbContextOptionsBuilder
     /// refuses the <c>{uuid}</c> macro of the default path without <c>ON CLUSTER</c>.
     /// <see cref="UseCluster"/> also creates a replicated history table.
     /// </summary>
+    /// <remarks>
+    /// The default path contains <c>{shard}</c>, and a <c>Replicated</c> database refuses a path without it,
+    /// so each shard has its own history. In a <c>Replicated</c> database with more than one shard, run the
+    /// migrations through the hosts of one shard only.
+    /// </remarks>
     public virtual ClickHouseDbContextOptionsBuilder UseReplicatedMigrationsHistoryTable()
         => WithOption(e => e.WithReplicatedMigrationsHistoryTable(true));
 }

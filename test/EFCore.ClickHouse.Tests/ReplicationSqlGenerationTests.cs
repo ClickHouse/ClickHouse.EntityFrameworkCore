@@ -179,6 +179,19 @@ public class ReplicationSqlGenerationTests
     }
 
     [Fact]
+    public void Check_constraint_statements_end_with_a_statement_terminator()
+    {
+        // A migration script joins the commands with only a line break.
+        var statements = GenerateStatements("test_cluster",
+        [
+            new AddCheckConstraintOperation { Table = "t", Name = "ck", Sql = "`Id` > 0" },
+            new DropCheckConstraintOperation { Table = "t", Name = "ck" },
+        ]);
+
+        Assert.All(statements, s => Assert.EndsWith(";", s.TrimEnd()));
+    }
+
+    [Fact]
     public void Without_UseCluster_DDL_has_no_ON_CLUSTER()
     {
         var statements = GenerateStatements(null, DdlOperations());

@@ -335,6 +335,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         AppendAlterTable(builder, operation.Table, operation.Schema);
         builder.Append(" ADD ");
         CheckConstraint(operation, model, builder);
+        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
 
         EndStatement(builder);
     }
@@ -347,7 +348,8 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         AppendAlterTable(builder, operation.Table, operation.Schema);
         builder
             .Append(" DROP CONSTRAINT ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
+            .AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
 
         EndStatement(builder);
     }
