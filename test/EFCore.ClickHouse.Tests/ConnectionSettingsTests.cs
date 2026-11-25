@@ -3,6 +3,7 @@ using ClickHouse.Driver.ADO;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
@@ -146,6 +147,33 @@ public class ConnectionSettingsTests : IClassFixture<ConnectionSettingsFixture>
             Assert.True(await GetJoinUseNullsAsync(ctx));
             Assert.Null(await GetLeftJoinValueAsync(ctx));
             Assert.True(interceptor.WrappedCommands > 0);
+        }
+    }
+
+    [Fact]
+    public async Task RelationalCommand_WithoutLogger_AppliesJoinUseNulls()
+    {
+        // Code that runs an IRelationalCommand without a logger skips the interceptors, so the
+        // command class must add the settings itself.
+        await using var dataSource = new ClickHouseDataSource(_fixture.ConnectionString);
+        await using var ctx = new MinimalContext(o => o.UseClickHouse(dataSource));
+
+        var connection = ctx.GetService<IRelationalConnection>();
+        var command = ctx.GetService<IRelationalCommandBuilderFactory>()
+            .Create()
+            .Append("SELECT getSetting('join_use_nulls')")
+            .Build();
+
+        await connection.OpenAsync(CancellationToken.None);
+        try
+        {
+            var result = await command.ExecuteScalarAsync(
+                new RelationalCommandParameterObject(connection, null, null, context: null, logger: null));
+            Assert.True(result is bool b ? b : bool.Parse(result?.ToString() ?? "false"));
+        }
+        finally
+        {
+            await connection.CloseAsync();
         }
     }
 
