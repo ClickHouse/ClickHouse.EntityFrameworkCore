@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Linq.Expressions;
+using ClickHouse.EntityFrameworkCore.Metadata.Internal;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
@@ -149,6 +150,22 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
     protected override void GenerateTop(SelectExpression selectExpression)
     {
         // ClickHouse uses LIMIT, not TOP
+    }
+
+    /// <summary>
+    /// ClickHouse accepts FINAL only after the alias: <c>FROM `t` AS `x` FINAL</c>.
+    /// </summary>
+    protected override Expression VisitTable(TableExpression tableExpression)
+    {
+        base.VisitTable(tableExpression);
+
+        if (tableExpression.FindAnnotation(ClickHouseAnnotationNames.Final)?.Value is string finalTable
+            && finalTable == tableExpression.Table.SchemaQualifiedName)
+        {
+            Sql.Append(" FINAL");
+        }
+
+        return tableExpression;
     }
 
     protected override Expression VisitSqlParameter(SqlParameterExpression sqlParameterExpression)
