@@ -26,7 +26,8 @@ public class ClickHouseDbContextOptionsBuilder
     /// Adds <c>ON CLUSTER '<paramref name="clusterName"/>'</c> to the DDL that migrations,
     /// <c>EnsureCreated()</c> and <c>EnsureDeleted()</c> generate, so that ClickHouse runs each statement
     /// on all hosts of the cluster. The migrations history table is also created with
-    /// <c>ReplicatedMergeTree</c>, so that all replicas see the same applied migrations.
+    /// <c>ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{shard}-{replica}')</c>, so that all hosts of all
+    /// shards see the same applied migrations.
     /// </summary>
     /// <remarks>
     /// <c>ON CLUSTER</c> only creates a table on each host. To replicate the rows of a table between the
@@ -45,7 +46,9 @@ public class ClickHouseDbContextOptionsBuilder
     /// <summary>
     /// Creates the migrations history table with <c>ReplicatedMergeTree</c> and the server settings
     /// <c>default_replica_path</c> and <c>default_replica_name</c>, so that all replicas see the same applied
-    /// migrations. Use this in a database with the <c>Replicated</c> engine. <see cref="UseCluster"/> does this too.
+    /// migrations. Use this only in a database with the <c>Replicated</c> engine: in other databases, ClickHouse
+    /// refuses the <c>{uuid}</c> macro of the default path without <c>ON CLUSTER</c>.
+    /// <see cref="UseCluster"/> also creates a replicated history table.
     /// </summary>
     public virtual ClickHouseDbContextOptionsBuilder UseReplicatedMigrationsHistoryTable()
         => WithOption(e => e.WithReplicatedMigrationsHistoryTable(true));

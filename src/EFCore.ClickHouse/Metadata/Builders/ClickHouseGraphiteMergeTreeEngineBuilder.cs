@@ -52,6 +52,10 @@ public class ClickHouseGraphiteMergeTreeEngineBuilder : ClickHouseEngineBuilder
     /// Uses the <c>ReplicatedGraphiteMergeTree</c> engine with the ZooKeeper path and replica name from the server
     /// settings <c>default_replica_path</c> and <c>default_replica_name</c>.
     /// </summary>
+    /// <remarks>
+    /// The default path contains <c>{uuid}</c>. ClickHouse accepts it only in an <c>ON CLUSTER</c> query
+    /// (see <c>UseCluster</c>) or in a database with the <c>Replicated</c> engine.
+    /// </remarks>
     public ClickHouseGraphiteMergeTreeEngineBuilder WithReplication()
     {
         SetReplication();

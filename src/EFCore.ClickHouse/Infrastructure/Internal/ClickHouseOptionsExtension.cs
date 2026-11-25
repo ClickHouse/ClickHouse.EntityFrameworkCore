@@ -27,8 +27,8 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     public string? ClusterName { get; private set; }
 
     /// <summary>
-    /// When true, the migrations history table uses <c>ReplicatedMergeTree</c>. The history table is also
-    /// replicated when <see cref="ClusterName"/> is set.
+    /// When true, the migrations history table uses <c>ReplicatedMergeTree</c> with the server default path and
+    /// replica name. When <see cref="ClusterName"/> is set, the history table is replicated with a path for all shards.
     /// </summary>
     public bool ReplicatedMigrationsHistoryTable { get; private set; }
 

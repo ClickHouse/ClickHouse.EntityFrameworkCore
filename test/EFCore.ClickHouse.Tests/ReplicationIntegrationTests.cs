@@ -103,9 +103,21 @@ public class ReplicationIntegrationTests : IClassFixture<ClickHouseClusterFixtur
             Assert.Equal(
                 [CreateEventsMigration.MigrationId, AddScoreMigration.MigrationId],
                 await ctx.Database.GetAppliedMigrationsAsync());
+
+            // Revert the second migration and apply it again. The second history row of the migration
+            // is equal to the first one, and the history table must keep it.
+            var migrator = ctx.GetService<IMigrator>();
+            await migrator.MigrateAsync(CreateEventsMigration.MigrationId);
+            Assert.Equal([AddScoreMigration.MigrationId], await ctx.Database.GetPendingMigrationsAsync());
+            await migrator.MigrateAsync();
         }
 
-        Assert.Equal(1UL, await QueryScalarAsync<ulong>(_cluster.Node1ConnectionString,
+        await SyncReplicaAsync(_cluster.Node2ConnectionString, db, "__EFMigrationsHistory");
+
+        await using (var ctx = new MigrationsContext(Options(_cluster.Node2(db), o => o.UseCluster(Cluster))))
+            Assert.Empty(await ctx.Database.GetPendingMigrationsAsync());
+
+        Assert.Equal(1UL, await QueryScalarAsync<ulong>(_cluster.Node2ConnectionString,
             $"SELECT count() FROM system.columns WHERE database = '{db}' AND table = 'events' AND name = 'Score'"));
     }
 
@@ -289,5 +301,8 @@ public class ReplicationIntegrationTests : IClassFixture<ClickHouseClusterFixtur
                 type: "Int32",
                 nullable: false,
                 defaultValue: 0);
+
+        protected override void Down(MigrationBuilder migrationBuilder)
+            => migrationBuilder.DropColumn(name: "Score", table: "events");
     }
 }

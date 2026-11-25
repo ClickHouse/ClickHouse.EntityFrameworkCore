@@ -61,8 +61,8 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         EndStatement(builder, suppressTransaction: true);
     }
 
-    // ON CLUSTER: ClickHouse puts the clause after the table or database name, before the column list
-    // and before the ALTER commands.
+    // ON CLUSTER: CREATE and DROP put the clause after the table or database name, ALTER TABLE puts it
+    // before the ALTER commands, and RENAME TABLE puts it at the end.
 
     private void AppendOnCluster(MigrationCommandListBuilder builder)
     {
@@ -323,6 +323,31 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
             .Append(" TO ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName));
+
+        EndStatement(builder);
+    }
+
+    protected override void Generate(
+        AddCheckConstraintOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder)
+    {
+        AppendAlterTable(builder, operation.Table, operation.Schema);
+        builder.Append(" ADD ");
+        CheckConstraint(operation, model, builder);
+
+        EndStatement(builder);
+    }
+
+    protected override void Generate(
+        DropCheckConstraintOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder)
+    {
+        AppendAlterTable(builder, operation.Table, operation.Schema);
+        builder
+            .Append(" DROP CONSTRAINT ")
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
         EndStatement(builder);
     }

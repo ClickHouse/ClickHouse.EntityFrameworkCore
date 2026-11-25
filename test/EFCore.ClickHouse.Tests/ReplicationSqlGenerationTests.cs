@@ -21,6 +21,9 @@ public class ReplicationSqlGenerationTests
     private const string ExplicitPath = "/clickhouse/tables/{shard}/{database}/{table}";
     private const string ExplicitReplica = "{replica}";
 
+    private const string NoDeduplication =
+        "SETTINGS replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0";
+
     // Engine and the engine arguments that follow the replication arguments.
     public static TheoryData<string, string> Engines => new()
     {
@@ -167,6 +170,8 @@ public class ReplicationSqlGenerationTests
             "ALTER TABLE `t` ON CLUSTER 'test_cluster' RENAME COLUMN `c` TO `d`",
             "ALTER TABLE `t` ON CLUSTER 'test_cluster' ADD INDEX `ix` (`c`) TYPE minmax GRANULARITY 1",
             "ALTER TABLE `t` ON CLUSTER 'test_cluster' DROP INDEX `ix`",
+            "ALTER TABLE `t` ON CLUSTER 'test_cluster' ADD CONSTRAINT `ck` CHECK (`Id` > 0)",
+            "ALTER TABLE `t` ON CLUSTER 'test_cluster' DROP CONSTRAINT `ck`",
             "CREATE DATABASE `d` ON CLUSTER 'test_cluster'",
             "DROP DATABASE `d` ON CLUSTER 'test_cluster'",
         ],
@@ -178,7 +183,7 @@ public class ReplicationSqlGenerationTests
     {
         var statements = GenerateStatements(null, DdlOperations());
 
-        Assert.Equal(12, statements.Count);
+        Assert.Equal(14, statements.Count);
         Assert.All(statements, s => Assert.DoesNotContain("ON CLUSTER", s));
     }
 
@@ -208,8 +213,10 @@ public class ReplicationSqlGenerationTests
         var script = repository.GetCreateIfNotExistsScript();
 
         Assert.StartsWith("CREATE TABLE IF NOT EXISTS `__EFMigrationsHistory` ON CLUSTER 'test_cluster' (", script);
-        Assert.Contains("ENGINE = ReplicatedMergeTree()", script);
+        // One history table for all shards: the path has no {shard}.
+        Assert.Contains("ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{shard}-{replica}')", script);
         Assert.Contains("ORDER BY (`MigrationId`)", script);
+        Assert.Contains(NoDeduplication, script);
     }
 
     [Fact]
@@ -220,6 +227,7 @@ public class ReplicationSqlGenerationTests
         var script = repository.GetCreateScript();
 
         Assert.Contains("ENGINE = ReplicatedMergeTree()", script);
+        Assert.Contains(NoDeduplication, script);
         Assert.DoesNotContain("ON CLUSTER", script);
     }
 
@@ -233,6 +241,7 @@ public class ReplicationSqlGenerationTests
         Assert.Contains("ENGINE = MergeTree()", script);
         Assert.DoesNotContain("Replicated", script);
         Assert.DoesNotContain("ON CLUSTER", script);
+        Assert.DoesNotContain("SETTINGS", script);
     }
 
     [Fact]
@@ -247,7 +256,7 @@ public class ReplicationSqlGenerationTests
         var script = context.GetService<IHistoryRepository>().GetCreateScript();
 
         Assert.Contains("ON CLUSTER 'test_cluster'", script);
-        Assert.Contains($"ENGINE = ReplicatedMergeTree('/clickhouse/tables/{{uuid}}', '{{shard}}-{{replica}}')", script);
+        Assert.Contains("ENGINE = ReplicatedMergeTree('/clickhouse/{cluster}/tables/{uuid}', '{replica}')", script);
     }
 
     private sealed class ExplicitPathHistoryRepository(HistoryRepositoryDependencies dependencies)
@@ -260,7 +269,7 @@ public class ReplicationSqlGenerationTests
             history.ToTable(TableName, t => t
                 .HasMergeTreeEngine()
                 .WithOrderBy("MigrationId")
-                .WithReplication("/clickhouse/tables/{uuid}", "{shard}-{replica}"));
+                .WithReplication("/clickhouse/{cluster}/tables/{uuid}", "{replica}"));
         }
     }
 
@@ -294,6 +303,8 @@ public class ReplicationSqlGenerationTests
             new RenameColumnOperation { Table = "t", Name = "c", NewName = "d" },
             createIndex,
             dropIndex,
+            new AddCheckConstraintOperation { Table = "t", Name = "ck", Sql = "`Id` > 0" },
+            new DropCheckConstraintOperation { Table = "t", Name = "ck" },
             new ClickHouseCreateDatabaseOperation { Name = "d" },
             new ClickHouseDropDatabaseOperation { Name = "d" },
         ];
