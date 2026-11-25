@@ -157,6 +157,24 @@ public class ConnectionTargetTests
     }
 
     [Fact]
+    public void UseClickHouse_NamedConnectionString_UsesResolvedString()
+    {
+        using var ctx = new TargetContext(o => o
+            .UseClickHouse("Name=ConnectionStrings:ClickHouse")
+            .ReplaceService<Microsoft.EntityFrameworkCore.Storage.Internal.INamedConnectionStringResolver, FixedConnectionStringResolver>());
+
+        Assert.Equal("host-b", ReadSettings(ctx).Host);
+        Assert.Equal("host-b", WriteSettings(ctx).Host);
+        Assert.Equal("host-b", MasterSettings(ctx).Host);
+    }
+
+    private sealed class FixedConnectionStringResolver : Microsoft.EntityFrameworkCore.Storage.Internal.INamedConnectionStringResolver
+    {
+        public string ResolveConnectionString(string connectionString)
+            => connectionString == "Name=ConnectionStrings:ClickHouse" ? TargetB : connectionString;
+    }
+
+    [Fact]
     public void GetClickHouseClient_ConnectionString_UsesDataSourceClient()
     {
         using var ctx = new TargetContext(o => o.UseClickHouse(TargetA));

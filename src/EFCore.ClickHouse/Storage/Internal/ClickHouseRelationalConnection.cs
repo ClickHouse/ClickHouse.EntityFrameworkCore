@@ -34,8 +34,11 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         _joinNullSemanticsDisabled = extension?.JoinNullSemanticsDisabled ?? false;
         _dataSource = extension?.DataSource;
 
+        // EF Core resolves a named connection string, such as Name=ConnectionStrings:ClickHouse, into
+        // ConnectionString. The driver ignores keys that it does not know, so the raw option would
+        // connect to localhost.
         if (_dataSource is null && extension?.Connection is null)
-            _dataSourceConnectionString = extension?.ConnectionString;
+            _dataSourceConnectionString = ConnectionString;
     }
 
     // Used by CreateMasterConnection only
