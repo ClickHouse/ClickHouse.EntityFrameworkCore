@@ -179,19 +179,6 @@ public class ReplicationSqlGenerationTests
     }
 
     [Fact]
-    public void Check_constraint_statements_end_with_a_statement_terminator()
-    {
-        // A migration script joins the commands with only a line break.
-        var statements = GenerateStatements("test_cluster",
-        [
-            new AddCheckConstraintOperation { Table = "t", Name = "ck", Sql = "`Id` > 0" },
-            new DropCheckConstraintOperation { Table = "t", Name = "ck" },
-        ]);
-
-        Assert.All(statements, s => Assert.EndsWith(";", s.TrimEnd()));
-    }
-
-    [Fact]
     public void Without_UseCluster_DDL_has_no_ON_CLUSTER()
     {
         var statements = GenerateStatements(null, DdlOperations());
@@ -288,7 +275,7 @@ public class ReplicationSqlGenerationTests
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    private static MigrationOperation[] DdlOperations()
+    internal static MigrationOperation[] DdlOperations()
     {
         var createTable = new CreateTableOperation { Name = "t" };
         createTable.Columns.Add(new AddColumnOperation { Name = "Id", Table = "t", ColumnType = "Int64", ClrType = typeof(long) });
@@ -371,7 +358,7 @@ public class ReplicationSqlGenerationTests
     private static string Generate(string? clusterName, params MigrationOperation[] operations)
         => string.Join("\n", GenerateStatements(clusterName, operations));
 
-    private static List<string> GenerateStatements(string? clusterName, MigrationOperation[] operations)
+    internal static List<string> GenerateStatements(string? clusterName, MigrationOperation[] operations)
     {
         var options = new DbContextOptionsBuilder()
             .UseClickHouse("Host=localhost;Database=test", o =>

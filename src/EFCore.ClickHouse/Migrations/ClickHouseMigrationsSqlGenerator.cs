@@ -25,6 +25,13 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void EndStatement(MigrationCommandListBuilder builder, bool suppressTransaction = true)
         => base.EndStatement(builder, suppressTransaction: true);
 
+    // A migration script joins the commands with only a line break, so each statement needs its terminator.
+    private void TerminateStatement(MigrationCommandListBuilder builder)
+    {
+        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
+        EndStatement(builder);
+    }
+
     // Custom operation dispatch
 
     protected override void Generate(MigrationOperation operation, IModel? model, MigrationCommandListBuilder builder)
@@ -49,7 +56,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append("CREATE DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
         AppendOnCluster(builder);
-        EndStatement(builder, suppressTransaction: true);
+        TerminateStatement(builder);
     }
 
     protected virtual void Generate(ClickHouseDropDatabaseOperation operation, MigrationCommandListBuilder builder)
@@ -58,7 +65,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append("DROP DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
         AppendOnCluster(builder);
-        EndStatement(builder, suppressTransaction: true);
+        TerminateStatement(builder);
     }
 
     // ON CLUSTER: CREATE and DROP put the clause after the table or database name, ALTER TABLE puts it
@@ -107,8 +114,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         GenerateEngineClause(operation, builder);
 
-        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -124,8 +130,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 
         if (terminate)
         {
-            builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
-            EndStatement(builder);
+            TerminateStatement(builder);
         }
     }
 
@@ -240,7 +245,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder.Append(" ADD COLUMN ");
 
         ColumnDefinition(operation, model, builder);
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -254,7 +259,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" DROP COLUMN ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -266,7 +271,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder.Append(" MODIFY COLUMN ");
 
         ColumnDefinition(operation.Schema, operation.Table, operation.Name, operation, model, builder);
-        EndStatement(builder);
+        TerminateStatement(builder);
 
         // Emit REMOVE statements for column annotations that were present on the old column but not the new one.
         // ClickHouse requires explicit REMOVE CODEC / REMOVE TTL / REMOVE COMMENT — a bare MODIFY COLUMN
@@ -308,7 +313,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
                 .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
                 .Append(" ")
                 .Append(keyword);
-            EndStatement(builder);
+            TerminateStatement(builder);
         }
     }
 
@@ -324,7 +329,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" TO ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -335,9 +340,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         AppendAlterTable(builder, operation.Table, operation.Schema);
         builder.Append(" ADD ");
         CheckConstraint(operation, model, builder);
-        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
-
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -348,10 +351,9 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         AppendAlterTable(builder, operation.Table, operation.Schema);
         builder
             .Append(" DROP CONSTRAINT ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
-            .AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -366,7 +368,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName!, operation.NewSchema));
         AppendOnCluster(builder);
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // ALTER TABLE — reject ClickHouse metadata changes (engine, ORDER BY, etc. are immutable)
@@ -448,7 +450,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.Append($"({indexParams})");
 
         builder.Append($" GRANULARITY {granularity}");
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -468,7 +470,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(" DROP INDEX ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // Unsupported operations

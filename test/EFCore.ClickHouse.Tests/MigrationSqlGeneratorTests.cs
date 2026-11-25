@@ -981,6 +981,19 @@ public class MigrationSqlGeneratorTests
         Assert.DoesNotContain("Nullable(LowCardinality", sql);
     }
 
+    // A migration script joins the commands with only a line break, so each statement needs its terminator.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("test_cluster")]
+    public void Every_DDL_statement_ends_with_the_statement_terminator(string? clusterName)
+    {
+        var statements = ReplicationSqlGenerationTests.GenerateStatements(
+            clusterName, ReplicationSqlGenerationTests.DdlOperations());
+
+        Assert.Equal(14, statements.Count);
+        Assert.All(statements, s => Assert.EndsWith(";", s.TrimEnd()));
+    }
+
     private static void AssertColumnTypePreserved<TContext>(string expectedColumnType)
         where TContext : DbContext, new()
     {
