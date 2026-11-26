@@ -12,8 +12,8 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     public DbDataSource? DataSource { get; private set; }
 
     /// <summary>
-    /// When true, the provider will NOT inject <c>set_join_use_nulls=1</c> into connection
-    /// strings. Use this when the ClickHouse server/profile forbids changing that setting
+    /// When true, the provider does not add <c>join_use_nulls=1</c> to the statements that it
+    /// sends. Use this when the ClickHouse server/profile forbids changing that setting
     /// (e.g. <c>readonly=1</c> profiles that reject any SET). Disabling means LEFT JOIN
     /// returns column defaults (0, "") for non-matching rows instead of NULL; EF Core's
     /// null-based navigation detection will not work correctly in that mode.

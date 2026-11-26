@@ -92,7 +92,7 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 `Join` (INNER JOIN), `GroupJoin` + `SelectMany` + `DefaultIfEmpty` (LEFT JOIN), `SelectMany` (CROSS JOIN), and self-joins. Joining a local sequence (`int[]`, `string[]`, `byte[]`) also works, as does `Contains` against a local collection (`T[]`, `List<T>`, and the `ICollection`/`IList`/`IReadOnlyList` interfaces), which becomes an `IN` predicate.
 
-ClickHouse returns column defaults (`0`, `""`) instead of `NULL` for unmatched LEFT JOIN rows unless `join_use_nulls=1` is set. The provider adds this setting to the connection automatically so LEFT JOIN gives the .NET semantics you expect. To opt out, use `DisableJoinNullSemantics()`:
+ClickHouse returns column defaults (`0`, `""`) instead of `NULL` for unmatched LEFT JOIN rows unless `join_use_nulls=1` is set. The provider adds this setting to each statement that it sends, so LEFT JOIN gives the .NET semantics you expect. It does not change the settings of a `ClickHouseConnection` or `ClickHouseDataSource` that you give to `UseClickHouse`, so a command that you create yourself on that connection does not get the setting. If the connection settings already set `join_use_nulls`, the provider keeps that value. To opt out, use `DisableJoinNullSemantics()`:
 
 ```csharp
 optionsBuilder.UseClickHouse("Host=localhost", o => o.DisableJoinNullSemantics());

@@ -44,23 +44,61 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
 
     protected override bool SupportsAmbientTransactions => false;
 
+    private const string JoinUseNullsSetting = "join_use_nulls";
+
     /// <summary>
-    /// Ensures <c>join_use_nulls=1</c> is present in the underlying connection's connection
-    /// string before it's opened. Required because ClickHouse's default (0) makes LEFT JOIN
-    /// return column defaults rather than NULL, which breaks EF Core's null-based navigation
-    /// detection.
-    ///
-    /// The ClickHouse.Driver HTTP protocol is stateless by default (<c>UseSession=False</c>):
-    /// a standalone <c>SET join_use_nulls = 1</c> statement does not persist to subsequent
-    /// queries. Instead the driver applies <c>set_*</c> connection-string parameters as URL
-    /// parameters on every query, so we must mutate the connection string itself.
-    ///
-    /// Applies on all paths. For the connection-string path the setting is already baked in by
-    /// <see cref="ClickHouseDataSourceManager.EnsureDefaultSettings"/>; this override covers
-    /// the <see cref="DbConnection"/> and <see cref="DbDataSource"/> paths where EF hands us
-    /// connection objects we didn't construct. We only mutate when the connection is Closed
-    /// and the user has not explicitly configured <c>join_use_nulls</c>.
+    /// Returns the ClickHouse settings that EF Core semantics need. Every statement that the
+    /// provider sends must carry them: <see cref="ApplyQuerySettings"/> adds them to a command, and
+    /// <see cref="CreateInsertOptions"/> adds them to an insert. The provider sends them with each
+    /// statement and does not change the settings of a connection or data source, because the
+    /// driver then makes a new client, with a new HTTP connection pool, for the connection.
     /// </summary>
+    /// <remarks>
+    /// <c>join_use_nulls=1</c>: with the ClickHouse default (0), a LEFT JOIN returns column defaults
+    /// instead of NULL, and EF Core cannot detect a missing navigation.
+    /// <c>DisableJoinNullSemantics()</c> removes it.
+    /// </remarks>
+    protected virtual IEnumerable<KeyValuePair<string, object>> GetQuerySettings()
+    {
+        if (!_joinNullSemanticsDisabled)
+            yield return new(JoinUseNullsSetting, "1");
+    }
+
+    /// <summary>
+    /// Adds the provider query settings to a driver command. A setting that the connection settings
+    /// already contain is left out, so the user value wins. The driver sends command settings with
+    /// the HTTP request and lets them override connection settings.
+    /// </summary>
+    public virtual void ApplyQuerySettings(DbCommand command)
+    {
+        if (command is not ClickHouseCommand clickHouseCommand)
+            return;
+
+        var connectionSettings = (command.Connection as ClickHouseConnection)?.Settings;
+        foreach (var (name, value) in GetQuerySettings())
+        {
+            if (connectionSettings?.CustomSettings.ContainsKey(name) != true)
+                clickHouseCommand.CustomSettings.TryAdd(name, value);
+        }
+    }
+
+    /// <summary>
+    /// Returns the options for an insert through <paramref name="client"/>, with the provider query
+    /// settings that the client settings do not already contain. Returns null when no setting is
+    /// missing, so the driver uses its default options.
+    /// </summary>
+    public virtual InsertOptions? CreateInsertOptions(IClickHouseClient client)
+    {
+        Dictionary<string, object>? settings = null;
+        foreach (var (name, value) in GetQuerySettings())
+        {
+            if (!client.Settings.CustomSettings.ContainsKey(name))
+                (settings ??= new Dictionary<string, object>())[name] = value;
+        }
+
+        return settings is null ? null : new InsertOptions { CustomSettings = settings };
+    }
+
     public override bool Open(bool errorsExpected = false)
     {
         EnsureJoinUseNullsInConnectionString();
@@ -73,10 +111,20 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         return base.OpenAsync(cancellationToken, errorsExpected);
     }
 
+    /// <summary>
+    /// For a connection that is not a <see cref="ClickHouseConnection"/>, for example a wrapper, the
+    /// provider cannot get to the driver commands. It therefore adds <c>set_join_use_nulls=1</c> to
+    /// the connection string of a closed connection, unless the string already sets
+    /// <c>join_use_nulls</c>.
+    /// </summary>
     private void EnsureJoinUseNullsInConnectionString()
     {
-        if (_joinNullSemanticsDisabled || DbConnection.State != ConnectionState.Closed)
+        if (_joinNullSemanticsDisabled
+            || DbConnection is ClickHouseConnection
+            || DbConnection.State != ConnectionState.Closed)
+        {
             return;
+        }
 
         var cs = DbConnection.ConnectionString;
         if (string.IsNullOrEmpty(cs)
@@ -88,22 +136,37 @@ public class ClickHouseRelationalConnection : RelationalConnection, IClickHouseR
         DbConnection.ConnectionString = ClickHouseDataSourceManager.EnsureDefaultSettings(cs);
     }
 
+    /// <summary>
+    /// Returns a connection to the <c>default</c> database, for <c>CREATE DATABASE</c> and
+    /// <c>DROP DATABASE</c>. For a <see cref="ClickHouseConnection"/>, the master connection is a
+    /// clone that uses the same driver client. It therefore has all the settings of the connection,
+    /// including settings that have no connection-string key, and it uses the same HTTP connection
+    /// pool. The driver sends the database of the connection with each query.
+    /// </summary>
     public IClickHouseRelationalConnection CreateMasterConnection()
     {
-        var connectionStringBuilder = new ClickHouseConnectionStringBuilder(
-            _dataSource?.ConnectionString ?? ConnectionString)
+        var optionsBuilder = new DbContextOptionsBuilder();
+
+        if (DbConnection is ClickHouseConnection clickHouseConnection)
         {
-            Database = "default"
-        };
+            // A clone does not own the client, so disposing the master connection keeps the client.
+            var masterConnection = (ClickHouseConnection)clickHouseConnection.Clone();
+            masterConnection.ChangeDatabase("default");
+            optionsBuilder.UseClickHouse(masterConnection, contextOwnsConnection: true);
+        }
+        else
+        {
+            var masterConnectionString = new ClickHouseConnectionStringBuilder(
+                _dataSource?.ConnectionString ?? ConnectionString)
+            {
+                Database = "default"
+            }.ConnectionString;
 
-        var masterConnectionString = connectionStringBuilder.ConnectionString;
-
-        var contextOptions = new DbContextOptionsBuilder()
-            .UseClickHouse(masterConnectionString)
-            .Options;
+            optionsBuilder.UseClickHouse(masterConnectionString);
+        }
 
         return new ClickHouseRelationalConnection(
-            Dependencies with { ContextOptions = contextOptions },
+            Dependencies with { ContextOptions = optionsBuilder.Options },
             dataSource: null,
             _joinNullSemanticsDisabled);
     }

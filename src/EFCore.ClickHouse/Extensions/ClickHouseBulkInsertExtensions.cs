@@ -53,6 +53,7 @@ public static class ClickHouseBulkInsertExtensions
             return row;
         });
 
-        return await client.InsertBinaryAsync(tableName, columns, rows, cancellationToken: cancellationToken);
+        return await client.InsertBinaryAsync(
+            tableName, columns, rows, connection.CreateInsertOptions(client), cancellationToken);
     }
 }
