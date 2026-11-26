@@ -30,6 +30,10 @@ public class ComponentClrTypeEntity
 
     /// <summary>ClickHouse accepts and normalizes this spelling; the provider's parser did not.</summary>
     public DateOnly?[] Spaced { get; set; } = [];
+
+    /// <summary>A column made outside EF Core can have an enum label that the C# enum does not
+    /// have, and the label can hold parentheses and an escaped quote.</summary>
+    public ComponentColour?[] Labelled { get; set; } = [];
 }
 
 public class ComponentClrTypeDbContext(string connectionString) : DbContext
@@ -49,7 +53,14 @@ public class ComponentClrTypeDbContext(string connectionString) : DbContext
                 .HasColumnType("Array(Nullable(Enum8('Red' = 0, 'Green' = 1)))");
             e.Property(x => x.Timestamps).HasColumnName("timestamps").HasColumnType("Array(Date32)");
             e.Property(x => x.Spaced).HasColumnName("spaced").HasColumnType("Array( Nullable ( Date32 ) )");
+            e.Property(x => x.Labelled).HasColumnName("labelled")
+                .HasColumnType(LabelledStoreType);
         });
+
+    /// <summary>A quote inside a label in both spellings that ClickHouse accepts: <c>\'</c>, which
+    /// the server itself writes, and <c>''</c>.</summary>
+    public const string LabelledStoreType =
+        "Array(Nullable(Enum8('Red' = 0, 'Green' = 1, 'Gone (it\\'s old)' = 2, 'Kept (it''s new)' = 3)))";
 }
 
 public class ComponentClrTypeFixture : IAsyncLifetime
@@ -99,6 +110,26 @@ public class CompositeComponentClrTypeTests(ComponentClrTypeFixture fixture)
     public void Whitespace_in_a_store_type_still_yields_a_nullable_element()
         => Assert.Equal(typeof(DateOnly?[]), MappedClrTypeOf(nameof(ComponentClrTypeEntity.Spaced)));
 
+    /// <summary>
+    /// A parenthesis inside a quoted enum label is not part of the type structure. Counting it made
+    /// the provider miss the <c>Nullable(...)</c> wrapper, so the element lost its nullable CLR type.
+    /// </summary>
+    [Fact]
+    public void A_parenthesis_in_an_enum_label_keeps_the_nullable_element()
+        => Assert.Equal(typeof(ComponentColour?[]), MappedClrTypeOf(nameof(ComponentClrTypeEntity.Labelled)));
+
+    /// <summary>The same column must keep its DDL, which ClickHouse accepted in the fixture.</summary>
+    [Fact]
+    public void A_parenthesis_in_an_enum_label_keeps_the_store_type()
+    {
+        using var ctx = new ComponentClrTypeDbContext(fixture.ConnectionString);
+        var property = ctx.Model.FindEntityType(typeof(ComponentClrTypeEntity))!
+            .FindProperty(nameof(ComponentClrTypeEntity.Labelled))!;
+
+        Assert.Equal(ComponentClrTypeDbContext.LabelledStoreType, property.GetColumnType());
+        Assert.Equal(ComponentClrTypeDbContext.LabelledStoreType, property.FindRelationalTypeMapping()!.StoreType);
+    }
+
     /// <summary>Every property above must also survive query compilation and materialization.</summary>
     [Fact]
     public async Task Components_round_trip_through_the_database()
@@ -115,7 +146,8 @@ public class CompositeComponentClrTypeTests(ComponentClrTypeFixture fixture)
                 // round trip asserted here is on the components that need no converter.
                 Colours = [ComponentColour.Red, null],
                 Timestamps = timestamps,
-                Spaced = spaced
+                Spaced = spaced,
+                Labelled = [ComponentColour.Green, null]
             });
             await write.SaveChangesAsync();
         }

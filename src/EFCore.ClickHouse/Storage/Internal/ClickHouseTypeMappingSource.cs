@@ -962,36 +962,5 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     /// ignoring parens that appear inside single-quoted string literals.
     /// </summary>
     private static int FindMatchingCloseParen(string s, int openParenIndex)
-    {
-        var depth = 0;
-        var inQuote = false;
-        for (var i = openParenIndex; i < s.Length; i++)
-        {
-            var c = s[i];
-
-            if (c == '\'')
-            {
-                if (inQuote && i + 1 < s.Length && s[i + 1] == '\'')
-                {
-                    i++;
-                    continue;
-                }
-
-                inQuote = !inQuote;
-                continue;
-            }
-
-            if (inQuote) continue;
-
-            if (c == '(') depth++;
-            else if (c == ')')
-            {
-                depth--;
-                if (depth == 0)
-                    return i;
-            }
-        }
-
-        return -1;
-    }
+        => ClickHouseStoreTypeName.FindClosingParen(s, openParenIndex);
 }
