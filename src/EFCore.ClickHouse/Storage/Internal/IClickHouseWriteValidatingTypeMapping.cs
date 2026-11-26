@@ -6,7 +6,8 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
 /// </summary>
 /// <remarks>
 /// The bulk insert path gives the driver the model values directly and does not consult the type
-/// mapping, so a mapping cannot guard its own writes there. The batch calls this instead. ClickHouse
+/// mapping, so a mapping cannot guard its own writes there. The batch calls this instead, through
+/// <see cref="ClickHouseWriteValidation"/>, which also finds it inside a composite. ClickHouse
 /// stores a <c>DateTime64(P)</c> as an <see cref="long"/> count of 10^-P seconds, which wraps rather
 /// than reports when the value does not fit, so the check has to happen on the client.
 /// </remarks>

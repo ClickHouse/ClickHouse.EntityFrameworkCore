@@ -107,11 +107,13 @@ public class ClickHouseModificationCommandBatch : ModificationCommandBatch
 
                     // This path gives the driver the model value directly, so a mapping cannot guard
                     // its own writes. Ask the ones whose store type has a narrower range than the CLR
-                    // type, or the value would wrap and the row would read back wrong.
+                    // type, also inside a composite, or the value would wrap and the row would read
+                    // back wrong.
                     if (value is not null
-                        && modification.TypeMapping is IClickHouseWriteValidatingTypeMapping validating)
+                        && modification.TypeMapping is { } mapping
+                        && ClickHouseWriteValidation.Applies(mapping))
                     {
-                        validating.ValidateWriteValue(value, modification.ColumnName);
+                        ClickHouseWriteValidation.Validate(mapping, value, modification.ColumnName);
                     }
 
                     row[i] = value ?? DBNull.Value;

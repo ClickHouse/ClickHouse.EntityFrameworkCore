@@ -115,7 +115,11 @@ column is read-only for now: `SaveChanges` cannot write any property that has a 
 **Precision 7 makes the round trip exact.** One .NET tick is 100 ns, which is precision 7, so a
 stored value never comes back truncated. Precision 7 also covers the full `DateTimeOffset` range,
 which lets you use `DateTimeOffset.MinValue` and `MaxValue` as open-ended range limits on the
-default store type. Keep those two sentinels to a column whose timezone offset is zero, such as the
+default store type, on ClickHouse 26.7 and later. An older server reads a date outside 1900 to 2299
+in a query as the nearest end of that range. A filter with `MinValue` or `MaxValue` then still
+covers every date inside that range, but it misses a row that stores `MinValue` or `MaxValue`
+itself. On such a server, use a date inside the range as the open end, or do not store the two
+sentinels. Keep those two sentinels to a column whose timezone offset is zero, such as the
 default `'UTC'`. Both sit at the edge of the `DateTime` range, and the driver has to build a wall
 clock in the column's timezone to return a value, so any non-zero offset pushes one end outside
 `DateTime`: reading `MaxValue` from a `DateTime64(7, 'Asia/Tokyo')` column throws. Choose a smaller
@@ -129,7 +133,8 @@ b.Property(e => e.RecordedAt).HasPrecision(3);                         // the sa
 Precision 8 and 9 are accepted, but they hold a narrower range of dates. ClickHouse stores a
 `DateTime64(P)` as an `Int64` count of 10^-P seconds, so precision 9 reaches only 1678 to 2262 and
 precision 8 about 1970 ± 2900 years. A value outside the range wraps rather than reporting, so the
-provider checks it and throws on write instead. Precision 7 has no such limit — it spans roughly
+provider checks it and throws on write instead, also for a value inside an `Array`, `Map` or
+`Tuple`. Precision 7 has no such limit — it spans roughly
 29 000 years, which is why it is the default. Note also that .NET cannot represent more than 7
 fractional digits, so the extra precision stores no extra detail.
 
@@ -154,23 +159,25 @@ correctly and returns that zone's offset. Two limits apply to such a column:
 - Dates at the far ends of the `DateTimeOffset` range do not survive, as described above.
 
 A column can also declare a fixed UTC offset instead of a named zone. ClickHouse spells this
-`Fixed/UTC±HH:MM:SS`, with two digits in every field — the server rejects `Fixed/UTC+5:30:00` and
-`Fixed/UTC+05:30`:
+`Fixed/UTC±HH:MM:SS`, with two digits in every field. The server rejects `Fixed/UTC+5:30:00` and
+`Fixed/UTC+05:30`, and ClickHouse 26.9 and later accept only a whole number of quarter hours, at
+most 14 hours from UTC:
 
 ```csharp
 b.Property(e => e.RecordedAt).HasColumnType("DateTime64(7, 'Fixed/UTC+05:30:00')");
 ```
 
 None of the limits above applies here: the host needs no timezone data, a fixed offset is never
-ambiguous, and it does not change before 1900. Two points of its own do:
+ambiguous, and it does not change before 1900. An older server accepts more names. Two points
+apply to a column with such a name:
 
-- `DateTimeOffset` holds an offset only within plus or minus 14 hours, and only in whole minutes,
-  while ClickHouse accepts more. Such a column still reads correctly — the instant is exact, because
-  the offset is known — but the value comes back at offset `+00:00` rather than the column's offset.
-  This mapping does not keep the offset in any case.
-- ClickHouse does not hold the minutes and seconds fields to 59 — it carries the excess, so
-  `Fixed/UTC+05:60:00` is a legal name for `+06:00`. The driver does not read such a name, so the
-  read throws rather than depend on that. Declare the offset as `Fixed/UTC+06:00:00` instead.
+- `DateTimeOffset` holds an offset only within plus or minus 14 hours, and only in whole minutes.
+  A column such as `Fixed/UTC+15:00:00` or `Fixed/UTC+00:00:42` still reads correctly, because the
+  offset is known and the instant is exact, but the value comes back at offset `+00:00` rather than
+  the column's offset. This mapping does not keep the offset in any case.
+- ClickHouse before 26.10 carries a minutes or seconds field above 59 into the next field, so
+  `Fixed/UTC+05:60:00` is the offset `+06:00`. The driver and the provider read the name the same
+  way.
 
 `DateTimeOffset` also composes into the collection types, so `DateTimeOffset[]`,
 `List<DateTimeOffset>`, `Dictionary<string, DateTimeOffset>` and `Tuple<DateTimeOffset, …>` all

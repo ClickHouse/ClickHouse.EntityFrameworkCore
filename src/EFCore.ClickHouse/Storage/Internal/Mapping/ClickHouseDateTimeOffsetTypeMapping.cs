@@ -37,11 +37,11 @@ namespace ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 /// <c>'UTC'</c> store type has no daylight saving and is not affected, and neither is a fixed
 /// offset, which by definition never changes.
 ///
-/// Two more reads throw rather than return a value that is quietly wrong: a value before
+/// One more read throws rather than return a value that is quietly wrong: a value before
 /// <see cref="FirstStandardTimeYear"/> in a named zone, where the offset is Local Mean Time to the
-/// second and <see cref="TimeZoneInfo"/> may round it to the minute; and a fixed-offset name the
-/// driver does not apply. An offset outside what <see cref="DateTimeOffset"/> can hold is not one of
-/// them — the instant is still exact, so it is reported at offset zero.
+/// second and <see cref="TimeZoneInfo"/> may round it to the minute. An offset outside what
+/// <see cref="DateTimeOffset"/> can hold does not throw. The instant is still exact, so it is
+/// reported at offset zero.
 ///
 /// On write, <see cref="ValidateWriteValue"/> refuses a value the store type cannot hold. ClickHouse
 /// wraps such a value rather than reporting it.
@@ -62,7 +62,7 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
     /// <summary>
     /// The first year for which a named timezone has a standard offset in whole minutes. Before it,
     /// IANA records Local Mean Time to the second and <see cref="TimeZoneInfo"/> may round to the
-    /// minute. ClickHouse documents the same year as the start of the DateTime64 range.
+    /// minute.
     /// </summary>
     private const int FirstStandardTimeYear = 1900;
 
@@ -169,9 +169,9 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
             var fixedWallClock = DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified);
 
             // DateTimeOffset caps an offset at plus or minus 14 hours and holds only whole minutes,
-            // while ClickHouse accepts more. The instant is still exact — subtract the offset from
-            // the wall clock — so report it at offset zero rather than refusing to read the column.
-            // This mapping already does not keep the offset, so nothing more is lost here.
+            // while ClickHouse before 26.9 accepts more. The instant is still exact (the wall clock
+            // minus the offset), so report it at offset zero rather than refuse to read the column.
+            // This mapping does not keep the offset in any case, so nothing more is lost here.
             return IsRepresentableOffset(fixedOffset)
                 ? new DateTimeOffset(fixedWallClock, fixedOffset)
                 : new DateTimeOffset(DateTime.SpecifyKind(fixedWallClock - fixedOffset, DateTimeKind.Utc));
@@ -189,8 +189,8 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
 
         // Before standard time, a zone's offset is Local Mean Time, which IANA records to the
         // second — Asia/Tokyo is +09:18:59. TimeZoneInfo rounds that to whole minutes on some
-        // hosts, so the instant would come back quietly shifted by up to a minute. ClickHouse
-        // documents DateTime64 as valid from 1900 for the same reason, so refuse rather than guess.
+        // hosts, so the instant would come back quietly shifted by up to a minute. Refuse rather
+        // than guess.
         if (wallClock.Year < FirstStandardTimeYear)
             throw new InvalidOperationException(
                 $"Cannot read the DateTimeOffset column because the value {wallClock:yyyy-MM-dd HH:mm:ss} "
@@ -225,11 +225,12 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
     /// fixed by definition, so the reading is never ambiguous.
     /// </para>
     /// <para>
-    /// The minutes and seconds fields are not held to 59. ClickHouse carries the excess, so
-    /// <c>Fixed/UTC+05:60:00</c> is a legal name for the offset <c>+06:00</c>, and the server
-    /// accepts any name up to a total of 24 hours. The whole shape is matched here so that such a
-    /// name is diagnosed rather than left to the unresolvable-timezone error, but the offset is
-    /// only returned for the spelling the driver also reads. See the throw below.
+    /// ClickHouse 26.9 and later accept only a whole number of quarter hours, at most 14 hours from
+    /// UTC, and 26.10 and later also require each field to stay below 60. An older server accepts
+    /// more, and two such cases are read here. An offset that
+    /// <see cref="DateTimeOffset"/> cannot hold is handled by the caller. A minutes or seconds field
+    /// above 59 carries into the next field, as the server and the driver both read it:
+    /// <c>Fixed/UTC+05:60:00</c> is the offset <c>+06:00</c>.
     /// </para>
     /// </remarks>
     private static bool TryParseFixedOffset(string timezone, out TimeSpan offset)
@@ -240,42 +241,15 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
         if (!match.Success)
             return false;
 
+        // The TimeSpan constructor carries a field above 59 into the next field.
         var magnitude = new TimeSpan(
             int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture),
             int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture),
             int.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture));
 
-        var sign = match.Groups[1].Value == "-" ? -1 : 1;
-        var candidate = sign * magnitude;
-
-        // An offset that DateTimeOffset cannot hold is no longer refused. The caller reports the
-        // instant at offset zero instead — see IsRepresentableOffset and its use above.
-
-        // ClickHouse carries minutes and seconds above 59, so 'Fixed/UTC+05:60:00' is a legal name
-        // for the offset +06:00. The driver does not read those, and returns a UTC wall clock
-        // instead of one in the column's timezone, so the offset here cannot be attached to it —
-        // that would move the instant by the whole offset and report nothing. Only the spelling the
-        // driver agrees with can be read.
-        if (magnitude.Minutes != int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture)
-            || magnitude.Seconds != int.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture))
-        {
-            throw new InvalidOperationException(
-                $"Cannot read the DateTimeOffset column because the ClickHouse driver does not "
-                + $"support the timezone '{timezone}' that the column declares. ClickHouse reads it "
-                + $"as the offset {candidate}, but only spells that offset in a form the driver "
-                + $"accepts when the minutes and seconds are below 60. Declare the column as "
-                + $"DateTime64(P, '{FormatFixedOffset(candidate)}') instead.");
-        }
-
-        offset = candidate;
+        offset = match.Groups[1].Value == "-" ? -magnitude : magnitude;
         return true;
     }
-
-    /// <summary>Spells an offset the way ClickHouse names a fixed-offset timezone.</summary>
-    private static string FormatFixedOffset(TimeSpan offset)
-        => string.Create(
-            CultureInfo.InvariantCulture,
-            $"Fixed/UTC{(offset < TimeSpan.Zero ? '-' : '+')}{offset.Duration():hh\\:mm\\:ss}");
 
     private static TimeSpan ResolveOffset(TimeZoneInfo zone, DateTime wallClock, string timezone)
     {
@@ -337,51 +311,74 @@ public class ClickHouseDateTimeOffsetTypeMapping : RelationalTypeMapping, IClick
         if (value is not DateTimeOffset dateTimeOffset)
             return;
 
-        var seconds = dateTimeOffset.ToUnixTimeSeconds();
-        var (min, max) = RepresentableSecondsRange(Precision);
-        if (seconds >= min && seconds <= max)
+        var (min, max) = RepresentableRange(Precision);
+        if (dateTimeOffset >= min && dateTimeOffset <= max)
             return;
 
         var column = columnName is null ? "a DateTimeOffset column" : $"column '{columnName}'";
         throw new InvalidOperationException(
             $"Cannot write {dateTimeOffset:yyyy-MM-dd HH:mm:ssK} to {column}, because the store type "
-            + $"'{StoreType}' holds only {DateTimeOffset.FromUnixTimeSeconds(min):yyyy-MM-dd} to "
-            + $"{DateTimeOffset.FromUnixTimeSeconds(max):yyyy-MM-dd}. ClickHouse would wrap the value "
-            + $"rather than report it, and the row would read back with a different date. Use a "
-            + $"coarser precision — DateTime64(7) covers the whole DateTimeOffset range — or store a "
-            + $"value inside the range.");
+            + $"'{StoreType}' holds only {min:yyyy-MM-dd} to {max:yyyy-MM-dd}. ClickHouse would wrap "
+            + $"the value rather than report it, and the row would read back with a different date. "
+            + $"Use a coarser precision — DateTime64(7) covers the whole DateTimeOffset range — or "
+            + $"store a value inside the range.");
     }
 
     /// <summary>
-    /// The instants a store type of the given precision can hold, in seconds from the epoch.
+    /// The first and last instant a store type of the given precision can hold, never wider than
+    /// <see cref="DateTimeOffset"/> itself.
     /// </summary>
-    private static (long Min, long Max) RepresentableSecondsRange(int? precision)
+    private static (DateTimeOffset Min, DateTimeOffset Max) RepresentableRange(int? precision)
     {
-        // No precision means the second-resolution DateTime store type, an unsigned 32-bit count.
+        var epochTicks = DateTimeOffset.UnixEpoch.UtcTicks;
+
+        // No precision means the second-resolution DateTime store type, an unsigned 32-bit count of
+        // whole seconds. The driver drops the fraction, so the whole of the last second fits.
         if (precision is null)
-            return (0, uint.MaxValue);
+        {
+            return (
+                DateTimeOffset.UnixEpoch,
+                new DateTimeOffset(
+                    epochTicks + (uint.MaxValue + 1L) * TimeSpan.TicksPerSecond - 1, TimeSpan.Zero));
+        }
 
-        var ticksPerSecond = 1L;
-        for (var i = 0; i < precision.Value; i++)
-            ticksPerSecond *= 10;
+        // The driver writes the tick count since the epoch, scaled to the precision. Below
+        // precision 7 the count gets smaller, so every DateTimeOffset fits.
+        if (precision.Value <= DefaultPrecision)
+            return (DateTimeOffset.MinValue, DateTimeOffset.MaxValue);
 
-        var magnitude = long.MaxValue / ticksPerSecond;
+        // Above precision 7 each tick becomes 10 or 100 units of the store type. Integer division
+        // rounds towards zero, so both limits stay inside the Int64 range after the scaling.
+        var unitsPerTick = 1L;
+        for (var i = DefaultPrecision; i < precision.Value; i++)
+            unitsPerTick *= 10;
 
-        // Never report a range wider than DateTimeOffset itself, so the message stays meaningful.
         return (
-            Math.Max(-magnitude, DateTimeOffset.MinValue.ToUnixTimeSeconds()),
-            Math.Min(magnitude, DateTimeOffset.MaxValue.ToUnixTimeSeconds()));
+            new DateTimeOffset(
+                Math.Max(epochTicks + long.MinValue / unitsPerTick, DateTimeOffset.MinValue.UtcTicks),
+                TimeSpan.Zero),
+            new DateTimeOffset(
+                Math.Min(epochTicks + long.MaxValue / unitsPerTick, DateTimeOffset.MaxValue.UtcTicks),
+                TimeSpan.Zero));
     }
 
-    // An ISO-8601 literal that carries the offset is instant-exact whatever timezone the target
-    // column declares. A bare wall clock is not: the server reads it in the column's timezone.
+    // The literal is a typed UTC instant, so it is exact whatever timezone the target column
+    // declares. A string literal is not: it takes the type of the column it meets, so the server
+    // reads a bare wall clock in that column's timezone. A string that carries the offset would be
+    // exact, but ClickHouse before 26.5 cannot parse it with the default date_time_input_format.
     protected override string GenerateNonNullSqlLiteral(object value)
     {
         ValidateWriteValue(value, columnName: null);
-        var dateTimeOffset = (DateTimeOffset)value;
-        var digits = Math.Min(Precision ?? 0, MaxFractionalDigits);
+        var utc = ((DateTimeOffset)value).UtcDateTime;
+
+        if (Precision is not { } precision)
+            return $"toDateTime('{utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}', 'UTC')";
+
+        var digits = Math.Min(precision, MaxFractionalDigits);
         var fraction = digits == 0 ? string.Empty : "." + new string('f', digits);
-        return $"'{dateTimeOffset.ToString($"yyyy-MM-dd HH:mm:ss{fraction}zzz", CultureInfo.InvariantCulture)}'";
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"toDateTime64('{utc.ToString($"yyyy-MM-dd HH:mm:ss{fraction}", CultureInfo.InvariantCulture)}', {precision}, 'UTC')");
     }
 
     private static string FormatStoreType(int? precision, string? timezone)

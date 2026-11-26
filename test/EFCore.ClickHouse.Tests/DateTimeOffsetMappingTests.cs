@@ -51,17 +51,57 @@ public class DateTimeOffsetFixedEntity
     public DateTimeOffset Negative { get; set; }
     public DateTimeOffset Quarter { get; set; }
     public DateTimeOffset Zero { get; set; }
-    public DateTimeOffset Seconds { get; set; }
+    public DateTimeOffset Smallest { get; set; }
+
+    /// <summary>The 32-bit <c>DateTime</c> type, which the driver reads in whole seconds.</summary>
+    public DateTimeOffset Coarse { get; set; }
+
+    /// <summary>A negative half-hour offset at millisecond precision.</summary>
+    public DateTimeOffset Millis { get; set; }
 }
 
 /// <summary>
-/// A column whose fixed-offset name carries minutes above 59. ClickHouse accepts the name, the
-/// driver cannot read it, so the read must report that rather than guess an offset.
+/// A column whose fixed-offset name carries minutes above 59. ClickHouse before 26.10 accepts the
+/// name and reads it as <c>+06:00</c>. The table is made in the test, because a newer server
+/// refuses the name.
 /// </summary>
 public class DateTimeOffsetCarriedEntity
 {
     public long Id { get; set; }
     public DateTimeOffset Carried { get; set; }
+}
+
+public class DateTimeOffsetCarriedDbContext(string connectionString) : DbContext
+{
+    public const string Table = "dto_carried";
+
+    public DbSet<DateTimeOffsetCarriedEntity> Entities => Set<DateTimeOffsetCarriedEntity>();
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder.UseClickHouse(connectionString);
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+        => modelBuilder.Entity<DateTimeOffsetCarriedEntity>(e =>
+        {
+            e.ToTable(Table);
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Carried).HasColumnName("carried")
+                .HasColumnType("DateTime64(7, 'Fixed/UTC+05:60:00')");
+        });
+}
+
+/// <summary>
+/// <c>DateTimeOffset</c> components in composite columns, including precision 9, whose range is
+/// narrower than <see cref="DateTimeOffset"/>, and a fixed-offset element.
+/// </summary>
+public class DateTimeOffsetCompositeEntity
+{
+    public long Id { get; set; }
+    public DateTimeOffset[] Nanos { get; set; } = [];
+    public Dictionary<string, DateTimeOffset> NanosByName { get; set; } = [];
+    public Tuple<DateTimeOffset, int> NanosPair { get; set; } = Tuple.Create(DateTimeOffset.UnixEpoch, 0);
+    public DateTimeOffset[] Fixed { get; set; } = [];
 }
 
 public class DateTimeOffsetDbContext : DbContext
@@ -75,7 +115,7 @@ public class DateTimeOffsetDbContext : DbContext
     public DbSet<DateTimeOffsetDstEntity> DstEntities => Set<DateTimeOffsetDstEntity>();
     public DbSet<DateTimeOffsetPrecisionEntity> PrecisionEntities => Set<DateTimeOffsetPrecisionEntity>();
     public DbSet<DateTimeOffsetFixedEntity> FixedEntities => Set<DateTimeOffsetFixedEntity>();
-    public DbSet<DateTimeOffsetCarriedEntity> CarriedEntities => Set<DateTimeOffsetCarriedEntity>();
+    public DbSet<DateTimeOffsetCompositeEntity> CompositeEntities => Set<DateTimeOffsetCompositeEntity>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         => optionsBuilder.UseClickHouse(_connectionString);
@@ -138,19 +178,27 @@ public class DateTimeOffsetDbContext : DbContext
             // Offset zero: the driver reports Kind=Utc here rather than a wall clock.
             e.Property(x => x.Zero).HasColumnName("zero")
                 .HasColumnType("DateTime64(7, 'Fixed/UTC+00:00:00')");
-            // A whole-minute offset written with the seconds field the name always carries.
-            e.Property(x => x.Seconds).HasColumnName("seconds")
-                .HasColumnType("DateTime64(7, 'Fixed/UTC+00:01:00')");
+            // The smallest non-zero offset that ClickHouse 26.9 and later accept: a quarter hour.
+            e.Property(x => x.Smallest).HasColumnName("smallest")
+                .HasColumnType("DateTime64(7, 'Fixed/UTC+00:15:00')");
+            e.Property(x => x.Coarse).HasColumnName("coarse")
+                .HasColumnType("DateTime('Fixed/UTC+05:30:00')");
+            e.Property(x => x.Millis).HasColumnName("millis")
+                .HasColumnType("DateTime64(3, 'Fixed/UTC-09:30:00')");
         });
 
-        modelBuilder.Entity<DateTimeOffsetCarriedEntity>(e =>
+        modelBuilder.Entity<DateTimeOffsetCompositeEntity>(e =>
         {
-            e.ToTable("dto_carried");
+            e.ToTable("dto_composite");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id");
-            // ClickHouse reads this as +06:00. The driver does not read it at all.
-            e.Property(x => x.Carried).HasColumnName("carried")
-                .HasColumnType("DateTime64(7, 'Fixed/UTC+05:60:00')");
+            e.Property(x => x.Nanos).HasColumnName("nanos").HasColumnType("Array(DateTime64(9, 'UTC'))");
+            e.Property(x => x.NanosByName).HasColumnName("nanos_by_name")
+                .HasColumnType("Map(String, DateTime64(9, 'UTC'))");
+            e.Property(x => x.NanosPair).HasColumnName("nanos_pair")
+                .HasColumnType("Tuple(DateTime64(9, 'UTC'), Int32)");
+            e.Property(x => x.Fixed).HasColumnName("fixed")
+                .HasColumnType("Array(DateTime64(7, 'Fixed/UTC+05:30:00'))");
         });
     }
 }
@@ -344,12 +392,17 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
 
     // --- SQL literals -------------------------------------------------------
 
+    /// <summary>
+    /// The literal is a typed UTC instant at the precision of the mapping. ClickHouse before 26.5
+    /// cannot parse a string literal that carries an offset, so the offset is applied here.
+    /// </summary>
     [Theory]
-    [InlineData(7, "UTC", "DateTime64(7, 'UTC')", "'2026-01-15 10:00:00.1234567+05:00'")]
-    [InlineData(6, "UTC", "DateTime64(6, 'UTC')", "'2026-01-15 10:00:00.123456+05:00'")]
-    [InlineData(3, null, "DateTime64(3)", "'2026-01-15 10:00:00.123+05:00'")]
-    [InlineData(0, "UTC", "DateTime64(0, 'UTC')", "'2026-01-15 10:00:00+05:00'")]
-    public void Literal_carries_the_offset(int precision, string? timezone, string expectedStoreType, string expectedLiteral)
+    [InlineData(7, "UTC", "DateTime64(7, 'UTC')", "toDateTime64('2026-01-15 05:00:00.1234567', 7, 'UTC')")]
+    [InlineData(6, "UTC", "DateTime64(6, 'UTC')", "toDateTime64('2026-01-15 05:00:00.123456', 6, 'UTC')")]
+    [InlineData(3, null, "DateTime64(3)", "toDateTime64('2026-01-15 05:00:00.123', 3, 'UTC')")]
+    [InlineData(0, "UTC", "DateTime64(0, 'UTC')", "toDateTime64('2026-01-15 05:00:00', 0, 'UTC')")]
+    [InlineData(9, "Asia/Tokyo", "DateTime64(9, 'Asia/Tokyo')", "toDateTime64('2026-01-15 05:00:00.1234567', 9, 'UTC')")]
+    public void Literal_is_a_utc_instant(int precision, string? timezone, string expectedStoreType, string expectedLiteral)
     {
         var mapping = new ClickHouseDateTimeOffsetTypeMapping(precision, timezone);
         var value = new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.FromHours(5)).AddTicks(1234567);
@@ -365,12 +418,12 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
         var value = new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.FromHours(5));
 
         Assert.Equal("DateTime('UTC')", mapping.StoreType);
-        Assert.Equal("'2026-01-15 10:00:00+05:00'", mapping.GenerateSqlLiteral(value));
+        Assert.Equal("toDateTime('2026-01-15 05:00:00', 'UTC')", mapping.GenerateSqlLiteral(value));
     }
 
     /// <summary>
-    /// A literal that carries its offset must land on the same instant whatever timezone the
-    /// target column declares. A bare wall clock does not, which is why the offset is emitted.
+    /// The literal must land on the same instant whatever timezone the target column declares. A
+    /// bare wall clock does not, because the server reads it in the column's timezone.
     /// </summary>
     [Theory]
     [InlineData("DateTime64(6)")]
@@ -448,7 +501,19 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
             .Where(e => e.Default <= endDate)
             .CountAsync();
 
-        Assert.Equal(2, total);
+        // ClickHouse before 26.7 reads a parameter outside 1900-2299 as the nearest end of that
+        // range, so both rows fall outside the filter. The README states this limit.
+        Assert.Equal(await ServerIsAtLeastAsync(26, 7) ? 2 : 0, total);
+    }
+
+    private async Task<bool> ServerIsAtLeastAsync(int major, int minor)
+    {
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT version()";
+        var version = Version.Parse(string.Join('.', ((string)(await command.ExecuteScalarAsync())!).Split('.').Take(2)));
+        return version >= new Version(major, minor);
     }
 
     /// <summary>
@@ -598,6 +663,37 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
         var found = await ctx.Entities.SingleOrDefaultAsync(e => e.Id == 20 && e.Default == equivalent);
 
         Assert.NotNull(found);
+    }
+
+    /// <summary>
+    /// A constant in a query becomes a SQL literal rather than a parameter. It must match the same
+    /// instant as a parameter does, on a UTC column and on a fixed-offset column, and every
+    /// supported server must parse it.
+    /// </summary>
+    [Fact]
+    public async Task A_constant_in_a_query_matches_the_same_instant()
+    {
+        var value = new DateTimeOffset(2026, 6, 15, 5, 0, 0, TimeSpan.Zero);
+
+        using (var seedContext = new DateTimeOffsetDbContext(_fixture.ConnectionString))
+        {
+            seedContext.Entities.Add(new DateTimeOffsetEntity { Id = 21, Default = value, Value = 3.0 });
+            seedContext.FixedEntities.Add(new DateTimeOffsetFixedEntity
+            {
+                Id = 5, Half = value, Negative = value, Quarter = value, Zero = value, Smallest = value, Coarse = value, Millis = value
+            });
+            await seedContext.SaveChangesAsync();
+        }
+
+        using var ctx = new DateTimeOffsetDbContext(_fixture.ConnectionString);
+        var onDefault = ctx.Entities
+            .Where(e => e.Id == 21 && e.Default == new DateTimeOffset(2026, 6, 15, 10, 0, 0, TimeSpan.FromHours(5)));
+        var onFixed = ctx.FixedEntities
+            .Where(e => e.Id == 5 && e.Negative == new DateTimeOffset(2026, 6, 15, 10, 0, 0, TimeSpan.FromHours(5)));
+
+        Assert.Contains("toDateTime64('2026-06-15 05:00:00.0000000', 7, 'UTC')", onDefault.ToQueryString());
+        Assert.NotNull(await onDefault.SingleOrDefaultAsync());
+        Assert.NotNull(await onFixed.SingleOrDefaultAsync());
     }
 
     [Fact]
@@ -814,48 +910,32 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
     }
 
     /// <summary>
-    /// ClickHouse accepts offsets that <see cref="DateTimeOffset"/> cannot hold: it caps the
-    /// magnitude at 14 hours and requires whole minutes. The instant is still exact, because the
-    /// offset is known and fixed, so the value is reported at offset zero rather than refused.
-    /// This mapping does not keep the offset in any case.
+    /// ClickHouse before 26.9 accepts offsets that <see cref="DateTimeOffset"/> cannot hold: it
+    /// caps the magnitude at 14 hours and requires whole minutes. A column made on such a server
+    /// keeps its name. The instant is still exact, because the offset is known and fixed, so the
+    /// value is reported at offset zero rather than refused. This mapping does not keep the offset
+    /// in any case.
     /// </summary>
-    /// <param name="offsetFromName">The offset the timezone name spells, which the server applied
-    /// to produce the wall clock.</param>
+    /// <param name="offsetSeconds">The offset that the server applied to produce the wall clock.</param>
     [Theory]
-    [InlineData("Fixed/UTC+15:00:00", 15 * 60)]
-    [InlineData("Fixed/UTC-15:00:00", -15 * 60)]
-    [InlineData("Fixed/UTC+24:00:00", 24 * 60)]
-    [InlineData("Fixed/UTC+05:30:30", 5 * 60 + 30)]
+    [InlineData("Fixed/UTC+15:00:00", 15 * 3600)]
+    [InlineData("Fixed/UTC-15:00:00", -15 * 3600)]
+    [InlineData("Fixed/UTC+24:00:00", 24 * 3600)]
+    [InlineData("Fixed/UTC+05:30:30", 5 * 3600 + 30 * 60 + 30)]
+    [InlineData("Fixed/UTC+00:00:42", 42)]
+    // The fields carry: +09:99:99 is +10:40:39, which also has seconds.
+    [InlineData("Fixed/UTC+09:99:99", 10 * 3600 + 40 * 60 + 39)]
     public void An_unrepresentable_fixed_offset_still_reports_the_exact_instant(
-        string timezone, int offsetFromName)
+        string timezone, int offsetSeconds)
     {
         var wallClock = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
-        // Fixed/UTC+05:30:30 carries 30 seconds that the whole-minute InlineData cannot express.
-        var extraSeconds = timezone == "Fixed/UTC+05:30:30" ? 30 : 0;
-        var appliedOffset = TimeSpan.FromMinutes(offsetFromName) + TimeSpan.FromSeconds(extraSeconds);
+        var appliedOffset = TimeSpan.FromSeconds(offsetSeconds);
 
         var result = ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, timezone);
 
         // The instant is recovered exactly: wall clock minus the offset the server applied.
         Assert.Equal(wallClock - appliedOffset, result.UtcDateTime);
         Assert.Equal(TimeSpan.Zero, result.Offset);
-    }
-
-    /// <summary>
-    /// ClickHouse carries minutes and seconds above 59, but the driver does not read such a name and
-    /// returns a UTC wall clock instead of one in the column's timezone. Recovering the instant would
-    /// depend on that driver quirk, so this spelling is still refused.
-    /// </summary>
-    [Fact]
-    public void A_fixed_offset_the_driver_cannot_read_still_throws()
-    {
-        var wallClock = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
-
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, "Fixed/UTC+09:99:99"));
-
-        Assert.Contains("Fixed/UTC+09:99:99", ex.Message);
-        Assert.Contains("does not support", ex.Message);
     }
 
     /// <summary>
@@ -879,30 +959,26 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
     }
 
     /// <summary>
-    /// ClickHouse does not hold the minutes and seconds fields to 59 — it carries the excess, so
-    /// <c>Fixed/UTC+05:60:00</c> is a legal name for <c>+06:00</c>. The driver does not read those
-    /// names, and gives a UTC wall clock rather than one in the column's timezone, so attaching the
-    /// offset would move the instant by the whole offset and report nothing. Such a column must
-    /// report the driver's limit and the spelling to use instead.
+    /// ClickHouse before 26.10 does not hold the minutes and seconds fields to 59. It carries the
+    /// excess, so <c>Fixed/UTC+05:60:00</c> is a legal name for <c>+06:00</c>. The driver reads the
+    /// name the same way and gives a wall clock at that offset, so the provider must apply the same
+    /// offset to recover the instant.
     /// </summary>
     [Theory]
-    [InlineData("Fixed/UTC+05:60:00", "Fixed/UTC+06:00:00")]
-    [InlineData("Fixed/UTC+05:00:60", "Fixed/UTC+05:01:00")]
-    [InlineData("Fixed/UTC+00:99:00", "Fixed/UTC+01:39:00")]
-    [InlineData("Fixed/UTC-05:60:00", "Fixed/UTC-06:00:00")]
-    public void A_carried_fixed_offset_name_reports_the_driver_limit(string timezone, string suggested)
+    [InlineData("Fixed/UTC+05:60:00", 6, 0)]
+    [InlineData("Fixed/UTC+05:00:60", 5, 1)]
+    [InlineData("Fixed/UTC+00:99:00", 1, 39)]
+    [InlineData("Fixed/UTC-05:60:00", -6, 0)]
+    public void A_carried_fixed_offset_name_reads_as_the_carried_offset(
+        string timezone, int expectedHours, int expectedMinutes)
     {
         var wallClock = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, timezone));
+        var result = ClickHouseDateTimeOffsetTypeMapping.ConvertToDateTimeOffset(wallClock, timezone);
 
-        Assert.Contains(timezone, ex.Message);
-        Assert.Contains("driver does not support", ex.Message);
-        // The canonical spelling of the same offset, which the driver does read.
-        Assert.Contains(suggested, ex.Message);
-        // It must not be reported as missing host timezone data, which was the old wrong answer.
-        Assert.DoesNotContain("tzdata", ex.Message);
+        var expectedOffset = new TimeSpan(expectedHours, expectedMinutes, 0);
+        Assert.Equal(expectedOffset, result.Offset);
+        Assert.Equal(wallClock - expectedOffset, result.UtcDateTime);
     }
 
     [Theory]
@@ -941,7 +1017,9 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
             Negative = value,
             Quarter = value,
             Zero = value,
-            Seconds = value
+            Smallest = value,
+            Coarse = value,
+            Millis = value
         });
         await writeContext.SaveChangesAsync();
 
@@ -953,40 +1031,94 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
         Assert.Equal(value, row.Negative.ToUniversalTime());
         Assert.Equal(value, row.Quarter.ToUniversalTime());
         Assert.Equal(value, row.Zero.ToUniversalTime());
-        Assert.Equal(value, row.Seconds.ToUniversalTime());
+        Assert.Equal(value, row.Smallest.ToUniversalTime());
+        // A coarser store type drops the digits below its precision.
+        Assert.Equal(Truncate(value, TimeSpan.TicksPerSecond), row.Coarse.ToUniversalTime());
+        Assert.Equal(Truncate(value, TimeSpan.TicksPerMillisecond), row.Millis.ToUniversalTime());
 
         // Each value is rendered at the offset its column declares.
         Assert.Equal(new TimeSpan(5, 30, 0), row.Half.Offset);
         Assert.Equal(new TimeSpan(-7, 0, 0), row.Negative.Offset);
         Assert.Equal(new TimeSpan(5, 45, 0), row.Quarter.Offset);
         Assert.Equal(TimeSpan.Zero, row.Zero.Offset);
-        Assert.Equal(new TimeSpan(0, 1, 0), row.Seconds.Offset);
+        Assert.Equal(new TimeSpan(0, 15, 0), row.Smallest.Offset);
+        Assert.Equal(new TimeSpan(5, 30, 0), row.Coarse.Offset);
+        Assert.Equal(new TimeSpan(-9, -30, 0), row.Millis.Offset);
     }
 
+    private static DateTimeOffset Truncate(DateTimeOffset value, long ticksPerUnit)
+        => new(value.UtcTicks - value.UtcTicks % ticksPerUnit, TimeSpan.Zero);
+
     /// <summary>
-    /// The same case end to end. ClickHouse accepts <c>Fixed/UTC+05:60:00</c> and creates the
-    /// column, so the write succeeds; the read must then say what is actually wrong. Reporting
-    /// missing host timezone data, as it did before, sends the user to install <c>tzdata</c> that
-    /// would never help.
+    /// The server sorts on the instant, whatever offset each column declares, and the provider must
+    /// give the rows back in that order.
     /// </summary>
     [Fact]
-    public async Task A_carried_fixed_offset_column_reports_the_driver_limit_on_read()
+    public async Task Fixed_offset_column_orders_by_the_instant()
     {
+        var early = new DateTimeOffset(2026, 5, 1, 23, 0, 0, TimeSpan.Zero);
+        var late = new DateTimeOffset(2026, 5, 2, 1, 0, 0, TimeSpan.Zero);
+
         using var writeContext = new DateTimeOffsetDbContext(_fixture.ConnectionString);
-        writeContext.CarriedEntities.Add(new DateTimeOffsetCarriedEntity
-        {
-            Id = 1,
-            Carried = new DateTimeOffset(2026, 3, 21, 14, 25, 36, TimeSpan.Zero)
-        });
+        writeContext.FixedEntities.AddRange(
+            new DateTimeOffsetFixedEntity
+            {
+                Id = 3, Half = late, Negative = late, Quarter = late, Zero = late, Smallest = late, Coarse = late, Millis = late
+            },
+            new DateTimeOffsetFixedEntity
+            {
+                Id = 4, Half = early, Negative = early, Quarter = early, Zero = early, Smallest = early, Coarse = early, Millis = early
+            });
         await writeContext.SaveChangesAsync();
 
         using var readContext = new DateTimeOffsetDbContext(_fixture.ConnectionString);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => readContext.CarriedEntities.SingleAsync(e => e.Id == 1));
+        var byHalf = await readContext.FixedEntities
+            .Where(e => e.Id == 3 || e.Id == 4)
+            .OrderBy(e => e.Half)
+            .Select(e => e.Id)
+            .ToListAsync();
+        var byMillis = await readContext.FixedEntities
+            .Where(e => e.Id == 3 || e.Id == 4)
+            .OrderBy(e => e.Millis)
+            .Select(e => e.Id)
+            .ToListAsync();
 
-        Assert.Contains("Fixed/UTC+05:60:00", ex.Message);
-        Assert.Contains("Fixed/UTC+06:00:00", ex.Message);
-        Assert.DoesNotContain("tzdata", ex.Message);
+        Assert.Equal([4L, 3L], byHalf);
+        Assert.Equal([4L, 3L], byMillis);
+    }
+
+    /// <summary>
+    /// The same case end to end. ClickHouse 26.10 and later refuse the name, so no such column can
+    /// be made there, and the test then only checks that refusal. An older server makes the column,
+    /// and the value must read back as the instant that was written, at <c>+06:00</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_carried_fixed_offset_column_reads_the_instant_or_the_server_refuses_it()
+    {
+        var value = new DateTimeOffset(2026, 3, 21, 14, 25, 36, TimeSpan.Zero).AddTicks(1234567);
+
+        using var ctx = new DateTimeOffsetCarriedDbContext(_fixture.ConnectionString);
+        await ctx.Database.ExecuteSqlRawAsync($"DROP TABLE IF EXISTS {DateTimeOffsetCarriedDbContext.Table}");
+        try
+        {
+            await ctx.Database.ExecuteSqlRawAsync(
+                $"CREATE TABLE {DateTimeOffsetCarriedDbContext.Table} "
+                + "(id Int64, carried DateTime64(7, 'Fixed/UTC+05:60:00')) ENGINE = MergeTree ORDER BY id");
+        }
+        catch (global::ClickHouse.Driver.ClickHouseServerException ex) when (ex.ErrorCode == 36)
+        {
+            Assert.Contains("Fixed/UTC+05:60:00", ex.Message);
+            return;
+        }
+
+        ctx.Entities.Add(new DateTimeOffsetCarriedEntity { Id = 1, Carried = value });
+        await ctx.SaveChangesAsync();
+
+        using var readContext = new DateTimeOffsetCarriedDbContext(_fixture.ConnectionString);
+        var row = await readContext.Entities.SingleAsync(e => e.Id == 1);
+
+        Assert.Equal(value, row.Carried.ToUniversalTime());
+        Assert.Equal(TimeSpan.FromHours(6), row.Carried.Offset);
     }
 
     /// <summary>A filter must still match on the instant, whatever offset the column declares.</summary>
@@ -1003,7 +1135,9 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
             Negative = value,
             Quarter = value,
             Zero = value,
-            Seconds = value
+            Smallest = value,
+            Coarse = value,
+            Millis = value
         });
         await writeContext.SaveChangesAsync();
 
@@ -1012,9 +1146,14 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
         var equivalent = new DateTimeOffset(2026, 4, 2, 13, 45, 0, TimeSpan.FromHours(5.5));
 
         var found = await ctx.FixedEntities.SingleOrDefaultAsync(e => e.Id == 2 && e.Half == equivalent);
+        var foundByCoarse = await ctx.FixedEntities.SingleOrDefaultAsync(e => e.Id == 2 && e.Coarse == equivalent);
+        var foundByMillis = await ctx.FixedEntities.SingleOrDefaultAsync(e => e.Id == 2 && e.Millis == equivalent);
 
         Assert.NotNull(found);
+        Assert.NotNull(foundByCoarse);
+        Assert.NotNull(foundByMillis);
         Assert.Contains("Fixed/UTC+05:30:00", ctx.FixedEntities.Where(e => e.Half == equivalent).ToQueryString());
+        Assert.Contains("{equivalent:DateTime('Fixed/UTC+05:30:00')}", ctx.FixedEntities.Where(e => e.Coarse == equivalent).ToQueryString());
     }
 
     // --- conversion helper --------------------------------------------------
@@ -1125,5 +1264,97 @@ public class DateTimeOffsetMappingTests : IClassFixture<DateTimeOffsetMappingFix
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => ctx.SaveChangesAsync());
 
         Assert.Contains("wrap", ex.Message);
+    }
+
+    /// <summary>
+    /// The range is checked to the tick. Precision 9 ends at 2262-04-11 23:47:16.854775807, part of
+    /// the way through a second, so a check on whole seconds lets the rest of that second through,
+    /// and those values wrap. The low end also stops part of the way through a second.
+    /// </summary>
+    [Fact]
+    public void The_precision_9_range_is_checked_to_the_tick()
+    {
+        var mapping = new ClickHouseDateTimeOffsetTypeMapping(9, "UTC");
+
+        // long.MaxValue / 100 and long.MinValue / 100 ticks from the epoch: the last instants whose
+        // count of nanoseconds fits in an Int64.
+        var last = DateTimeOffset.UnixEpoch.AddTicks(long.MaxValue / 100);
+        var first = DateTimeOffset.UnixEpoch.AddTicks(long.MinValue / 100);
+        Assert.Equal(new DateTimeOffset(2262, 4, 11, 23, 47, 16, TimeSpan.Zero).AddTicks(8_547_758), last);
+
+        Assert.NotNull(mapping.GenerateSqlLiteral(last));
+        Assert.NotNull(mapping.GenerateSqlLiteral(first));
+
+        // Inside the last whole second, but past the last tick that fits.
+        Assert.Throws<InvalidOperationException>(() => mapping.GenerateSqlLiteral(last.AddTicks(1)));
+        Assert.Throws<InvalidOperationException>(
+            () => mapping.GenerateSqlLiteral(new DateTimeOffset(2262, 4, 11, 23, 47, 16, TimeSpan.Zero).AddTicks(9_000_000)));
+        Assert.Throws<InvalidOperationException>(() => mapping.GenerateSqlLiteral(first.AddTicks(-1)));
+    }
+
+    /// <summary>
+    /// A <see cref="DateTimeOffset"/> inside a composite reaches the driver through the same bulk
+    /// insert path, so each component must be checked as well. The composite mapping does not do
+    /// that itself.
+    /// </summary>
+    [Theory]
+    [InlineData("array")]
+    [InlineData("map")]
+    [InlineData("tuple")]
+    public async Task SaveChanges_refuses_a_composite_component_the_precision_cannot_hold(string composite)
+    {
+        var fits = new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.Zero);
+        var entity = new DateTimeOffsetCompositeEntity
+        {
+            Id = 9100,
+            Nanos = composite == "array" ? [fits, DateTimeOffset.MaxValue] : [fits],
+            NanosByName = new Dictionary<string, DateTimeOffset>
+            {
+                ["a"] = composite == "map" ? DateTimeOffset.MaxValue : fits
+            },
+            NanosPair = Tuple.Create(composite == "tuple" ? DateTimeOffset.MaxValue : fits, 1),
+            Fixed = [fits]
+        };
+
+        using var ctx = new DateTimeOffsetDbContext(_fixture.ConnectionString);
+        ctx.CompositeEntities.Add(entity);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => ctx.SaveChangesAsync());
+
+        Assert.Contains("wrap", ex.Message);
+        Assert.Contains("DateTime64(9, 'UTC')", ex.Message);
+    }
+
+    /// <summary>
+    /// The same composites with values inside the range are written and read back exactly, and a
+    /// fixed-offset element comes back at the offset its column declares.
+    /// </summary>
+    [Fact]
+    public async Task Composite_components_inside_the_range_round_trip()
+    {
+        var value = new DateTimeOffset(2026, 3, 21, 14, 25, 36, TimeSpan.Zero).AddTicks(1234567);
+        var last = DateTimeOffset.UnixEpoch.AddTicks(long.MaxValue / 100);
+
+        using (var writeContext = new DateTimeOffsetDbContext(_fixture.ConnectionString))
+        {
+            writeContext.CompositeEntities.Add(new DateTimeOffsetCompositeEntity
+            {
+                Id = 9101,
+                Nanos = [value, last],
+                NanosByName = new Dictionary<string, DateTimeOffset> { ["last"] = last },
+                NanosPair = Tuple.Create(last, 2),
+                Fixed = [value, value.AddDays(1)]
+            });
+            await writeContext.SaveChangesAsync();
+        }
+
+        using var readContext = new DateTimeOffsetDbContext(_fixture.ConnectionString);
+        var row = await readContext.CompositeEntities.SingleAsync(e => e.Id == 9101);
+
+        Assert.Equal([value, last], row.Nanos);
+        Assert.Equal(last, row.NanosByName["last"]);
+        Assert.Equal(last, row.NanosPair.Item1);
+        Assert.Equal([value, value.AddDays(1)], row.Fixed);
+        Assert.All(row.Fixed, element => Assert.Equal(new TimeSpan(5, 30, 0), element.Offset));
     }
 }
