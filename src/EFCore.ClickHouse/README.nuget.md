@@ -59,7 +59,7 @@ String methods: `Contains`, `StartsWith`, `EndsWith`, `IndexOf`, `Replace`, `Sub
 
 ## Table Engine Configuration
 
-All MergeTree-family engines (MergeTree, ReplacingMergeTree, SummingMergeTree, AggregatingMergeTree, CollapsingMergeTree, VersionedCollapsingMergeTree, GraphiteMergeTree) and simple engines (Log, TinyLog, StripeLog, Memory) are supported via fluent API with ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, and SETTINGS.
+All MergeTree-family engines (MergeTree, ReplacingMergeTree, SummingMergeTree, AggregatingMergeTree, CollapsingMergeTree, VersionedCollapsingMergeTree, GraphiteMergeTree) and simple engines (Log, TinyLog, StripeLog, Memory) are supported via fluent API with ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, and SETTINGS. `.WithReplication()` selects the Replicated variant of a MergeTree-family engine, and the `UseCluster("name")` option adds `ON CLUSTER` to the generated DDL.
 
 Column-level features: CODEC, TTL, COMMENT, DEFAULT values. Data-skipping indexes with configurable type and granularity.
 

@@ -1,21 +1,36 @@
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using ClickHouse.EntityFrameworkCore.Metadata.Internal;
 using ClickHouse.EntityFrameworkCore.Migrations.Operations;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Migrations;
 
 public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
 {
-    public ClickHouseMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies dependencies)
+    private readonly string? _clusterName;
+
+    public ClickHouseMigrationsSqlGenerator(
+        MigrationsSqlGeneratorDependencies dependencies,
+        IDbContextOptions options)
         : base(dependencies)
     {
+        _clusterName = options.FindExtension<ClickHouseOptionsExtension>()?.ClusterName;
     }
 
     // ClickHouse does not support transactions — suppress on all statements.
     protected override void EndStatement(MigrationCommandListBuilder builder, bool suppressTransaction = true)
         => base.EndStatement(builder, suppressTransaction: true);
+
+    // A migration script joins the commands with only a line break, so each statement needs its terminator.
+    private void TerminateStatement(MigrationCommandListBuilder builder)
+    {
+        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
+        EndStatement(builder);
+    }
 
     // Custom operation dispatch
 
@@ -40,7 +55,8 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder
             .Append("CREATE DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
-        EndStatement(builder, suppressTransaction: true);
+        AppendOnCluster(builder);
+        TerminateStatement(builder);
     }
 
     protected virtual void Generate(ClickHouseDropDatabaseOperation operation, MigrationCommandListBuilder builder)
@@ -48,7 +64,29 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         builder
             .Append("DROP DATABASE ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
-        EndStatement(builder, suppressTransaction: true);
+        AppendOnCluster(builder);
+        TerminateStatement(builder);
+    }
+
+    // ON CLUSTER: CREATE and DROP put the clause after the table or database name, ALTER TABLE puts it
+    // before the ALTER commands, and RENAME TABLE puts it at the end.
+
+    private void AppendOnCluster(MigrationCommandListBuilder builder)
+    {
+        if (_clusterName is null)
+            return;
+
+        builder
+            .Append(" ON CLUSTER ")
+            .Append(Dependencies.TypeMappingSource.GetMapping(typeof(string)).GenerateSqlLiteral(_clusterName));
+    }
+
+    private void AppendAlterTable(MigrationCommandListBuilder builder, string table, string? schema)
+    {
+        builder
+            .Append("ALTER TABLE ")
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(table, schema));
+        AppendOnCluster(builder);
     }
 
     // CREATE TABLE with ENGINE clause
@@ -59,12 +97,41 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
-        base.Generate(operation, model, builder, terminate: false);
+        builder
+            .Append("CREATE TABLE ")
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name, operation.Schema));
+        AppendOnCluster(builder);
+        builder.AppendLine(" (");
+
+        using (builder.Indent())
+        {
+            CreateTableColumns(operation, model, builder);
+            CreateTableConstraints(operation, model, builder);
+            builder.AppendLine();
+        }
+
+        builder.Append(")");
 
         GenerateEngineClause(operation, builder);
 
-        builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
-        EndStatement(builder);
+        TerminateStatement(builder);
+    }
+
+    protected override void Generate(
+        DropTableOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder,
+        bool terminate = true)
+    {
+        builder
+            .Append("DROP TABLE ")
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name, operation.Schema));
+        AppendOnCluster(builder);
+
+        if (terminate)
+        {
+            TerminateStatement(builder);
+        }
     }
 
     // Column definition: ClickHouse nullable wrapping, codec, TTL, comment
@@ -174,13 +241,11 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
-        builder
-            .Append("ALTER TABLE ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
-            .Append(" ADD COLUMN ");
+        AppendAlterTable(builder, operation.Table, operation.Schema);
+        builder.Append(" ADD COLUMN ");
 
         ColumnDefinition(operation, model, builder);
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -189,13 +254,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
+        AppendAlterTable(builder, operation.Table, operation.Schema);
         builder
-            .Append("ALTER TABLE ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
             .Append(" DROP COLUMN ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -203,13 +267,11 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         IModel? model,
         MigrationCommandListBuilder builder)
     {
-        builder
-            .Append("ALTER TABLE ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
-            .Append(" MODIFY COLUMN ");
+        AppendAlterTable(builder, operation.Table, operation.Schema);
+        builder.Append(" MODIFY COLUMN ");
 
         ColumnDefinition(operation.Schema, operation.Table, operation.Name, operation, model, builder);
-        EndStatement(builder);
+        TerminateStatement(builder);
 
         // Emit REMOVE statements for column annotations that were present on the old column but not the new one.
         // ClickHouse requires explicit REMOVE CODEC / REMOVE TTL / REMOVE COMMENT — a bare MODIFY COLUMN
@@ -245,14 +307,13 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             if (keyword is null)
                 continue;
 
+            AppendAlterTable(builder, operation.Table, operation.Schema);
             builder
-                .Append("ALTER TABLE ")
-                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
                 .Append(" MODIFY COLUMN ")
                 .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
                 .Append(" ")
                 .Append(keyword);
-            EndStatement(builder);
+            TerminateStatement(builder);
         }
     }
 
@@ -261,15 +322,38 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         IModel? model,
         MigrationCommandListBuilder builder)
     {
+        AppendAlterTable(builder, operation.Table, operation.Schema);
         builder
-            .Append("ALTER TABLE ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
             .Append(" RENAME COLUMN ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
             .Append(" TO ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
+    }
+
+    protected override void Generate(
+        AddCheckConstraintOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder)
+    {
+        AppendAlterTable(builder, operation.Table, operation.Schema);
+        builder.Append(" ADD ");
+        CheckConstraint(operation, model, builder);
+        TerminateStatement(builder);
+    }
+
+    protected override void Generate(
+        DropCheckConstraintOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder)
+    {
+        AppendAlterTable(builder, operation.Table, operation.Schema);
+        builder
+            .Append(" DROP CONSTRAINT ")
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
+
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -282,8 +366,9 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name, operation.Schema))
             .Append(" TO ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.NewName!, operation.NewSchema));
+        AppendOnCluster(builder);
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // ALTER TABLE — reject ClickHouse metadata changes (engine, ORDER BY, etc. are immutable)
@@ -351,9 +436,8 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         var indexParams = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.SkippingIndexParams)?.Value;
         var granularity = (int?)operation.FindAnnotation(ClickHouseAnnotationNames.SkippingIndexGranularity)?.Value ?? 1;
 
+        AppendAlterTable(builder, operation.Table, operation.Schema);
         builder
-            .Append("ALTER TABLE ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table, operation.Schema))
             .Append(" ADD INDEX ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
             .Append(" (")
@@ -366,7 +450,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.Append($"({indexParams})");
 
         builder.Append($" GRANULARITY {granularity}");
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     protected override void Generate(
@@ -381,13 +465,12 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         if (indexType is null)
             return;
 
+        AppendAlterTable(builder, operation.Table!, operation.Schema);
         builder
-            .Append("ALTER TABLE ")
-            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table!, operation.Schema))
             .Append(" DROP INDEX ")
             .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
 
-        EndStatement(builder);
+        TerminateStatement(builder);
     }
 
     // Unsupported operations
@@ -436,6 +519,13 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         var engine = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.Engine)?.Value
             ?? ClickHouseAnnotationNames.MergeTree;
 
+        var replicated = operation.FindAnnotation(ClickHouseAnnotationNames.Replicated)?.Value is true;
+        if (replicated && !ClickHouseEngines.IsMergeTreeFamily(engine))
+        {
+            throw new NotSupportedException(
+                $"The '{engine}' engine has no Replicated variant. Only MergeTree family engines can be replicated.");
+        }
+
         builder.AppendLine();
 
         // ENGINE = EngineName or ENGINE = EngineName(args)
@@ -446,9 +536,19 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         }
         else
         {
-            builder.Append($"ENGINE = {engine}(");
-            GenerateEngineArgs(operation, engine, builder);
-            builder.Append(")");
+            var args = new List<string>();
+            if (replicated)
+            {
+                // Replicated<Engine>(zoo_path, replica_name, <engine args>). ClickHouse needs both or neither
+                // of the first two arguments. With neither, it uses default_replica_path and default_replica_name.
+                AddReplicationArg(operation, ClickHouseAnnotationNames.ReplicatedZooKeeperPath, args);
+                AddReplicationArg(operation, ClickHouseAnnotationNames.ReplicatedReplicaName, args);
+            }
+
+            AddEngineArgs(operation, engine, args);
+
+            var engineName = replicated ? ClickHouseEngines.ReplicatedPrefix + engine : engine;
+            builder.Append($"ENGINE = {engineName}({string.Join(", ", args)})");
         }
 
         // ORDER BY
@@ -460,7 +560,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.Append(string.Join(", ", orderBy.Select(QuoteColumnOrExpression)));
             builder.Append(")");
         }
-        else if (IsMergeTreeFamily(engine))
+        else if (ClickHouseEngines.IsMergeTreeFamily(engine))
         {
             builder.AppendLine();
             builder.Append("ORDER BY tuple()");
@@ -520,19 +620,23 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
         GenerateSettingsClause(operation, builder);
     }
 
-    private void GenerateEngineArgs(CreateTableOperation operation, string engine, MigrationCommandListBuilder builder)
+    private void AddReplicationArg(CreateTableOperation operation, string annotationName, List<string> args)
+    {
+        if (operation.FindAnnotation(annotationName)?.Value is string value)
+            args.Add(Dependencies.TypeMappingSource.GetMapping(typeof(string)).GenerateSqlLiteral(value));
+    }
+
+    private void AddEngineArgs(CreateTableOperation operation, string engine, List<string> args)
     {
         switch (engine)
         {
             case ClickHouseAnnotationNames.ReplacingMergeTree:
                 var version = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.ReplacingMergeTreeVersion)?.Value;
                 var isDeleted = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.ReplacingMergeTreeIsDeleted)?.Value;
-                var args = new List<string>();
                 if (version is not null)
                     args.Add(QuoteColumnOrExpression(version));
                 if (isDeleted is not null)
                     args.Add(QuoteColumnOrExpression(isDeleted));
-                builder.Append(string.Join(", ", args));
                 break;
 
             case ClickHouseAnnotationNames.SummingMergeTree:
@@ -543,7 +647,7 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
                     // SummingMergeTree accepts a single optional parameter: the column to sum, or a
                     // tuple of columns. Multiple columns must be wrapped in a tuple — emitting them as
                     // a comma-separated argument list produces invalid DDL (NUMBER_OF_ARGUMENTS_DOESNT_MATCH).
-                    builder.Append(columns.Length == 1
+                    args.Add(columns.Length == 1
                         ? quotedColumns.First()
                         : $"({string.Join(", ", quotedColumns)})");
                 }
@@ -552,22 +656,20 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             case ClickHouseAnnotationNames.CollapsingMergeTree:
                 var sign = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.CollapsingMergeTreeSign)?.Value;
                 if (sign is not null)
-                    builder.Append(QuoteColumnOrExpression(sign));
+                    args.Add(QuoteColumnOrExpression(sign));
                 break;
 
             case ClickHouseAnnotationNames.VersionedCollapsingMergeTree:
                 var vcSign = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.VersionedCollapsingMergeTreeSign)?.Value;
                 var vcVersion = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.VersionedCollapsingMergeTreeVersion)?.Value;
-                var vcArgs = new List<string>();
-                if (vcSign is not null) vcArgs.Add(QuoteColumnOrExpression(vcSign));
-                if (vcVersion is not null) vcArgs.Add(QuoteColumnOrExpression(vcVersion));
-                builder.Append(string.Join(", ", vcArgs));
+                if (vcSign is not null) args.Add(QuoteColumnOrExpression(vcSign));
+                if (vcVersion is not null) args.Add(QuoteColumnOrExpression(vcVersion));
                 break;
 
             case ClickHouseAnnotationNames.GraphiteMergeTree:
                 var config = (string?)operation.FindAnnotation(ClickHouseAnnotationNames.GraphiteMergeTreeConfigSection)?.Value;
                 if (config is not null)
-                    builder.Append($"'{config}'");
+                    args.Add($"'{config}'");
                 break;
         }
     }
@@ -646,15 +748,6 @@ public class ClickHouseMigrationsSqlGenerator : MigrationsSqlGenerator
             || columnType.StartsWith("Json", StringComparison.OrdinalIgnoreCase)
             || columnType.Equals("Dynamic", StringComparison.OrdinalIgnoreCase);
     }
-
-    private static bool IsMergeTreeFamily(string engine)
-        => engine is ClickHouseAnnotationNames.MergeTree
-            or ClickHouseAnnotationNames.ReplacingMergeTree
-            or ClickHouseAnnotationNames.SummingMergeTree
-            or ClickHouseAnnotationNames.AggregatingMergeTree
-            or ClickHouseAnnotationNames.CollapsingMergeTree
-            or ClickHouseAnnotationNames.VersionedCollapsingMergeTree
-            or ClickHouseAnnotationNames.GraphiteMergeTree;
 
     private static bool IsSimpleEngine(string engine)
         => engine is ClickHouseAnnotationNames.TinyLog

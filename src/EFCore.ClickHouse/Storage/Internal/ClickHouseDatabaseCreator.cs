@@ -1,6 +1,8 @@
 using System.Data.Common;
 using ClickHouse.Driver.ADO;
 using ClickHouse.Driver.ADO.Parameters;
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Storage.Internal;
@@ -10,21 +12,38 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
     private readonly IClickHouseRelationalConnection _connection;
     private readonly IRawSqlCommandBuilder _rawSqlCommandBuilder;
     private readonly ISqlGenerationHelper _sqlGenerationHelper;
+    private readonly IRelationalTypeMappingSource _typeMappingSource;
+    private readonly string? _clusterName;
 
     public ClickHouseDatabaseCreator(
         RelationalDatabaseCreatorDependencies dependencies,
         IClickHouseRelationalConnection connection,
         IRawSqlCommandBuilder rawSqlCommandBuilder,
-        ISqlGenerationHelper sqlGenerationHelper)
+        ISqlGenerationHelper sqlGenerationHelper,
+        IRelationalTypeMappingSource typeMappingSource,
+        IDbContextOptions options)
         : base(dependencies)
     {
         _connection = connection;
         _rawSqlCommandBuilder = rawSqlCommandBuilder;
         _sqlGenerationHelper = sqlGenerationHelper;
+        _typeMappingSource = typeMappingSource;
+        _clusterName = options.FindExtension<ClickHouseOptionsExtension>()?.ClusterName;
     }
 
     private string GetDatabaseName()
         => new ClickHouseConnectionStringBuilder(_connection.ConnectionString).Database;
+
+    private string CreateDatabaseSql
+        => $"CREATE DATABASE IF NOT EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}{OnClusterClause}";
+
+    private string DropDatabaseSql
+        => $"DROP DATABASE IF EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}{OnClusterClause}";
+
+    private string OnClusterClause
+        => _clusterName is null
+            ? string.Empty
+            : $" ON CLUSTER {_typeMappingSource.GetMapping(typeof(string)).GenerateSqlLiteral(_clusterName)}";
 
     public override bool Exists()
     {
@@ -95,7 +114,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         try
         {
             using var command = CreateCommand(masterConnection);
-            command.CommandText = $"CREATE DATABASE IF NOT EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
+            command.CommandText = CreateDatabaseSql;
             command.ExecuteNonQuery();
         }
         finally
@@ -115,7 +134,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
                 var command = CreateCommand(masterConnection);
                 await using (command.ConfigureAwait(false))
                 {
-                    command.CommandText = $"CREATE DATABASE IF NOT EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
+                    command.CommandText = CreateDatabaseSql;
                     await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -133,7 +152,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
         try
         {
             using var command = CreateCommand(masterConnection);
-            command.CommandText = $"DROP DATABASE IF EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
+            command.CommandText = DropDatabaseSql;
             command.ExecuteNonQuery();
         }
         finally
@@ -153,7 +172,7 @@ public class ClickHouseDatabaseCreator : RelationalDatabaseCreator
                 var command = CreateCommand(masterConnection);
                 await using (command.ConfigureAwait(false))
                 {
-                    command.CommandText = $"DROP DATABASE IF EXISTS {_sqlGenerationHelper.DelimitIdentifier(GetDatabaseName())}";
+                    command.CommandText = DropDatabaseSql;
                     await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
             }

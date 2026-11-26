@@ -21,6 +21,11 @@ public static class ClickHouseAnnotationNames
     public const string VersionedCollapsingMergeTreeVersion = Prefix + "VersionedCollapsingMergeTree:Version";
     public const string GraphiteMergeTreeConfigSection = Prefix + "GraphiteMergeTree:ConfigSection";
 
+    // Replication (MergeTree family engines only)
+    public const string Replicated = Prefix + "Replicated";
+    public const string ReplicatedZooKeeperPath = Prefix + "Replicated:ZooKeeperPath";
+    public const string ReplicatedReplicaName = Prefix + "Replicated:ReplicaName";
+
     // Settings (prefix-based key-value storage)
     public const string SettingPrefix = Prefix + "Setting:";
 
