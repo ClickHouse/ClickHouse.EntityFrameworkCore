@@ -34,6 +34,7 @@ public class ParamContainsDefaultsEntity
     public int IntVal { get; set; }
     public string StrVal { get; set; } = "";
     public string LcVal { get; set; } = "";
+    public byte ByteVal { get; set; }
 }
 
 public class ParamContainsDbContext : DbContext
@@ -81,6 +82,7 @@ public class ParamContainsDbContext : DbContext
             entity.Property(e => e.IntVal).HasColumnName("int_val");
             entity.Property(e => e.StrVal).HasColumnName("str_val");
             entity.Property(e => e.LcVal).HasColumnName("lc_val").HasColumnType("LowCardinality(String)");
+            entity.Property(e => e.ByteVal).HasColumnName("byte_val").HasColumnType("UInt8");
         });
     }
 }
@@ -130,9 +132,9 @@ public class ParamContainsFixture : IAsyncLifetime
         await insertCmd.ExecuteNonQueryAsync();
 
         using var defaultsCmd = connection.CreateCommand();
-        defaultsCmd.CommandText = "CREATE TABLE param_contains_defaults (id Int64, int_val Int32, str_val String, lc_val LowCardinality(String)) ENGINE = MergeTree() ORDER BY id";
+        defaultsCmd.CommandText = "CREATE TABLE param_contains_defaults (id Int64, int_val Int32, str_val String, lc_val LowCardinality(String), byte_val UInt8) ENGINE = MergeTree() ORDER BY id";
         await defaultsCmd.ExecuteNonQueryAsync();
-        defaultsCmd.CommandText = "INSERT INTO param_contains_defaults VALUES (1, 0, '', 'a'), (2, 5, 'x', 'y')";
+        defaultsCmd.CommandText = "INSERT INTO param_contains_defaults VALUES (1, 0, '', 'a', 0), (2, 5, 'x', 'y', 5)";
         await defaultsCmd.ExecuteNonQueryAsync();
     }
 
@@ -666,5 +668,40 @@ public class ParameterizedContainsTests : IClassFixture<ParamContainsFixture>
         Assert.Contains(" IN {vals:Array(Int32)}", query.ToQueryString());
 
         Assert.Equal([false, true], await query.ToListAsync());
+    }
+
+    [Fact]
+    public async Task ByteArray_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new byte[] { 5, 7 };
+
+        // The driver formats a byte[] for an Array(UInt8) parameter as a list of numbers, not as binary text.
+        var query = ctx.Defaults.Where(e => vals.Contains(e.ByteVal));
+        Assert.Contains(" IN {vals:Array(UInt8)}", query.ToQueryString());
+        Assert.Equal([2L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+
+        var negated = ctx.Defaults.Where(e => !vals.Contains(e.ByteVal));
+        Assert.Equal([1L], await negated.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ExplicitParameterMode_NullableColumnAndEnum_UseEfCoreExpansion()
+    {
+        await using var ctx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(ParameterTranslationMode.Parameter));
+
+        // With the Parameter mode, the EF Core expansion still writes one parameter for each element.
+        var vals = new int?[] { 100, null };
+        var nullable = ctx.Entities.Where(e => vals.Contains(e.NullableInt));
+        var nullableSql = nullable.ToQueryString();
+        Assert.DoesNotContain(" IN {", nullableSql);
+        Assert.Contains("{vals1:Nullable(Int32)}", nullableSql);
+        Assert.Equal([1L, 2L], await nullable.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+
+        var colors = new[] { ContainsColor.Red, ContainsColor.Blue };
+        var enums = ctx.Entities.Where(e => colors.Contains(e.Color));
+        Assert.DoesNotContain(" IN {", enums.ToQueryString());
+        Assert.Equal([1L, 3L], await enums.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
     }
 }
