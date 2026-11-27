@@ -1632,18 +1632,16 @@ public class ArrayTests
     [Fact]
     public async Task LocalArray_Contains_UsesArrayParameterNotArrayColumnHelper()
     {
-        // A captured local array must NOT be mistaken for a mapped Array(T) column by the array-column
-        // translator (whose gate, LooksLikeArrayColumnAccess, rejects it). Since issue #39 it is instead
-        // bound as a single native Array(T) *parameter* — has({p:Array(Int64)}, `id`), where the array is
-        // the parameter and the column is the tested item — rather than expanded to one parameter per
-        // element. This pins both behaviors: the parameter placeholder confirms it's the param-array path.
+        // The array-column translator must not take a captured local array for a mapped Array(T) column
+        // (its gate, LooksLikeArrayColumnAccess, refuses it). The provider sends the array as one Array(T)
+        // parameter, `id` IN {localIds:Array(Int64)}, with the column as the tested item.
         await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
 
         var localIds = new long[] { 1L, 3L };
         var query = ctx.Entities.Where(e => localIds.Contains(e.Id));
         var sql = query.ToQueryString();
-        Assert.Contains("has({", sql);
-        Assert.Contains(":Array(Int64)}", sql);
+        Assert.Contains(" IN {localIds:Array(Int64)}", sql);
+        Assert.DoesNotContain("has(", sql);
 
         var results = await query.OrderBy(e => e.Id).ToListAsync();
         Assert.Equal([1L, 3L], results.Select(r => r.Id));

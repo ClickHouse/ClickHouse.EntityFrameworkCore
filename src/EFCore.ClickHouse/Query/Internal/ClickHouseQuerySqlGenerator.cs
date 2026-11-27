@@ -101,6 +101,25 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
         || string.Equals(name, "SUM", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Writes an IN expression with a values parameter as <c>item IN {p:Array(T)}</c>: one array
+    /// parameter for the whole collection. <see cref="ClickHouseSqlNullabilityProcessor"/> keeps the values
+    /// parameter only for this translation; in other cases it expands the parameter, and the base
+    /// implementation writes the list.
+    /// </summary>
+    protected override void GenerateIn(InExpression inExpression, bool negated)
+    {
+        if (inExpression.ValuesParameter is { } valuesParameter)
+        {
+            Visit(inExpression.Item);
+            Sql.Append(negated ? " NOT IN " : " IN ");
+            Visit(valuesParameter);
+            return;
+        }
+
+        base.GenerateIn(inExpression, negated);
+    }
+
+    /// <summary>
     /// ClickHouse requires explicit ALL or DISTINCT for UNION
     /// (<c>union_default_mode</c> is empty by default, rejecting bare <c>UNION</c>).
     /// Always emit an explicit modifier for all set operations.

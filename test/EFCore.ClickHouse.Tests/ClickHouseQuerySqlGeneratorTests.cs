@@ -64,8 +64,7 @@ public class ClickHouseQuerySqlGeneratorTests : IClassFixture<ClickHouseFixture>
             .Where(e => ids.Contains(e.Id))
             .ToQueryString();
 
-        Assert.Contains("has({", sql);
-        Assert.Contains(":Array(Int64)}", sql);
+        Assert.Contains(" IN {ids:Array(Int64)}", sql);
         Assert.DoesNotContain(" IN (", sql);
     }
 
