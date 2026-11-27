@@ -12,6 +12,8 @@ namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 
 public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
 {
+    private readonly HashSet<string> _parameterNames = [];
+
     public ClickHouseQuerySqlGenerator(QuerySqlGeneratorDependencies dependencies)
         : base(dependencies)
     {
@@ -172,12 +174,14 @@ public class ClickHouseQuerySqlGenerator : QuerySqlGenerator
 
     protected override Expression VisitSqlParameter(SqlParameterExpression sqlParameterExpression)
     {
+        // EF Core gives a parameter that it uses with two type mappings a second Name (for example `ids0`),
+        // with the same InvariantName. The InvariantName selects the value, and the Name is the name in the SQL.
         var parameterName = sqlParameterExpression.Name;
 
-        if (Sql.Parameters.All(p => p.InvariantName != parameterName))
+        if (_parameterNames.Add(parameterName))
         {
             Sql.AddParameter(
-                parameterName,
+                sqlParameterExpression.InvariantName,
                 Dependencies.SqlGenerationHelper.GenerateParameterName(parameterName),
                 sqlParameterExpression.TypeMapping!,
                 sqlParameterExpression.IsNullable);

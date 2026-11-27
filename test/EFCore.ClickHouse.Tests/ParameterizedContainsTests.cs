@@ -1,8 +1,10 @@
 using System.Collections.Immutable;
 using System.Net;
 using System.Numerics;
+using ClickHouse.EntityFrameworkCore.Extensions;
 using ClickHouse.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace EFCore.ClickHouse.Tests;
@@ -31,6 +33,7 @@ public class ParamContainsDefaultsEntity
     public long Id { get; set; }
     public int IntVal { get; set; }
     public string StrVal { get; set; } = "";
+    public string LcVal { get; set; } = "";
 }
 
 public class ParamContainsDbContext : DbContext
@@ -77,6 +80,7 @@ public class ParamContainsDbContext : DbContext
             entity.Property(e => e.Id).HasColumnName("id");
             entity.Property(e => e.IntVal).HasColumnName("int_val");
             entity.Property(e => e.StrVal).HasColumnName("str_val");
+            entity.Property(e => e.LcVal).HasColumnName("lc_val").HasColumnType("LowCardinality(String)");
         });
     }
 }
@@ -126,9 +130,9 @@ public class ParamContainsFixture : IAsyncLifetime
         await insertCmd.ExecuteNonQueryAsync();
 
         using var defaultsCmd = connection.CreateCommand();
-        defaultsCmd.CommandText = "CREATE TABLE param_contains_defaults (id Int64, int_val Int32, str_val String) ENGINE = MergeTree() ORDER BY id";
+        defaultsCmd.CommandText = "CREATE TABLE param_contains_defaults (id Int64, int_val Int32, str_val String, lc_val LowCardinality(String)) ENGINE = MergeTree() ORDER BY id";
         await defaultsCmd.ExecuteNonQueryAsync();
-        defaultsCmd.CommandText = "INSERT INTO param_contains_defaults VALUES (1, 0, ''), (2, 5, 'x')";
+        defaultsCmd.CommandText = "INSERT INTO param_contains_defaults VALUES (1, 0, '', 'a'), (2, 5, 'x', 'y')";
         await defaultsCmd.ExecuteNonQueryAsync();
     }
 
@@ -573,5 +577,94 @@ public class ParameterizedContainsTests : IClassFixture<ParamContainsFixture>
         await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
         var otherIds = new[] { 1L, 3L };
         Assert.Contains(" IN {otherIds:Array(Int64)}", ctx.Entities.Where(e => otherIds.Contains(e.Id)).ToQueryString());
+    }
+
+    [Fact]
+    public void ExplicitCollectionMode_ChangedOnSharedInternalServiceProvider_Throws()
+    {
+        using var serviceProvider = new ServiceCollection().AddEntityFrameworkClickHouse().BuildServiceProvider();
+
+        DbContextOptions CreateOptions(Action<ClickHouseDbContextOptionsBuilder>? configure)
+            => new DbContextOptionsBuilder()
+                .UseInternalServiceProvider(serviceProvider)
+                .UseClickHouse(_fixture.ConnectionString, configure)
+                .Options;
+
+        // The first context sets the singleton options of the service provider.
+        using (var first = new DbContext(CreateOptions(configure: null)))
+            _ = first.Model;
+
+        using var second = new DbContext(
+            CreateOptions(o => o.UseParameterizedCollectionMode(ParameterTranslationMode.MultipleParameters)));
+        var exception = Assert.Throws<InvalidOperationException>(() => second.Model);
+        Assert.Contains("UseParameterizedCollectionMode", exception.Message);
+    }
+
+    [Fact]
+    public async Task SameCollection_TwoStoreTypes_SendsTwoParameters()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new[] { "x", "a" };
+
+        // EF Core names the second use of the parameter `vals0`, because it has a different store type.
+        var query = ctx.Defaults.Where(e => vals.Contains(e.StrVal) || vals.Contains(e.LcVal));
+        var sql = query.ToQueryString();
+        Assert.Contains(" IN {vals:Array(String)}", sql);
+        Assert.Contains(" IN {vals0:Array(LowCardinality(String))}", sql);
+
+        Assert.Equal([1L, 2L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task SameScalar_TwoStoreTypes_SendsTwoParameters()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var val = "a";
+
+        var query = ctx.Defaults.Where(e => e.StrVal == val || e.LcVal == val);
+        var sql = query.ToQueryString();
+        Assert.Contains("{val:String}", sql);
+        Assert.Contains("{val0:LowCardinality(String)}", sql);
+
+        Assert.Equal([1L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ExplicitParameterMode_UsesArrayParameter()
+    {
+        await using var ctx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(ParameterTranslationMode.Parameter));
+        var ids = new[] { 1L, 3L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        Assert.Contains("`p`.`id` IN {ids:Array(Int64)}", query.ToQueryString());
+
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task NullableStoreType_UsesEfCoreExpansion()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new[] { 100, 300 };
+
+        // After the null check, EF Core knows that the item is not null, but its store type is
+        // Nullable(Int32). The provider uses the array parameter only when the store type is not Nullable.
+        var query = ctx.Entities.Where(e => e.NullableInt != null && vals.Contains(e.NullableInt.Value));
+        Assert.DoesNotContain(" IN {", query.ToQueryString());
+
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ContainsInProjection_ReturnsBoolean()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new int?[] { 5, null };
+
+        var query = ctx.Defaults.OrderBy(e => e.Id).Select(e => vals.Contains(e.IntVal));
+        Assert.Contains(" IN {vals:Array(Int32)}", query.ToQueryString());
+
+        Assert.Equal([false, true], await query.ToListAsync());
     }
 }

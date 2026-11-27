@@ -56,12 +56,13 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
     /// parameters. ClickHouse uses the primary key for <c>IN</c> with an array.
     /// </summary>
     /// <remarks>
-    /// The provider uses the array parameter when the collection has no translation mode. The EF Core
-    /// expansion is used for <c>EF.Constant(...)</c> and <c>EF.MultipleParameters(...)</c>, and for all
-    /// collections when the application sets <c>UseParameterizedCollectionMode</c> to
+    /// The provider uses the array parameter when the collection has no translation mode, or the mode
+    /// <see cref="ParameterTranslationMode.Parameter"/>, which the application can set for all queries with
+    /// <c>UseParameterizedCollectionMode</c>. The EF Core expansion is used for <c>EF.Constant(...)</c> and
+    /// <c>EF.MultipleParameters(...)</c>, and for all collections when the application sets
     /// <see cref="ParameterTranslationMode.Constant"/> or <see cref="ParameterTranslationMode.MultipleParameters"/>.
-    /// <c>EF.Parameter(...)</c> and <see cref="ParameterTranslationMode.Parameter"/> do not get here:
-    /// EF Core translates such a collection as a table, which the provider does not support.
+    /// A query with <c>EF.Parameter(...)</c> does not get here: EF Core then translates the collection as a
+    /// table, which the provider does not support.
     /// </remarks>
     protected override SqlExpression VisitIn(
         InExpression inExpression,
@@ -69,7 +70,8 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         out bool nullable)
     {
         if (inExpression.ValuesParameter is { } valuesParameter
-            && (valuesParameter.TranslationMode ?? _explicitCollectionParameterTranslationMode) is null)
+            && (valuesParameter.TranslationMode ?? _explicitCollectionParameterTranslationMode)
+                is null or ParameterTranslationMode.Parameter)
         {
             return VisitCollectionParameterIn(inExpression, valuesParameter, allowOptimizedExpansion, out nullable);
         }
@@ -90,15 +92,18 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         var elementMapping = (item.TypeMapping ?? valuesParameter.TypeMapping?.ElementTypeMapping) as RelationalTypeMapping;
 
         // Use the EF Core expansion in these cases:
-        //  - The item can be null. The expansion adds the null checks that give .NET semantics.
-        //    ClickHouseArrayParameterTypeMapping also removes null elements, which is correct only for an
-        //    item that is never null.
+        //  - The item can be null, or its store type is Nullable. The expansion adds the null checks that
+        //    give .NET semantics. ClickHouseArrayParameterTypeMapping also removes null elements, which is
+        //    correct only for an item that is never null. The store type check is for an item that this
+        //    processor reports as never null although it can be NULL, for example the element of an
+        //    Array(Nullable(T)) column in an array lambda.
         //  - There is no element mapping, so there is no store type for Array(T).
         //  - The element has a value converter, for example an enum stored as Enum8. The driver gets the
         //    collection before conversion and cannot format it.
         //  - The driver does not format the element type correctly inside an array.
         if (itemNullable
             || elementMapping is null
+            || IsNullableStoreType(elementMapping.StoreType)
             || elementMapping.Converter is not null
             || !ArrayParameterElementTypes.Contains(Nullable.GetUnderlyingType(elementMapping.ClrType) ?? elementMapping.ClrType))
         {
@@ -117,6 +122,10 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         // `item IN {p:Array(T)}`.
         return inExpression.Update(alignedItem, arrayParameter);
     }
+
+    private static bool IsNullableStoreType(string storeType)
+        => storeType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase)
+            || storeType.StartsWith("LowCardinality(Nullable(", StringComparison.OrdinalIgnoreCase);
 
     protected override SqlExpression VisitSqlBinary(
         SqlBinaryExpression sqlBinaryExpression,
