@@ -25,11 +25,28 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         typeof(System.Numerics.BigInteger), typeof(System.Net.IPAddress),
     ];
 
+    private readonly ParameterTranslationMode? _explicitCollectionParameterTranslationMode;
+
     public ClickHouseSqlNullabilityProcessor(
         RelationalParameterBasedSqlProcessorDependencies dependencies,
         RelationalParameterBasedSqlProcessorParameters parameters)
+        : this(dependencies, parameters, explicitCollectionParameterTranslationMode: null)
+    {
+    }
+
+    /// <param name="dependencies">The processor dependencies.</param>
+    /// <param name="parameters">The processor parameters.</param>
+    /// <param name="explicitCollectionParameterTranslationMode">
+    /// The mode that the application set with <c>UseParameterizedCollectionMode</c>, or <see langword="null"/>
+    /// when it did not set one.
+    /// </param>
+    public ClickHouseSqlNullabilityProcessor(
+        RelationalParameterBasedSqlProcessorDependencies dependencies,
+        RelationalParameterBasedSqlProcessorParameters parameters,
+        ParameterTranslationMode? explicitCollectionParameterTranslationMode)
         : base(dependencies, parameters)
     {
+        _explicitCollectionParameterTranslationMode = explicitCollectionParameterTranslationMode;
     }
 
     /// <summary>
@@ -40,7 +57,9 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
     /// </summary>
     /// <remarks>
     /// The provider uses the array parameter when the collection has no translation mode. The EF Core
-    /// expansion is used for <c>EF.Constant(...)</c> and <c>EF.MultipleParameters(...)</c>.
+    /// expansion is used for <c>EF.Constant(...)</c> and <c>EF.MultipleParameters(...)</c>, and for all
+    /// collections when the application sets <c>UseParameterizedCollectionMode</c> to
+    /// <see cref="ParameterTranslationMode.Constant"/> or <see cref="ParameterTranslationMode.MultipleParameters"/>.
     /// <c>EF.Parameter(...)</c> and <see cref="ParameterTranslationMode.Parameter"/> do not get here:
     /// EF Core translates such a collection as a table, which the provider does not support.
     /// </remarks>
@@ -50,7 +69,7 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         out bool nullable)
     {
         if (inExpression.ValuesParameter is { } valuesParameter
-            && valuesParameter.TranslationMode is null)
+            && (valuesParameter.TranslationMode ?? _explicitCollectionParameterTranslationMode) is null)
         {
             return VisitCollectionParameterIn(inExpression, valuesParameter, allowOptimizedExpansion, out nullable);
         }

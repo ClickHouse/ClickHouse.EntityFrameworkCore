@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Net;
 using System.Numerics;
+using ClickHouse.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -38,14 +39,16 @@ public class ParamContainsDbContext : DbContext
     public DbSet<ParamContainsDefaultsEntity> Defaults => Set<ParamContainsDefaultsEntity>();
 
     private readonly string _connectionString;
+    private readonly Action<ClickHouseDbContextOptionsBuilder>? _configure;
 
-    public ParamContainsDbContext(string connectionString)
+    public ParamContainsDbContext(string connectionString, Action<ClickHouseDbContextOptionsBuilder>? configure = null)
     {
         _connectionString = connectionString;
+        _configure = configure;
     }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-        => optionsBuilder.UseClickHouse(_connectionString);
+        => optionsBuilder.UseClickHouse(_connectionString, _configure);
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -538,5 +541,37 @@ public class ParameterizedContainsTests : IClassFixture<ParamContainsFixture>
         var query = ctx.Entities.Where(e => vals.Contains(e.IntVal));
         Assert.Contains("CAST(`p`.`int_val` AS Int64) IN {vals:Array(Int64)}", query.ToQueryString());
         Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(ParameterTranslationMode.MultipleParameters, " IN ({ids1:Int64}, {ids2:Int64})")]
+    [InlineData(ParameterTranslationMode.Constant, " IN (1, 3)")]
+    public async Task ExplicitCollectionMode_UsesEfCoreExpansion(ParameterTranslationMode mode, string expectedSql)
+    {
+        await using var ctx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(mode));
+        var ids = new[] { 1L, 3L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        var sql = query.ToQueryString();
+        Assert.Contains(expectedSql, sql);
+        Assert.DoesNotContain(" IN {", sql);
+
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ExplicitCollectionMode_DoesNotChangeOtherContexts()
+    {
+        await using (var explicitCtx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(ParameterTranslationMode.MultipleParameters)))
+        {
+            var ids = new[] { 1L, 3L };
+            Assert.DoesNotContain(" IN {", explicitCtx.Entities.Where(e => ids.Contains(e.Id)).ToQueryString());
+        }
+
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var otherIds = new[] { 1L, 3L };
+        Assert.Contains(" IN {otherIds:Array(Int64)}", ctx.Entities.Where(e => otherIds.Contains(e.Id)).ToQueryString());
     }
 }
