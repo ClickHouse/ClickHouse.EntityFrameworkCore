@@ -18,23 +18,42 @@ public class ClickHouseArrayLambdaReferenceExpression : SqlExpression, IEquatabl
 {
     private static ConstructorInfo? _quotingConstructor;
 
-    public ClickHouseArrayLambdaReferenceExpression(string name, Type type, RelationalTypeMapping? typeMapping)
+    /// <param name="name">The name of the lambda parameter.</param>
+    /// <param name="type">The CLR type of an array element.</param>
+    /// <param name="typeMapping">The type mapping of an array element.</param>
+    /// <param name="isNullable">
+    /// <see langword="true"/> when an array element can be NULL, for example an element of
+    /// <c>Array(Nullable(String))</c>.
+    /// </param>
+    public ClickHouseArrayLambdaReferenceExpression(
+        string name,
+        Type type,
+        RelationalTypeMapping? typeMapping,
+        bool isNullable = false)
         : base(type, typeMapping)
     {
         Name = name;
+        IsNullable = isNullable;
     }
 
     public virtual string Name { get; }
+
+    /// <summary>
+    /// <see langword="true"/> when an array element can be NULL. The nullability processor uses this
+    /// value to add the null checks that give .NET semantics in the lambda body.
+    /// </summary>
+    public virtual bool IsNullable { get; }
 
     protected override Expression VisitChildren(ExpressionVisitor visitor) => this;
 
     public override Expression Quote()
         => New(
             _quotingConstructor ??= typeof(ClickHouseArrayLambdaReferenceExpression).GetConstructor(
-                [typeof(string), typeof(Type), typeof(RelationalTypeMapping)])!,
+                [typeof(string), typeof(Type), typeof(RelationalTypeMapping), typeof(bool)])!,
             Constant(Name),
             Constant(Type),
-            RelationalExpressionQuotingUtilities.QuoteTypeMapping(TypeMapping));
+            RelationalExpressionQuotingUtilities.QuoteTypeMapping(TypeMapping),
+            Constant(IsNullable));
 
     protected override void Print(ExpressionPrinter expressionPrinter)
         => expressionPrinter.Append(Name);
@@ -43,7 +62,7 @@ public class ClickHouseArrayLambdaReferenceExpression : SqlExpression, IEquatabl
         => obj is ClickHouseArrayLambdaReferenceExpression other && Equals(other);
 
     public bool Equals(ClickHouseArrayLambdaReferenceExpression? other)
-        => other is not null && base.Equals(other) && Name == other.Name;
+        => other is not null && base.Equals(other) && Name == other.Name && IsNullable == other.IsNullable;
 
-    public override int GetHashCode() => HashCode.Combine(base.GetHashCode(), Name);
+    public override int GetHashCode() => HashCode.Combine(base.GetHashCode(), Name, IsNullable);
 }

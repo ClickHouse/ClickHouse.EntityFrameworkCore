@@ -56,6 +56,43 @@ public class ClickHouseSqlNullabilityProcessorTests
         Assert.Equal(ExpressionType.OrElse, sqlBinary.OperatorType);
     }
 
+    [Fact]
+    public void ArrayLambdaReference_Nullable_KeepsIsNullCheck()
+    {
+        using var ctx = new NullabilityTestDbContext();
+        var processor = CreateProcessor(ctx);
+        var reference = CreateStringLambdaReference(ctx, isNullable: true);
+
+        processor.VisitPublic(reference, out var referenceNullable);
+        var result = processor.VisitPublic(ctx.GetService<ISqlExpressionFactory>().IsNull(reference), out var nullable);
+
+        Assert.True(referenceNullable);
+        Assert.False(nullable);
+        var unary = Assert.IsType<SqlUnaryExpression>(result);
+        Assert.Equal(ExpressionType.Equal, unary.OperatorType);
+        Assert.Same(reference, unary.Operand);
+    }
+
+    [Fact]
+    public void ArrayLambdaReference_NonNullable_FoldsIsNullCheckToFalse()
+    {
+        using var ctx = new NullabilityTestDbContext();
+        var processor = CreateProcessor(ctx);
+        var reference = CreateStringLambdaReference(ctx, isNullable: false);
+
+        processor.VisitPublic(reference, out var referenceNullable);
+        var result = processor.VisitPublic(ctx.GetService<ISqlExpressionFactory>().IsNull(reference), out _);
+
+        Assert.False(referenceNullable);
+        Assert.Equal(false, Assert.IsType<SqlConstantExpression>(result).Value);
+    }
+
+    private static ClickHouseArrayLambdaReferenceExpression CreateStringLambdaReference(DbContext context, bool isNullable)
+    {
+        var stringMapping = context.GetService<IRelationalTypeMappingSource>().FindMapping("Nullable(String)")!;
+        return new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping, isNullable);
+    }
+
     private static TestableClickHouseSqlNullabilityProcessor CreateProcessor(DbContext context)
     {
         var dependencies = context.GetService<RelationalParameterBasedSqlProcessorDependencies>();
@@ -128,6 +165,9 @@ public class ClickHouseSqlNullabilityProcessorTests
             bool allowOptimizedExpansion,
             out bool nullable)
             => base.VisitSqlBinary(expression, allowOptimizedExpansion, out nullable);
+
+        public SqlExpression VisitPublic(SqlExpression expression, out bool nullable)
+            => Visit(expression, out nullable);
     }
 
     private sealed class NullabilityTestDbContext : DbContext

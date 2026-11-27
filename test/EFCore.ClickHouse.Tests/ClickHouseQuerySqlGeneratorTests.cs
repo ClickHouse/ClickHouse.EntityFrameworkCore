@@ -267,12 +267,31 @@ public class ClickHouseQuerySqlGeneratorTests : IClassFixture<ClickHouseFixture>
         var typeMappingSource = ctx.GetService<IRelationalTypeMappingSource>();
         var stringMapping = typeMappingSource.FindMapping(typeof(string))!;
 
-        var original = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping);
+        var original = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping, isNullable: true);
 
         var quoted = Assert.IsAssignableFrom<NewExpression>(original.Quote());
         Assert.NotNull(quoted.Constructor);
         Assert.Equal(typeof(ClickHouseArrayLambdaReferenceExpression), quoted.Constructor.DeclaringType);
-        Assert.Equal(3, quoted.Arguments.Count);  // (name, type, typeMapping)
+        Assert.Equal(4, quoted.Arguments.Count);  // (name, type, typeMapping, isNullable)
+        Assert.Equal(true, Assert.IsType<ConstantExpression>(quoted.Arguments[3]).Value);
+    }
+
+    [Fact]
+    public void ArrayLambdaReferenceExpression_Equality_IncludesNullability()
+    {
+        using var ctx = new GeneratorTestDbContext();
+        var typeMappingSource = ctx.GetService<IRelationalTypeMappingSource>();
+        var stringMapping = typeMappingSource.FindMapping(typeof(string))!;
+
+        var nonNullable = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping);
+        var nullable = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping, isNullable: true);
+        var nullableCopy = new ClickHouseArrayLambdaReferenceExpression("x", typeof(string), stringMapping, isNullable: true);
+
+        Assert.False(nonNullable.IsNullable);
+        Assert.True(nullable.IsNullable);
+        Assert.NotEqual(nonNullable, nullable);
+        Assert.Equal(nullableCopy, nullable);
+        Assert.Equal(nullableCopy.GetHashCode(), nullable.GetHashCode());
     }
 
     [Fact]

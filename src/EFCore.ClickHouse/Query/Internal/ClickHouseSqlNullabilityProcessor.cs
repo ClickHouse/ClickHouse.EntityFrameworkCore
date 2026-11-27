@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
+using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Query;
@@ -95,15 +96,15 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         //  - The item can be null, or its store type is Nullable. The expansion adds the null checks that
         //    give .NET semantics. ClickHouseArrayParameterTypeMapping also removes null elements, which is
         //    correct only for an item that is never null. The store type check is for an item that this
-        //    processor reports as never null although it can be NULL, for example the element of an
-        //    Array(Nullable(T)) column in an array lambda.
+        //    processor reports as never null although the store type can hold NULL, for example a column
+        //    with a Nullable(T) store type in a branch that has an `IS NOT NULL` check on it.
         //  - There is no element mapping, so there is no store type for Array(T).
         //  - The element has a value converter, for example an enum stored as Enum8. The driver gets the
         //    collection before conversion and cannot format it.
         //  - The driver does not format the element type correctly inside an array.
         if (itemNullable
             || elementMapping is null
-            || IsNullableStoreType(elementMapping.StoreType)
+            || ClickHouseTypeMappingSource.IsNullableStoreType(elementMapping.StoreType)
             || elementMapping.Converter is not null
             || !ArrayParameterElementTypes.Contains(Nullable.GetUnderlyingType(elementMapping.ClrType) ?? elementMapping.ClrType))
         {
@@ -122,10 +123,6 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
         // `item IN {p:Array(T)}`.
         return inExpression.Update(alignedItem, arrayParameter);
     }
-
-    private static bool IsNullableStoreType(string storeType)
-        => storeType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase)
-            || storeType.StartsWith("LowCardinality(Nullable(", StringComparison.OrdinalIgnoreCase);
 
     protected override SqlExpression VisitSqlBinary(
         SqlBinaryExpression sqlBinaryExpression,
@@ -299,15 +296,15 @@ public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
     }
 
     /// <summary>
-    /// The lambda parameter inside an array lambda iterates over array elements; it has no
-    /// distinct "row null" of its own. Element nullability is captured by the enclosing array
-    /// column's type mapping, not at the parameter reference site.
+    /// The lambda parameter inside an array lambda is one array element. It can be NULL when the element
+    /// store type is <c>Nullable(T)</c> or <c>LowCardinality(Nullable(T))</c>, which the translator writes
+    /// to <see cref="ClickHouseArrayLambdaReferenceExpression.IsNullable"/>.
     /// </summary>
     private static SqlExpression VisitArrayLambdaReference(
         ClickHouseArrayLambdaReferenceExpression referenceExpression,
         out bool nullable)
     {
-        nullable = false;
+        nullable = referenceExpression.IsNullable;
         return referenceExpression;
     }
 

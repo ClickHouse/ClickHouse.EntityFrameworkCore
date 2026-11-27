@@ -472,7 +472,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         if (inner is null)
             return null;
 
-        if (!HasNullableElementWrapper(innerStoreType))
+        if (!IsNullableStoreType(innerStoreType))
             return inner;
 
         // Reference types and already-nullable mappings pass through unchanged — the runtime
@@ -489,7 +489,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
     /// <c>Nullable(...)</c>. LowCardinality is a storage-only wrapper, but composes with
     /// Nullable (<c>LowCardinality(Nullable(T))</c>) so we strip it to check the inner.
     /// </summary>
-    private static bool HasNullableElementWrapper(string storeType)
+    public static bool IsNullableStoreType(string storeType)
     {
         var s = storeType.AsSpan().TrimStart();
         while (true)

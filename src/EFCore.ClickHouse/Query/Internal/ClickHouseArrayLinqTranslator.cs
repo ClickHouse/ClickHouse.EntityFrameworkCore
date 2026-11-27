@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
 using ClickHouse.EntityFrameworkCore.Query.ExpressionTranslators.Internal;
+using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
@@ -584,10 +585,17 @@ public class ClickHouseArrayLinqTranslator
         RelationalTypeMapping elementMapping)
     {
         var parameter = lambda.Parameters[0];
+
+        // An element of Array(Nullable(T)) or Array(LowCardinality(Nullable(T))) can be NULL. The
+        // nullability processor then adds the null checks that give .NET semantics, for example
+        // `x <> 'a' OR x IS NULL` for `x != "a"`.
+        var isNullable = (!parameter.Type.IsValueType || Nullable.GetUnderlyingType(parameter.Type) is not null)
+            && ClickHouseTypeMappingSource.IsNullableStoreType(elementMapping.StoreType);
         var parameterRef = new ClickHouseArrayLambdaReferenceExpression(
             parameter.Name ?? "x",
             parameter.Type,
-            elementMapping);
+            elementMapping,
+            isNullable);
 
         var substitutedBody = new ParameterReplacingVisitor(parameter, parameterRef).Visit(lambda.Body);
         if (_visit(substitutedBody!) is not SqlExpression bodySql)
