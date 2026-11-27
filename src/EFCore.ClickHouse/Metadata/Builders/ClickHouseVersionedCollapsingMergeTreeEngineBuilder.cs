@@ -49,4 +49,28 @@ public class ClickHouseVersionedCollapsingMergeTreeEngineBuilder : ClickHouseEng
         base.WithSetting(key, value);
         return this;
     }
+
+    /// <summary>
+    /// Uses the <c>ReplicatedVersionedCollapsingMergeTree</c> engine with the ZooKeeper path and replica name from the server
+    /// settings <c>default_replica_path</c> and <c>default_replica_name</c>.
+    /// </summary>
+    /// <remarks>
+    /// The default path contains <c>{uuid}</c>. ClickHouse accepts it only in an <c>ON CLUSTER</c> query
+    /// (see <c>UseCluster</c>) or in a database with the <c>Replicated</c> engine.
+    /// </remarks>
+    public ClickHouseVersionedCollapsingMergeTreeEngineBuilder WithReplication()
+    {
+        SetReplication();
+        return this;
+    }
+
+    /// <summary>
+    /// Uses the <c>ReplicatedVersionedCollapsingMergeTree</c> engine with an explicit ZooKeeper (ClickHouse Keeper) path and replica name,
+    /// for example <c>"/clickhouse/tables/{shard}/{database}/{table}"</c> and <c>"{replica}"</c>.
+    /// </summary>
+    public ClickHouseVersionedCollapsingMergeTreeEngineBuilder WithReplication(string zooKeeperPath, string replicaName)
+    {
+        SetReplication(zooKeeperPath, replicaName);
+        return this;
+    }
 }

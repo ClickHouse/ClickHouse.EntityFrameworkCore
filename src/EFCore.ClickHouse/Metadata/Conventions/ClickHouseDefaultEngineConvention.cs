@@ -31,7 +31,7 @@ public class ClickHouseDefaultEngineConvention : IModelFinalizingConvention
 
             // Set ORDER BY from primary key if none configured and engine is MergeTree-family
             var engine = entityType.GetEngine();
-            if (entityType.GetOrderBy() is null && IsMergeTreeFamily(engine))
+            if (entityType.GetOrderBy() is null && ClickHouseEngines.IsMergeTreeFamily(engine))
             {
                 var primaryKey = entityType.FindPrimaryKey();
                 if (primaryKey is not null)
@@ -48,13 +48,4 @@ public class ClickHouseDefaultEngineConvention : IModelFinalizingConvention
             }
         }
     }
-
-    private static bool IsMergeTreeFamily(string? engine)
-        => engine is ClickHouseAnnotationNames.MergeTree
-            or ClickHouseAnnotationNames.ReplacingMergeTree
-            or ClickHouseAnnotationNames.SummingMergeTree
-            or ClickHouseAnnotationNames.AggregatingMergeTree
-            or ClickHouseAnnotationNames.CollapsingMergeTree
-            or ClickHouseAnnotationNames.VersionedCollapsingMergeTree
-            or ClickHouseAnnotationNames.GraphiteMergeTree;
 }

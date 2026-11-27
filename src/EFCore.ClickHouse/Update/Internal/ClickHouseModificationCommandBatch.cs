@@ -79,6 +79,7 @@ public class ClickHouseModificationCommandBatch : ModificationCommandBatch
 
         var clickHouseConnection = (IClickHouseRelationalConnection)connection;
         var client = clickHouseConnection.GetClickHouseClient();
+        var insertOptions = clickHouseConnection.CreateInsertOptions(client);
 
         // Group commands by table name and write-column set for correct row alignment
         var groups = _commands.GroupBy(c => (
@@ -106,7 +107,7 @@ public class ClickHouseModificationCommandBatch : ModificationCommandBatch
                 return row;
             });
 
-            await client.InsertBinaryAsync(tableName, columns, rows, cancellationToken: cancellationToken);
+            await client.InsertBinaryAsync(tableName, columns, rows, insertOptions, cancellationToken);
         }
     }
 }

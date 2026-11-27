@@ -1,4 +1,5 @@
 using ClickHouse.EntityFrameworkCore.Extensions;
+using ClickHouse.EntityFrameworkCore.Infrastructure.Internal;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -48,9 +49,38 @@ public class ClickHouseHistoryRepository : HistoryRepository
     {
         history.Property<string>(h => h.MigrationId).HasMaxLength(150);
         history.Property<string>(h => h.ProductVersion).HasMaxLength(32).IsRequired();
-        history.ToTable(TableName, table => table
-            .HasMergeTreeEngine()
-            .WithOrderBy("MigrationId"));
+        history.ToTable(TableName, table =>
+        {
+            var engine = table
+                .HasMergeTreeEngine()
+                .WithOrderBy("MigrationId");
+
+            // A history table that is not replicated has different rows on each host. Then a migration
+            // that ran through one host looks unapplied on the other hosts.
+            var options = Dependencies.Options.FindExtension<ClickHouseOptionsExtension>();
+            if (options?.ClusterName is not null)
+            {
+                // ON CLUSTER applies the migrations to all shards, so all hosts share one history table.
+                // The default path contains {shard}, which gives each shard its own history.
+                // {shard}-{replica} keeps the replica names unique when shards reuse the same replica names.
+                engine.WithReplication("/clickhouse/tables/{uuid}", "{shard}-{replica}");
+            }
+            else if (options?.ReplicatedMigrationsHistoryTable == true)
+            {
+                // A Replicated database refuses an explicit path and replica name.
+                engine.WithReplication();
+            }
+            else
+            {
+                return;
+            }
+
+            // A replicated table drops an insert that is equal to a recent insert. When a migration is
+            // reverted and then applied again, its second history row is equal to the first one.
+            engine
+                .WithSetting("replicated_deduplication_window", "0")
+                .WithSetting("replicated_deduplication_window_for_async_inserts", "0");
+        });
     }
 
     public override LockReleaseBehavior LockReleaseBehavior => LockReleaseBehavior.Connection;

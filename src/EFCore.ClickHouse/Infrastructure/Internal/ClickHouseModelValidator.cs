@@ -62,6 +62,8 @@ public class ClickHouseModelValidator : RelationalModelValidator
             if (engine is null)
                 continue;
 
+            ValidateReplication(entityType, engine);
+
             // Log engines should not have ORDER BY/PARTITION BY
             if (engine is ClickHouseAnnotationNames.TinyLog
                 or ClickHouseAnnotationNames.StripeLog
@@ -121,6 +123,23 @@ public class ClickHouseModelValidator : RelationalModelValidator
                     }
                 }
             }
+        }
+    }
+
+    private static void ValidateReplication(IEntityType entityType, string engine)
+    {
+        if (entityType.IsReplicated() && !ClickHouseEngines.IsMergeTreeFamily(engine))
+        {
+            throw new InvalidOperationException(
+                $"Entity type '{entityType.DisplayName()}' is replicated, but the '{engine}' engine has no " +
+                "Replicated variant. Only MergeTree family engines can be replicated.");
+        }
+
+        if ((entityType.GetReplicatedZooKeeperPath() is null) != (entityType.GetReplicatedReplicaName() is null))
+        {
+            throw new InvalidOperationException(
+                $"Entity type '{entityType.DisplayName()}' sets only one of the ZooKeeper path and the replica name " +
+                "of its Replicated engine. Set both, or set neither to use the server defaults.");
         }
     }
 

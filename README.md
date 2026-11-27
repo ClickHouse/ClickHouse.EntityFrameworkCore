@@ -90,6 +90,26 @@ This provider is in active development. It supports **LINQ queries**, **inserts*
 
 A `Contains` filter over a captured collection (`Where(x => ids.Contains(x.Id))`) is sent as a single native `Array(T)` parameter — `has({ids:Array(Int64)}, …)` — rather than one parameter per element, so large `IN`-style filters don't hit the parameter-count ceiling. Use `EF.Constant(ids)` to inline the values or `EF.MultipleParameters(ids)` to force one parameter per element for a specific query.
 
+### Joins
+
+`Join` (INNER JOIN), `GroupJoin` + `SelectMany` + `DefaultIfEmpty` (LEFT JOIN), `SelectMany` (CROSS JOIN), and self-joins. Joining a local sequence (`int[]`, `string[]`, `byte[]`) also works, as does `Contains` against a local collection (`T[]`, `List<T>`, and the `ICollection`/`IList`/`IReadOnlyList` interfaces), which becomes an `IN` predicate.
+
+ClickHouse returns column defaults (`0`, `""`) instead of `NULL` for unmatched LEFT JOIN rows unless `join_use_nulls=1` is set. The provider adds this setting to each statement that it sends, so LEFT JOIN gives the .NET semantics you expect. It does not change the settings of a `ClickHouseConnection` or `ClickHouseDataSource` that you give to `UseClickHouse`, so a command that you create yourself on that connection does not get the setting. If the connection settings already set `join_use_nulls`, the provider keeps that value. To opt out, use `DisableJoinNullSemantics()`:
+
+```csharp
+optionsBuilder.UseClickHouse("Host=localhost", o => o.DisableJoinNullSemantics());
+```
+
+### Subqueries
+
+`Contains` over an `IQueryable` (`IN (SELECT …)`), `Any` (`EXISTS`), `All`, correlated scalar subqueries in a projection, and subqueries in `FROM`.
+
+ClickHouse returns `NULL` from a scalar subquery that matches no rows, where standard SQL `COUNT` returns `0`. The provider wraps `COUNT` and `SUM` scalar subqueries in `ifNull(…, 0)` when the target CLR type is a non-nullable value type, so a customer with no orders projects `0` rather than throwing.
+
+### Set Operations
+
+`Concat` (`UNION ALL`), `Union` (`UNION DISTINCT`), `Intersect`, and `Except`, including chained and nested combinations. ClickHouse leaves `union_default_mode` empty and rejects a bare `UNION`, so the provider always emits an explicit `ALL` or `DISTINCT` modifier.
+
 ### GROUP BY & Aggregates
 
 `GroupBy` with `Count`, `LongCount`, `Sum`, `Average`, `Min`, `Max` — including `HAVING` (`.Where()` after `.GroupBy()`), multiple aggregates in a single projection, and `OrderBy` on aggregate results.
@@ -101,6 +121,33 @@ A `Contains` filter over a captured collection (`Where(x => ids.Contains(x.Id))`
 ### Math Functions
 
 `Math.Abs`, `Floor`, `Ceiling`, `Round`, `Truncate`, `Pow`, `Sqrt`, `Cbrt`, `Exp`, `Log`, `Log2`, `Log10`, `Sign`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Atan2`, `RadiansToDegrees`, `DegreesToRadians`, `IsNaN`, `IsInfinity`, `IsFinite`, `IsPositiveInfinity`, `IsNegativeInfinity` — with both `Math` and `MathF` overloads.
+
+### Date/Time Functions
+
+The ClickHouse `toStartOf*` family is exposed through `EF.Functions`, so you can bucket and truncate timestamps directly in queries, including in `GROUP BY`:
+
+`ToStartOfYear`, `ToStartOfQuarter`, `ToStartOfMonth`, `ToStartOfWeek` (with an optional ClickHouse week `mode`), `ToStartOfDay`, `ToStartOfHour`, `ToStartOfMinute`, `ToStartOfSecond`, `ToStartOfFiveMinutes`, `ToStartOfTenMinutes`, `ToStartOfFifteenMinutes`, and the general `ToStartOfInterval(source, value, unit)`.
+
+```csharp
+// Truncate to the start of the month
+var monthly = await ctx.Events
+    .Select(e => EF.Functions.ToStartOfMonth(e.Timestamp))
+    .ToListAsync();
+
+// Bucket into 15-minute intervals and count per bucket
+var buckets = await ctx.Events
+    .GroupBy(e => EF.Functions.ToStartOfInterval(e.Timestamp, 15, ClickHouseInterval.Minute))
+    .Select(g => new { Bucket = g.Key, Count = g.Count() })
+    .ToListAsync();
+```
+
+`ToStartOfInterval` takes a `ClickHouseInterval` unit (`Second`, `Minute`, `Hour`, `Day`, `Week`, `Month`, `Quarter`, `Year`) — from the `ClickHouse.EntityFrameworkCore.Metadata` namespace — and emits `toStartOfInterval(source, toInterval<unit>(value))`. The unit must be an inline enum constant. The interval size and optional `ToStartOfWeek` mode may be literals or captured query parameters, but cannot depend on values from the current row.
+
+Input and return types follow ClickHouse. The calendar buckets (`ToStartOfYear`/`Quarter`/`Month`/`Week`) return `Date`; `ToStartOfDay` and the hour/minute buckets return `DateTime`; `ToStartOfSecond` returns `DateTime64`. They all accept `DateTime` and `DateTime64` columns, and the plain truncation functions also accept `DateOnly` (Date/Date32). `ToStartOfInterval` is the exception: older ClickHouse rejects a `DateOnly` (Date/Date32) source with `Illegal type Date32 of 1st argument` while recent versions accept it. Prefer a `DateTime`/`DateTime64` column for interval bucketing.
+
+> **Date range:** those default result types (`Date`, `DateTime`) only span 1970–2149/2106, so ClickHouse **narrows values outside that window** — a pre-1970 date is clamped to the epoch (calendar buckets) or wraps around (sub-day/interval buckets). From ClickHouse 26.11, `ToStartOfInterval` on a `DateTime64` column returns `DateTime64` and keeps the value. To preserve the full range, enable [`enable_extended_results_for_datetime_functions`](https://clickhouse.com/docs/operations/settings/settings#enable_extended_results_for_datetime_functions) for your session — e.g. add `set_enable_extended_results_for_datetime_functions=1` to the connection string — which makes ClickHouse return `Date32`/`DateTime64` instead.
+
+`ToStartOfWeek` defaults to ClickHouse week mode `0` (Sunday-based); pass a `mode` to change it.
 
 ### INSERT via SaveChanges
 
@@ -184,13 +231,41 @@ public class Event
 entity.Property(e => e.Payload).HasColumnType("Json");
 ```
 
+#### Querying JSON paths
+
+Indexing a `JsonNode` property translates to ClickHouse's native dot and subscript syntax, so filters and projections run on the server:
+
+```csharp
+// WHERE CAST(`e`.`payload`.`age` AS Int32) > 20
+//   AND CAST(`e`.`payload`.`username` AS String) = 'alice_dev'
+var users = await ctx.Events
+    .Where(e => (int)e.Payload!["age"]! > 20
+             && e.Payload!["username"]!.GetValue<string>() == "alice_dev")
+    .ToListAsync();
+```
+
+Paths nest to any depth (`e.Payload!["meta"]!["runtime"]!["cpu_limit"]!`), and array subscripts work too — the provider converts the 0-based .NET index to ClickHouse's 1-based one, so `["orders"]![0]` emits `.orders[1]`.
+
+Both `.GetValue<T>()` and an explicit cast emit a `CAST(… AS <storeType>)`, with the store type taken from the target CLR type. Keys and array indices must be compile-time constants. A variable key does not translate: in a `Where` it throws, and it can only be client-evaluated in a final `Select`.
+
+#### `simpleJSON*` functions
+
+For JSON held in a **`String`** column (not the native `Json` type), use the `EF.Functions` helpers, which map to ClickHouse's `simpleJSON*` family:
+
+```csharp
+var clicks = await ctx.Logs
+    .Where(l => EF.Functions.SimpleJsonExtractString(l.RawPayload, "action") == "click")
+    .ToListAsync();
+```
+
+`SimpleJsonExtractBool`, `SimpleJsonExtractFloat`, `SimpleJsonExtractInt`, `SimpleJsonExtractRaw`, `SimpleJsonExtractString`, `SimpleJsonExtractUInt`, `SimpleJsonHas`.
+
 **Limitations:**
 
-- **No JSON path translation** — `entity.Payload["name"]` in LINQ does not translate to ClickHouse's `data.name` SQL syntax. Filter on non-JSON columns or load entities and inspect JSON in memory.
 - **No owned entity mapping** — `.ToJson()` / `StructuralJsonTypeMapping` is not supported. JSON columns are opaque `JsonNode` or `string` values.
 - **`JsonElement` / `JsonDocument` not supported** — only `JsonNode` and `string` CLR types are mapped.
 - **NULL semantics** — ClickHouse's JSON type returns `{}` (empty object) for NULL values rather than SQL NULL. A row inserted with `Data = null` will read back as an empty `JsonNode`, not `null`.
-- **Integer precision** — ClickHouse JSON stores all integers as `Int64` unless the path is typed otherwise. When reading via `JsonNode`, use `GetValue<long>()` rather than `GetValue<int>()`.
+- **Integer precision** — ClickHouse JSON stores all integers as `Int64` unless the path is typed otherwise. When inspecting a materialized `JsonNode` in memory, use `GetValue<long>()` rather than `GetValue<int>()`. This does not apply to a translated path query, where `GetValue<int>()` emits an explicit `CAST(… AS Int32)` that the server applies.
 
 ### Table Engine Configuration
 
@@ -225,6 +300,66 @@ modelBuilder.Entity<SensorReading>(b =>
 
 **Default behavior:** If no engine is configured, the provider defaults to `MergeTree` with the EF primary key as `ORDER BY`.
 
+### Replication and Clusters
+
+Each MergeTree family engine builder has `.WithReplication()`. It changes the engine to its Replicated variant, for example `ReplacingMergeTree` to `ReplicatedReplacingMergeTree`. Rows that you write to one replica are then copied to the other replicas of the shard.
+
+```csharp
+modelBuilder.Entity<SensorReading>(b =>
+{
+    b.ToTable("sensor_readings", t => t
+        .HasReplacingMergeTreeEngine("Version")
+        .WithOrderBy("Id")
+        .WithReplication());
+});
+```
+
+- `.WithReplication()` gives ``ReplicatedReplacingMergeTree(`Version`)``. ClickHouse then uses the server settings `default_replica_path` (by default `/clickhouse/tables/{uuid}/{shard}`) and `default_replica_name` (by default `{replica}`). ClickHouse accepts `{uuid}` only in an `ON CLUSTER` query or in a database with the `Replicated` engine. Thus, with the default settings, use `.WithReplication()` without arguments only together with `UseCluster` (see below) or in a `Replicated` database.
+- `.WithReplication("/clickhouse/tables/{shard}/{database}/{table}", "{replica}")` gives ``ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}', `Version`)``. Set both values or neither.
+
+If you drop a table and then create it again with the same fixed path, the create fails with `REPLICA_ALREADY_EXISTS` until ClickHouse removes the old replica. By default, ClickHouse waits 8 minutes (`database_atomic_delay_before_drop_table_sec`) before it removes it. A path with `{uuid}` does not have this problem.
+
+A Replicated table ignores an insert that has the same rows as a recent insert into the table (`replicated_deduplication_window`, by default the last 10,000 inserts). Thus, if two `SaveChanges` calls insert the same rows, the table keeps only the rows of the first call. A plain MergeTree table keeps both. To keep both in a Replicated table, add `.WithSetting("replicated_deduplication_window", "0")`.
+
+A Replicated engine copies rows, but it does not create the table on the other replicas. Each statement that creates, changes or drops a table must run on all hosts. There are two ways to do this:
+
+- **`ON CLUSTER`.** Use `UseCluster`. The provider then adds `ON CLUSTER` to the DDL that migrations, `EnsureCreated()` and `EnsureDeleted()` generate: `CREATE`/`DROP DATABASE`, `CREATE`/`DROP`/`RENAME TABLE`, and each `ALTER TABLE` (columns, data-skipping indices and check constraints).
+
+  ```csharp
+  optionsBuilder.UseClickHouse(connectionString, o => o.UseCluster("my_cluster"));
+  ```
+
+  The cluster must be in the `remote_servers` server setting. You can also use a macro, for example `UseCluster("{cluster}")`. If a host is not available, ClickHouse waits up to `distributed_ddl_task_timeout` (180 seconds by default) and the migration then fails.
+- **A database with the `Replicated` engine.** ClickHouse replicates the DDL itself and refuses `ON CLUSTER`, so do not use `UseCluster`. Use `UseReplicatedMigrationsHistoryTable()` instead. In such a database, ClickHouse also refuses an explicit path and replica name, so use `.WithReplication()` without arguments.
+
+The provider writes the applied migrations to the `__EFMigrationsHistory` table. By default, this table is a `MergeTree` table on the server of the connection, so each host has its own history. The two options change this:
+
+- With `UseCluster`, the history table is `ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{shard}-{replica}')`. Its path has no `{shard}`, so all hosts of all shards share one history.
+- With `UseReplicatedMigrationsHistoryTable()`, the history table is `ReplicatedMergeTree()` with the server default path and replica name. In a `Replicated` database, ClickHouse refuses a replicated table that the shards share, so each shard has its own history. If the database has more than one shard, run the migrations through the hosts of one shard only. Through a host of another shard, the applied migrations look pending, and the provider tries to apply them again.
+
+In both cases, the provider turns off insert deduplication for the history table, so a migration that you revert and apply again gets its history row back. A host sees a migration as applied when the history row has replicated to it. The provider has no migration lock, so run the migrations from one place at a time.
+
+The options change only how the provider creates the history table. If the table already exists, the provider uses it as it is. To change an existing `MergeTree` history table to a replicated one before you add `UseCluster`, run these statements in the database, on the host that has the full history:
+
+```sql
+CREATE TABLE `__EFMigrationsHistory_new` ON CLUSTER 'my_cluster'
+(
+    `MigrationId` String,
+    `ProductVersion` String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{shard}-{replica}')
+ORDER BY (`MigrationId`)
+SETTINGS replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0;
+
+INSERT INTO `__EFMigrationsHistory_new` SELECT `MigrationId`, `ProductVersion` FROM `__EFMigrationsHistory`;
+DROP TABLE IF EXISTS `__EFMigrationsHistory` ON CLUSTER 'my_cluster';
+RENAME TABLE `__EFMigrationsHistory_new` TO `__EFMigrationsHistory` ON CLUSTER 'my_cluster';
+```
+
+To use other settings for the history table, derive from `ClickHouseHistoryRepository`, override `ConfigureTable`, and register your class with `ReplaceService<IHistoryRepository, YourHistoryRepository>()`.
+
+The provider does not create `Distributed` tables. On ClickHouse Cloud you do not need these settings: ClickHouse Cloud replicates DDL itself and stores MergeTree family tables as `SharedMergeTree`.
+
 ### Migrations
 
 The provider supports `dotnet ef migrations` for creating and applying migrations:
@@ -237,13 +372,14 @@ dotnet ef database update
 `EnsureCreated()` / `EnsureDeleted()` also work for quick setup without migrations.
 
 **Supported migration operations:**
-- CREATE TABLE with full ENGINE clause (all engine types, ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS, codecs, comments, data-skipping indices)
+- CREATE TABLE with full ENGINE clause (all engine types and their Replicated variants, ORDER BY, PARTITION BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS, codecs, comments, data-skipping indices)
 - ADD COLUMN, DROP COLUMN, MODIFY COLUMN, RENAME COLUMN, RENAME TABLE
 - DROP TABLE, CREATE/DROP INDEX (data-skipping)
 - Custom `ClickHouseCreateDatabaseOperation` / `ClickHouseDropDatabaseOperation`
+- `ON CLUSTER` on all of the above and on check constraints with `UseCluster` (see [Replication and Clusters](#replication-and-clusters))
 
 **ClickHouse limitations reflected in migrations:**
-- ALTER TABLE cannot change engine, ORDER BY, PARTITION BY, or other structural metadata — the provider throws `NotSupportedException` with a clear message
+- ALTER TABLE cannot change engine, replication, ORDER BY, PARTITION BY, or other structural metadata. The provider throws `NotSupportedException` with a clear message
 - Foreign keys, unique constraints, and sequences throw `NotSupportedException`
 - Primary key add/drop is a no-op (ClickHouse PK is structural, not a constraint)
 - Idempotent scripts (`--idempotent`) are not supported (ClickHouse has no conditional SQL blocks)
@@ -252,9 +388,11 @@ dotnet ef database update
 ### Not Yet Implemented
 
 - UPDATE / DELETE (ClickHouse mutations are async, not OLTP-compatible)
-- JOINs, subqueries, set operations
+- Server-generated values — identity columns, `RETURNING`, computed defaults read back after insert
 - Reverse engineering / scaffolding (`dotnet ef dbcontext scaffold`)
-- JSON path query translation
+- Owned entities mapped to JSON (`.ToJson()`)
+- Queries that EF Core lowers to `CROSS APPLY` / `OUTER APPLY`, which ClickHouse has no equivalent for. This covers correlated `SelectMany` that selects the outer element or entity, `Take` inside a collection projection, and correlated collections over a `UNION` source.
+- Set operations after a client projection (for example `Union(...).FirstOrDefault()` on a client-evaluated shape)
 
 ## Building
 

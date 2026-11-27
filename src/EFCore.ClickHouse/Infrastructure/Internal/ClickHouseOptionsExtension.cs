@@ -12,13 +12,25 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     public DbDataSource? DataSource { get; private set; }
 
     /// <summary>
-    /// When true, the provider will NOT inject <c>set_join_use_nulls=1</c> into connection
-    /// strings. Use this when the ClickHouse server/profile forbids changing that setting
+    /// When true, the provider does not add <c>join_use_nulls=1</c> to the statements that it
+    /// sends. Use this when the ClickHouse server/profile forbids changing that setting
     /// (e.g. <c>readonly=1</c> profiles that reject any SET). Disabling means LEFT JOIN
     /// returns column defaults (0, "") for non-matching rows instead of NULL; EF Core's
     /// null-based navigation detection will not work correctly in that mode.
     /// </summary>
     public bool JoinNullSemanticsDisabled { get; private set; }
+
+    /// <summary>
+    /// The cluster for <c>ON CLUSTER</c> in the DDL that the provider generates, or <see langword="null"/>
+    /// to run DDL only on the server of the connection.
+    /// </summary>
+    public string? ClusterName { get; private set; }
+
+    /// <summary>
+    /// When true, the migrations history table uses <c>ReplicatedMergeTree</c> with the server default path and
+    /// replica name. When <see cref="ClusterName"/> is set, the history table is replicated with a path for all shards.
+    /// </summary>
+    public bool ReplicatedMigrationsHistoryTable { get; private set; }
 
     public ClickHouseOptionsExtension()
     {
@@ -29,6 +41,8 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     {
         DataSource = copyFrom.DataSource;
         JoinNullSemanticsDisabled = copyFrom.JoinNullSemanticsDisabled;
+        ClusterName = copyFrom.ClusterName;
+        ReplicatedMigrationsHistoryTable = copyFrom.ReplicatedMigrationsHistoryTable;
     }
 
     protected override RelationalOptionsExtension Clone()
@@ -45,6 +59,20 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     {
         var clone = (ClickHouseOptionsExtension)Clone();
         clone.JoinNullSemanticsDisabled = disabled;
+        return clone;
+    }
+
+    public ClickHouseOptionsExtension WithClusterName(string? clusterName)
+    {
+        var clone = (ClickHouseOptionsExtension)Clone();
+        clone.ClusterName = clusterName;
+        return clone;
+    }
+
+    public ClickHouseOptionsExtension WithReplicatedMigrationsHistoryTable(bool replicated)
+    {
+        var clone = (ClickHouseOptionsExtension)Clone();
+        clone.ReplicatedMigrationsHistoryTable = replicated;
         return clone;
     }
 

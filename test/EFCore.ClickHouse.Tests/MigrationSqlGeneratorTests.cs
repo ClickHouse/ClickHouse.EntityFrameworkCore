@@ -587,7 +587,25 @@ public class MigrationSqlGeneratorTests
             op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
         });
 
-        Assert.Contains("ENGINE = SummingMergeTree(`Amount`, `Count`)", sql);
+        // Multiple sum columns must be wrapped in a tuple. `SummingMergeTree(`Amount`, `Count`)`
+        // is invalid DDL — ClickHouse rejects it with NUMBER_OF_ARGUMENTS_DOESNT_MATCH.
+        Assert.Contains("ENGINE = SummingMergeTree((`Amount`, `Count`))", sql);
+    }
+
+    [Fact]
+    public void SummingMergeTree_single_column()
+    {
+        var sql = GenerateCreateTable(op =>
+        {
+            op.AddAnnotation(ClickHouseAnnotationNames.Engine, ClickHouseAnnotationNames.SummingMergeTree);
+            op.AddAnnotation(ClickHouseAnnotationNames.SummingMergeTreeColumns, new[] { "Amount" });
+            op.AddAnnotation(ClickHouseAnnotationNames.OrderBy, new[] { "Id" });
+            op.Columns.Add(new AddColumnOperation { Name = "Id", ColumnType = "Int64", ClrType = typeof(long) });
+        });
+
+        // A single sum column is passed directly, without tuple wrapping.
+        Assert.Contains("ENGINE = SummingMergeTree(`Amount`)", sql);
+        Assert.DoesNotContain("SummingMergeTree((", sql);
     }
 
     [Fact]
@@ -961,6 +979,19 @@ public class MigrationSqlGeneratorTests
         var sql = string.Join("\n", generator.Generate(operations).Select(c => c.CommandText));
         Assert.Contains("`Path` LowCardinality(String)", sql);
         Assert.DoesNotContain("Nullable(LowCardinality", sql);
+    }
+
+    // A migration script joins the commands with only a line break, so each statement needs its terminator.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("test_cluster")]
+    public void Every_DDL_statement_ends_with_the_statement_terminator(string? clusterName)
+    {
+        var statements = ReplicationSqlGenerationTests.GenerateStatements(
+            clusterName, ReplicationSqlGenerationTests.DdlOperations());
+
+        Assert.Equal(14, statements.Count);
+        Assert.All(statements, s => Assert.EndsWith(";", s.TrimEnd()));
     }
 
     private static void AssertColumnTypePreserved<TContext>(string expectedColumnType)
