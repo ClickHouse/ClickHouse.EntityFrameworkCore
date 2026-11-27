@@ -1,5 +1,6 @@
 using System.Reflection;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
+using ClickHouse.EntityFrameworkCore.Storage.Internal;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -166,13 +167,13 @@ public class ClickHouseArrayMethodTranslator : IMethodCallTranslator, IMemberTra
     /// indices rather than raising. This is a documented divergence from .NET LINQ's
     /// <c>InvalidOperationException</c>/<c>ArgumentOutOfRangeException</c> on empty/OOB.
     /// For <c>Array(Nullable(T))</c> the element type's default IS NULL, so the result is
-    /// declared nullable when the element store type carries a <c>Nullable(...)</c> wrapper.
+    /// declared nullable when the element store type is <c>Nullable(T)</c> or
+    /// <c>LowCardinality(Nullable(T))</c>.
     /// </remarks>
     public SqlExpression TranslateElementAt(SqlExpression source, SqlExpression oneBasedIndex)
     {
         var arrayTypeMapping = (ClickHouseArrayTypeMapping)source.TypeMapping!;
-        var elementIsNullable = arrayTypeMapping.ElementMapping.StoreType
-            .StartsWith("Nullable(", StringComparison.Ordinal);
+        var elementIsNullable = ClickHouseTypeMappingSource.IsNullableStoreType(arrayTypeMapping.ElementMapping.StoreType);
         return _sqlExpressionFactory.Function(
             "arrayElement",
             [source, oneBasedIndex],

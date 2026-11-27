@@ -205,6 +205,23 @@ public class ArrayLambdaNullableElementTests : IClassFixture<ArrayLambdaNullsFix
         Assert.DoesNotContain("NULL", sql);
     }
 
+    [Fact]
+    public async Task Any_IsNullOrEmpty_MatchesNullElements()
+    {
+        var sql = await AssertSameRowsAsDotNet(e => e.NTags.Any(t => string.IsNullOrEmpty(t)), [1, 4]);
+
+        Assert.Contains("p IS NULL", sql);
+    }
+
+    [Fact]
+    public async Task Any_AfterSkip_KeepsElementNullability()
+    {
+        // arraySlice keeps the element mapping of the source array. Row 1 ['a', NULL] → [NULL].
+        var sql = await AssertSameRowsAsDotNet(e => e.NTags.Skip(1).Any(t => t != "c"), [1]);
+
+        Assert.Contains("arrayExists(p -> p <> 'c' OR p IS NULL, arraySlice(`a`.`ntags`, ", sql);
+    }
+
     // ─── Count(predicate) → arrayCount ──────────────────────────────
 
     [Fact]
@@ -283,6 +300,13 @@ public class ArrayLambdaNullableElementTests : IClassFixture<ArrayLambdaNullsFix
         Assert.Contains("has(arrayMap(p -> COALESCE(p, 0), `a`.`nints`), 0)", sql);
     }
 
+    [Fact]
+    public async Task Select_Concat_Contains_MatchesNullElements()
+    {
+        // In .NET, null + "x" is "x".
+        await AssertSameRowsAsDotNet(e => e.NTags.Select(t => t + "x").Contains("x"), [1, 4]);
+    }
+
     // ─── OrderBy(key) → arraySort(lambda, arr) ──────────────────────
 
     [Fact]
@@ -302,6 +326,18 @@ public class ArrayLambdaNullableElementTests : IClassFixture<ArrayLambdaNullsFix
 
         Assert.Equal([null, 2, null, null, 1], expected);
         Assert.Equal(expected, actual);
+    }
+
+    // ─── FirstOrDefault() → arrayElement(arr, 1) ────────────────────
+
+    [Fact]
+    public async Task FirstOrDefault_LowCardinalityNullable_EqualsNull_MatchesNullAndEmpty()
+    {
+        // Row 3 is empty: arrayElement gives the default of the element type, which is NULL for a
+        // Nullable element. Row 4 starts with NULL.
+        var sql = await AssertSameRowsAsDotNet(e => e.LcNTags.FirstOrDefault() == null, [3, 4]);
+
+        Assert.Contains("arrayElement(`a`.`lc_ntags`, 1) IS NULL", sql);
     }
 
     // ─── helpers ────────────────────────────────────────────────────
