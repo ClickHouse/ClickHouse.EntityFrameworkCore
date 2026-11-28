@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using ClickHouse.Driver.Numerics;
 using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
@@ -143,6 +144,12 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
     // Matches a single-quoted string like 'UTC' or 'Asia/Tokyo'
     private static readonly Regex TimezoneRegex = new(@"'([^']+)'", RegexOptions.Compiled);
+
+    // One wrapper for each inner mapping. EF Core caches mappings by a key that holds the element
+    // mapping by reference, so a new wrapper for each FindMapping(IElementType) call adds new
+    // cache entries each time a model is built.
+    private readonly ConcurrentDictionary<RelationalTypeMapping, RelationalTypeMapping> _nullableElementMappings =
+        new(ReferenceEqualityComparer.Instance);
 
     public ClickHouseTypeMappingSource(
         TypeMappingSourceDependencies dependencies,
@@ -300,6 +307,28 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         return mapping is null ? null : PreserveExplicitStoreType(mapping, mappingInfo);
     }
 
+    /// <summary>
+    /// Resolves the element of a primitive collection property such as <c>int?[]</c> or
+    /// <c>List&lt;int?&gt;</c>. EF Core passes this mapping to <c>FindMapping</c> as the
+    /// <see cref="RelationalTypeMappingInfo.ElementTypeMapping"/> of the collection. For a
+    /// <c>Nullable&lt;T&gt;</c> element, the mapping has the CLR type <c>Nullable&lt;T&gt;</c> and the
+    /// store type <c>Nullable(...)</c>, so the column is <c>Array(Nullable(T))</c>. An explicit
+    /// element store type that is not <c>Nullable(...)</c> is kept. The element mapping that EF Core
+    /// infers from a column for a parameter does not come through here.
+    /// </summary>
+    public override CoreTypeMapping? FindMapping(IElementType elementType)
+    {
+        var mapping = base.FindMapping(elementType);
+        if (mapping is not RelationalTypeMapping relationalMapping)
+            return mapping;
+
+        var storeType = (string?)elementType[RelationalAnnotationNames.StoreType];
+        if (storeType is not null && !IsNullableStoreType(storeType))
+            return relationalMapping;
+
+        return WithClrElementNullability(relationalMapping, elementType.ClrType);
+    }
+
     // ParseStoreTypeName may normalize or partially unwrap the store type in order to resolve
     // the underlying CLR mapping. EF Core's Property.GetColumnType() prefers
     // RelationalTypeMapping.StoreType over the user's annotation, so preserve the explicit
@@ -418,7 +447,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
         // Resolve element mapping from CLR type if not already resolved
         if (elementMapping is null && elementClrType is not null)
-            elementMapping = FindMapping(elementClrType);
+            elementMapping = FindClrComponentMapping(elementClrType);
 
         if (elementMapping is null)
             return null;
@@ -483,6 +512,36 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
 
         return new ClickHouseNullableElementMapping(inner);
     }
+
+    /// <summary>
+    /// Resolves a mapping for a component of a composite CLR type, such as the element of
+    /// <c>int?[]</c>, the value of <c>Dictionary&lt;string, int?&gt;</c> or an item of
+    /// <c>(int?, string)</c>. For a <c>Nullable&lt;T&gt;</c> component, the returned mapping
+    /// has the CLR type <c>Nullable&lt;T&gt;</c> and the store type <c>Nullable(...)</c>, the same
+    /// as <see cref="FindComponentMapping"/> gives for a <c>Nullable(...)</c> store type.
+    /// </summary>
+    private RelationalTypeMapping? FindClrComponentMapping(Type componentClrType)
+    {
+        var mapping = FindMapping(componentClrType);
+        return mapping is null ? null : WithClrElementNullability(mapping, componentClrType);
+    }
+
+    /// <summary>
+    /// Wraps <paramref name="mapping"/> in a <see cref="ClickHouseNullableElementMapping"/> when
+    /// <paramref name="componentClrType"/> is <c>Nullable&lt;T&gt;</c> and the mapping is for
+    /// <c>T</c>. EF Core resolves a <c>Nullable&lt;T&gt;</c> CLR type to the mapping of <c>T</c>.
+    /// These mappings are returned unchanged: a mapping for a different CLR type (for example
+    /// the <c>String</c> mapping of <c>char</c>), a mapping with a value converter (for example an
+    /// enum), and a Tuple mapping, because ClickHouse does not allow <c>Nullable(Tuple(...))</c>
+    /// (code 43; experimental in some versions).
+    /// </summary>
+    private RelationalTypeMapping WithClrElementNullability(RelationalTypeMapping mapping, Type componentClrType)
+        => Nullable.GetUnderlyingType(componentClrType) is { } underlyingType
+           && mapping.ClrType == underlyingType
+           && mapping.Converter is null
+           && mapping is not ClickHouseTupleTypeMapping
+            ? _nullableElementMappings.GetOrAdd(mapping, static inner => new ClickHouseNullableElementMapping(inner))
+            : mapping;
 
     /// <summary>
     /// Returns true when <paramref name="storeType"/> directly or indirectly wraps with
@@ -559,8 +618,9 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
         if (clrType is not null && clrType.IsGenericType && clrType.GetGenericTypeDefinition() == typeof(Dictionary<,>))
         {
             var typeArgs = clrType.GetGenericArguments();
+            // ClickHouse refuses a Nullable Map key (code 36), so only the value gets Nullable(...).
             var keyMapping = FindMapping(typeArgs[0]);
-            var valueMapping = FindMapping(typeArgs[1]);
+            var valueMapping = FindClrComponentMapping(typeArgs[1]);
             if (keyMapping is not null && valueMapping is not null)
                 return new ClickHouseMapTypeMapping(keyMapping, valueMapping);
         }
@@ -607,7 +667,7 @@ public class ClickHouseTypeMappingSource : RelationalTypeMappingSource
                 var elementMappings = new List<RelationalTypeMapping>();
                 foreach (var arg in typeArgs)
                 {
-                    var mapping = FindMapping(arg);
+                    var mapping = FindClrComponentMapping(arg);
                     if (mapping is null)
                         return null;
                     elementMappings.Add(mapping);
