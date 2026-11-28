@@ -80,6 +80,8 @@ public class PageView
 | **Geographic** | `Point`, `Ring`, `LineString`, `Polygon`, `MultiLineString`, `MultiPolygon`, `Geometry` | `Tuple<double,double>` and arrays thereof; `object` for Geometry |
 | **Wrappers** | `Nullable(T)`, `LowCardinality(T)` | Unwrapped automatically |
 
+Without `HasColumnType`, a nullable scalar value type inside an array, a `Dictionary` value or a tuple item maps to `Nullable(T)`: `int?[]` and `List<int?>` map to `Array(Nullable(Int32))`, `Dictionary<string, int?>` maps to `Map(String, Nullable(Int32))`, and `(int?, string)` maps to `Tuple(Nullable(Int32), String)`. A `Dictionary` key and a nullable tuple such as `(int, int)?` do not get `Nullable`, because ClickHouse does not allow a Nullable Map key or `Nullable(Tuple(...))`.
+
 ## Current Status
 
 This provider is in active development. It supports **LINQ queries**, **inserts**, **table engine configuration**, and **migrations** — you can define ClickHouse tables with engine-specific settings, create them via `dotnet ef migrations` or `EnsureCreated`, query with LINQ, and write data via `SaveChanges`.

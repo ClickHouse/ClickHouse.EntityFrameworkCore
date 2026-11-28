@@ -52,6 +52,7 @@ public class AuditLog
 {
     public long Id { get; set; }
     public string Message { get; set; } = string.Empty;
+    public int?[] Codes { get; set; } = [];
 }
 
 public class SmokeDbContextFactory : IDesignTimeDbContextFactory<SmokeDbContext>

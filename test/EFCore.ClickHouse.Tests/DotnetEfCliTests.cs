@@ -97,6 +97,23 @@ public class DotnetEfCliTests : IAsyncLifetime
         var indexCount = await QueryScalar<ulong>(connection,
             "SELECT count() FROM system.data_skipping_indices WHERE database = currentDatabase() AND table = 'sensor_readings'");
         Assert.True(indexCount > 0, "Expected at least one data skipping index");
+
+        // A Nullable<T> element maps to Nullable(T) without HasColumnType
+        var codesType = await QueryScalar<string>(connection,
+            "SELECT type FROM system.columns WHERE database = currentDatabase() AND table = 'audit_logs' AND name = 'Codes'");
+        Assert.Equal("Array(Nullable(Int32))", codesType);
+    }
+
+    [Fact]
+    public async Task Model_snapshot_has_no_pending_model_changes()
+    {
+        if (!_dotnetEfAvailable)
+            return; // dotnet-ef not installed — skip gracefully
+
+        // The model that EF Core builds from the snapshot must have the same column types as the
+        // model of the context, for example Array(Nullable(Int32)) for an int?[] property.
+        await RunDotnetEfSuccessfully("migrations", "add", "InitialCreate");
+        await RunDotnetEfSuccessfully("migrations", "has-pending-model-changes");
     }
 
     [Fact]

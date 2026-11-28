@@ -61,7 +61,9 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
                 elementMapping: inner.ElementTypeMapping,
                 jsonValueReaderWriter: inner.JsonValueReaderWriter),
             BuildStoreType(inner.StoreType),
-            inner.StoreTypePostfix,
+            // The store type is the full name with the facets of the inner mapping. With a postfix,
+            // EF Core builds the name again from the facets: Nullable(18,2) for Decimal(18,2).
+            StoreTypePostfix.None,
             inner.DbType,
             inner.IsUnicode,
             inner.Size,
