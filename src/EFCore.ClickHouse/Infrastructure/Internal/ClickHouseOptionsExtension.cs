@@ -1,5 +1,6 @@
 using System.Data.Common;
 using ClickHouse.EntityFrameworkCore.Extensions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -32,6 +33,14 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
     /// </summary>
     public bool ReplicatedMigrationsHistoryTable { get; private set; }
 
+    /// <summary>
+    /// The mode that the application set with <c>UseParameterizedCollectionMode</c>, or <see langword="null"/>
+    /// when it did not set one. <see cref="RelationalOptionsExtension.ParameterizedCollectionMode"/> returns
+    /// <see cref="ParameterTranslationMode.MultipleParameters"/> in both cases. With no explicit mode, the
+    /// provider sends a captured collection in <c>Contains</c> as one array parameter.
+    /// </summary>
+    public ParameterTranslationMode? ExplicitParameterizedCollectionMode { get; private set; }
+
     public ClickHouseOptionsExtension()
     {
     }
@@ -43,6 +52,7 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
         JoinNullSemanticsDisabled = copyFrom.JoinNullSemanticsDisabled;
         ClusterName = copyFrom.ClusterName;
         ReplicatedMigrationsHistoryTable = copyFrom.ReplicatedMigrationsHistoryTable;
+        ExplicitParameterizedCollectionMode = copyFrom.ExplicitParameterizedCollectionMode;
     }
 
     protected override RelationalOptionsExtension Clone()
@@ -76,6 +86,14 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
         return clone;
     }
 
+    public override RelationalOptionsExtension WithUseParameterizedCollectionMode(
+        ParameterTranslationMode parameterizedCollectionMode)
+    {
+        var clone = (ClickHouseOptionsExtension)base.WithUseParameterizedCollectionMode(parameterizedCollectionMode);
+        clone.ExplicitParameterizedCollectionMode = parameterizedCollectionMode;
+        return clone;
+    }
+
     public override RelationalOptionsExtension WithConnectionString(string? connectionString)
     {
         var clone = (ClickHouseOptionsExtension)base.WithConnectionString(connectionString);
@@ -103,12 +121,26 @@ public class ClickHouseOptionsExtension : RelationalOptionsExtension
         {
         }
 
+        private new ClickHouseOptionsExtension Extension
+            => (ClickHouseOptionsExtension)base.Extension;
+
         public override bool IsDatabaseProvider => true;
 
         public override string LogFragment => string.Empty;
 
+        // IClickHouseSingletonOptions holds ExplicitParameterizedCollectionMode, so a context with a
+        // different value needs a different service provider.
+        public override int GetServiceProviderHashCode()
+            => Extension.ExplicitParameterizedCollectionMode?.GetHashCode() ?? 0;
+
+        public override bool ShouldUseSameServiceProvider(DbContextOptionsExtensionInfo other)
+            => other is ExtensionInfo otherInfo
+                && Extension.ExplicitParameterizedCollectionMode == otherInfo.Extension.ExplicitParameterizedCollectionMode;
+
         public override void PopulateDebugInfo(IDictionary<string, string> debugInfo)
         {
+            if (Extension.ExplicitParameterizedCollectionMode is { } mode)
+                debugInfo["ClickHouse:ExplicitParameterizedCollectionMode"] = mode.ToString();
         }
     }
 }

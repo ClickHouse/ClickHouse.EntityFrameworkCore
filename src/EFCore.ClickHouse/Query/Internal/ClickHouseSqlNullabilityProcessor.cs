@@ -1,18 +1,131 @@
 using System.Linq.Expressions;
 using ClickHouse.EntityFrameworkCore.Query.Expressions.Internal;
+using ClickHouse.EntityFrameworkCore.Storage.Internal.Mapping;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace ClickHouse.EntityFrameworkCore.Query.Internal;
 
 public class ClickHouseSqlNullabilityProcessor : SqlNullabilityProcessor
 {
+    // Element CLR types that the driver formats correctly inside an array parameter. Other types use the
+    // EF Core expansion, which formats each element on its own. DateTime covers DateTime and DateTime64,
+    // DateOnly covers Date and Date32, BigInteger covers the 128-bit and 256-bit integers, and IPAddress
+    // covers IPv4 and IPv6. TimeSpan (Time, Time64) is not in the list: the driver does not quote these
+    // elements, and the server fails to read the array (CANNOT_READ_ARRAY_FROM_TEXT).
+    private static readonly HashSet<Type> ArrayParameterElementTypes =
+    [
+        typeof(byte), typeof(sbyte), typeof(short), typeof(ushort),
+        typeof(int), typeof(uint), typeof(long), typeof(ulong),
+        typeof(float), typeof(double), typeof(decimal),
+        typeof(bool), typeof(string), typeof(Guid),
+        typeof(DateTime), typeof(DateOnly),
+        typeof(System.Numerics.BigInteger), typeof(System.Net.IPAddress),
+    ];
+
+    private readonly ParameterTranslationMode? _explicitCollectionParameterTranslationMode;
+
     public ClickHouseSqlNullabilityProcessor(
         RelationalParameterBasedSqlProcessorDependencies dependencies,
         RelationalParameterBasedSqlProcessorParameters parameters)
-        : base(dependencies, parameters)
+        : this(dependencies, parameters, explicitCollectionParameterTranslationMode: null)
     {
     }
+
+    /// <param name="dependencies">The processor dependencies.</param>
+    /// <param name="parameters">The processor parameters.</param>
+    /// <param name="explicitCollectionParameterTranslationMode">
+    /// The mode that the application set with <c>UseParameterizedCollectionMode</c>, or <see langword="null"/>
+    /// when it did not set one.
+    /// </param>
+    public ClickHouseSqlNullabilityProcessor(
+        RelationalParameterBasedSqlProcessorDependencies dependencies,
+        RelationalParameterBasedSqlProcessorParameters parameters,
+        ParameterTranslationMode? explicitCollectionParameterTranslationMode)
+        : base(dependencies, parameters)
+    {
+        _explicitCollectionParameterTranslationMode = explicitCollectionParameterTranslationMode;
+    }
+
+    /// <summary>
+    /// Sends a captured collection in <c>Contains</c> (<c>ids.Contains(x.Id)</c>) as one array parameter:
+    /// <c>x.Id IN {ids:Array(Int64)}</c>. EF Core otherwise sends one parameter for each element,
+    /// <c>x.Id IN ({ids1:Int64}, {ids2:Int64}, ...)</c>, and ClickHouse refuses a request with too many
+    /// parameters. ClickHouse uses the primary key for <c>IN</c> with an array.
+    /// </summary>
+    /// <remarks>
+    /// The provider uses the array parameter when the collection has no translation mode, or the mode
+    /// <see cref="ParameterTranslationMode.Parameter"/>, which the application can set for all queries with
+    /// <c>UseParameterizedCollectionMode</c>. The EF Core expansion is used for <c>EF.Constant(...)</c> and
+    /// <c>EF.MultipleParameters(...)</c>, and for all collections when the application sets
+    /// <see cref="ParameterTranslationMode.Constant"/> or <see cref="ParameterTranslationMode.MultipleParameters"/>.
+    /// A query with <c>EF.Parameter(...)</c> does not get here: EF Core then translates the collection as a
+    /// table, which the provider does not support.
+    /// </remarks>
+    protected override SqlExpression VisitIn(
+        InExpression inExpression,
+        bool allowOptimizedExpansion,
+        out bool nullable)
+    {
+        if (inExpression.ValuesParameter is { } valuesParameter
+            && (valuesParameter.TranslationMode ?? _explicitCollectionParameterTranslationMode)
+                is null or ParameterTranslationMode.Parameter)
+        {
+            return VisitCollectionParameterIn(inExpression, valuesParameter, allowOptimizedExpansion, out nullable);
+        }
+
+        return base.VisitIn(inExpression, allowOptimizedExpansion, out nullable);
+    }
+
+    private SqlExpression VisitCollectionParameterIn(
+        InExpression inExpression,
+        SqlParameterExpression valuesParameter,
+        bool allowOptimizedExpansion,
+        out bool nullable)
+    {
+        var item = Visit(inExpression.Item, out var itemNullable);
+
+        // The mapping of the item, usually a column, gives the element store type, so that the array has
+        // the type of the column (Int64 or Int32, FixedString(N) or String, ...).
+        var elementMapping = (item.TypeMapping ?? valuesParameter.TypeMapping?.ElementTypeMapping) as RelationalTypeMapping;
+
+        // Use the EF Core expansion in these cases:
+        //  - The item can be null, or its store type is Nullable. The expansion adds the null checks that
+        //    give .NET semantics. ClickHouseArrayParameterTypeMapping also removes null elements, which is
+        //    correct only for an item that is never null. The store type check is for an item that this
+        //    processor reports as never null although it can be NULL, for example the element of an
+        //    Array(Nullable(T)) column in an array lambda.
+        //  - There is no element mapping, so there is no store type for Array(T).
+        //  - The element has a value converter, for example an enum stored as Enum8. The driver gets the
+        //    collection before conversion and cannot format it.
+        //  - The driver does not format the element type correctly inside an array.
+        if (itemNullable
+            || elementMapping is null
+            || IsNullableStoreType(elementMapping.StoreType)
+            || elementMapping.Converter is not null
+            || !ArrayParameterElementTypes.Contains(Nullable.GetUnderlyingType(elementMapping.ClrType) ?? elementMapping.ClrType))
+        {
+            return base.VisitIn(inExpression, allowOptimizedExpansion, out nullable);
+        }
+
+        // The item is never null and ClickHouseArrayParameterTypeMapping removes null elements, so the
+        // result is never null.
+        nullable = false;
+
+        var arrayParameter = (SqlParameterExpression)valuesParameter.ApplyTypeMapping(
+            new ClickHouseArrayParameterTypeMapping(elementMapping));
+        var alignedItem = Dependencies.SqlExpressionFactory.ApplyTypeMapping(item, elementMapping)!;
+
+        // ClickHouseQuerySqlGenerator writes an IN expression with a values parameter as
+        // `item IN {p:Array(T)}`.
+        return inExpression.Update(alignedItem, arrayParameter);
+    }
+
+    private static bool IsNullableStoreType(string storeType)
+        => storeType.StartsWith("Nullable(", StringComparison.OrdinalIgnoreCase)
+            || storeType.StartsWith("LowCardinality(Nullable(", StringComparison.OrdinalIgnoreCase);
 
     protected override SqlExpression VisitSqlBinary(
         SqlBinaryExpression sqlBinaryExpression,

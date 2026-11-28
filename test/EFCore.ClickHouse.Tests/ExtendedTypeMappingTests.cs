@@ -1630,18 +1630,17 @@ public class ArrayTests
     }
 
     [Fact]
-    public async Task LocalArray_Contains_DoesNotUseHas()
+    public async Task LocalArray_Contains_UsesArrayParameterNotArrayColumnHelper()
     {
-        // Local in-memory arrays must NOT be routed through the array helpers — they have no
-        // ClickHouseArrayTypeMapping, so the type-mapping gate must reject them and let EF's
-        // inline-collection pipeline emit IN-style SQL instead of has(). This is the
-        // simplest shape that pins the gate: Contains is the most likely to mistranslate if
-        // the structural pre-filter ever loosens.
+        // The array-column translator must not take a captured local array for a mapped Array(T) column
+        // (its gate, LooksLikeArrayColumnAccess, refuses it). The provider sends the array as one Array(T)
+        // parameter, `id` IN {localIds:Array(Int64)}, with the column as the tested item.
         await using var ctx = new ArrayDbContext(_fixture.ConnectionString);
 
         var localIds = new long[] { 1L, 3L };
         var query = ctx.Entities.Where(e => localIds.Contains(e.Id));
         var sql = query.ToQueryString();
+        Assert.Contains(" IN {localIds:Array(Int64)}", sql);
         Assert.DoesNotContain("has(", sql);
 
         var results = await query.OrderBy(e => e.Id).ToListAsync();

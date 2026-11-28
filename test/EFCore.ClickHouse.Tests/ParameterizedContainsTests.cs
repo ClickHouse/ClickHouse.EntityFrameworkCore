@@ -1,0 +1,707 @@
+using System.Collections.Immutable;
+using System.Net;
+using System.Numerics;
+using ClickHouse.EntityFrameworkCore.Extensions;
+using ClickHouse.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Xunit;
+
+namespace EFCore.ClickHouse.Tests;
+
+public enum ContainsColor { Red = 1, Green = 2, Blue = 3 }
+
+public class ParamContainsEntity
+{
+    public long Id { get; set; }
+    public int IntVal { get; set; }
+    public string StrVal { get; set; } = "";
+    public Guid GuidVal { get; set; }
+    public ContainsColor Color { get; set; }
+    public DateTime DateVal { get; set; }
+    public decimal DecimalVal { get; set; }
+    public bool BoolVal { get; set; }
+    public int? NullableInt { get; set; }
+    public DateOnly DateOnlyVal { get; set; }
+    public BigInteger BigVal { get; set; }
+    public IPAddress IpVal { get; set; } = IPAddress.Loopback;
+}
+
+// A table with a row that holds the default values (0, ''), which a null element must not match.
+public class ParamContainsDefaultsEntity
+{
+    public long Id { get; set; }
+    public int IntVal { get; set; }
+    public string StrVal { get; set; } = "";
+    public string LcVal { get; set; } = "";
+    public byte ByteVal { get; set; }
+}
+
+public class ParamContainsDbContext : DbContext
+{
+    public DbSet<ParamContainsEntity> Entities => Set<ParamContainsEntity>();
+    public DbSet<ParamContainsDefaultsEntity> Defaults => Set<ParamContainsDefaultsEntity>();
+
+    private readonly string _connectionString;
+    private readonly Action<ClickHouseDbContextOptionsBuilder>? _configure;
+
+    public ParamContainsDbContext(string connectionString, Action<ClickHouseDbContextOptionsBuilder>? configure = null)
+    {
+        _connectionString = connectionString;
+        _configure = configure;
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        => optionsBuilder.UseClickHouse(_connectionString, _configure);
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<ParamContainsEntity>(entity =>
+        {
+            entity.ToTable("param_contains");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.IntVal).HasColumnName("int_val");
+            entity.Property(e => e.StrVal).HasColumnName("str_val");
+            entity.Property(e => e.GuidVal).HasColumnName("guid_val").HasColumnType("UUID");
+            entity.Property(e => e.Color).HasColumnName("color").HasColumnType("Enum8('Red'=1,'Green'=2,'Blue'=3)");
+            entity.Property(e => e.DateVal).HasColumnName("date_val").HasColumnType("DateTime");
+            entity.Property(e => e.DecimalVal).HasColumnName("decimal_val").HasColumnType("Decimal(18, 4)");
+            entity.Property(e => e.BoolVal).HasColumnName("bool_val").HasColumnType("Bool");
+            entity.Property(e => e.NullableInt).HasColumnName("nullable_int").HasColumnType("Nullable(Int32)");
+            entity.Property(e => e.DateOnlyVal).HasColumnName("date_only_val").HasColumnType("Date32");
+            entity.Property(e => e.BigVal).HasColumnName("big_val").HasColumnType("Int128");
+            entity.Property(e => e.IpVal).HasColumnName("ip_val").HasColumnType("IPv4");
+        });
+
+        modelBuilder.Entity<ParamContainsDefaultsEntity>(entity =>
+        {
+            entity.ToTable("param_contains_defaults");
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.IntVal).HasColumnName("int_val");
+            entity.Property(e => e.StrVal).HasColumnName("str_val");
+            entity.Property(e => e.LcVal).HasColumnName("lc_val").HasColumnType("LowCardinality(String)");
+            entity.Property(e => e.ByteVal).HasColumnName("byte_val").HasColumnType("UInt8");
+        });
+    }
+}
+
+public class ParamContainsFixture : IAsyncLifetime
+{
+    public string ConnectionString { get; private set; } = string.Empty;
+
+    public static readonly Guid Guid1 = new("11111111-1111-1111-1111-111111111111");
+    public static readonly Guid Guid2 = new("22222222-2222-2222-2222-222222222222");
+    public static readonly Guid Guid3 = new("33333333-3333-3333-3333-333333333333");
+
+    public async Task InitializeAsync()
+    {
+        ConnectionString = await SharedContainer.GetConnectionStringAsync();
+
+        using var connection = new global::ClickHouse.Driver.ADO.ClickHouseConnection(ConnectionString);
+        await connection.OpenAsync();
+
+        using var createCmd = connection.CreateCommand();
+        createCmd.CommandText = """
+            CREATE TABLE param_contains (
+                id Int64,
+                int_val Int32,
+                str_val String,
+                guid_val UUID,
+                color Enum8('Red'=1,'Green'=2,'Blue'=3),
+                date_val DateTime,
+                decimal_val Decimal(18, 4),
+                bool_val Bool,
+                nullable_int Nullable(Int32),
+                date_only_val Date32,
+                big_val Int128,
+                ip_val IPv4
+            ) ENGINE = MergeTree()
+            ORDER BY id
+            """;
+        await createCmd.ExecuteNonQueryAsync();
+
+        using var insertCmd = connection.CreateCommand();
+        insertCmd.CommandText = $"""
+            INSERT INTO param_contains VALUES
+            (1, 10, 'alpha', toUUID('{Guid1}'), 'Red',   '2021-01-01 00:00:00', 1.5,  true,  100,  '2021-01-01', 111, '10.0.0.1'),
+            (2, 20, 'beta',  toUUID('{Guid2}'), 'Green', '2022-02-02 00:00:00', 2.5,  false, NULL, '2022-02-02', 222, '10.0.0.2'),
+            (3, 30, 'gamma', toUUID('{Guid3}'), 'Blue',  '2023-03-03 00:00:00', 3.5,  true,  300,  '2023-03-03', 333, '10.0.0.3')
+            """;
+        await insertCmd.ExecuteNonQueryAsync();
+
+        using var defaultsCmd = connection.CreateCommand();
+        defaultsCmd.CommandText = "CREATE TABLE param_contains_defaults (id Int64, int_val Int32, str_val String, lc_val LowCardinality(String), byte_val UInt8) ENGINE = MergeTree() ORDER BY id";
+        await defaultsCmd.ExecuteNonQueryAsync();
+        defaultsCmd.CommandText = "INSERT INTO param_contains_defaults VALUES (1, 0, '', 'a', 0), (2, 5, 'x', 'y', 5)";
+        await defaultsCmd.ExecuteNonQueryAsync();
+    }
+
+    public Task DisposeAsync() => Task.CompletedTask;
+}
+
+/// <summary>
+/// Integration tests for issue #39: a captured collection used with <c>Contains</c> translates to a
+/// single native ClickHouse array parameter (<c>column IN {p:Array(T)}</c>) instead of one bound
+/// parameter per element, with per-query <c>EF.Constant</c>/<c>EF.MultipleParameters</c> opt-outs.
+/// </summary>
+public class ParameterizedContainsTests : IClassFixture<ParamContainsFixture>
+{
+    private readonly ParamContainsFixture _fixture;
+
+    public ParameterizedContainsTests(ParamContainsFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    [Fact]
+    public async Task Int64_Collection_TranslatesToArrayParameter()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new[] { 1L, 3L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        var sql = query.ToQueryString();
+
+        // One array parameter, not one parameter per element.
+        Assert.Contains("`p`.`id` IN {ids:Array(Int64)}", sql);
+        Assert.DoesNotContain(" IN (", sql);
+        Assert.DoesNotContain("has(", sql);
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task Int32_Collection_AlignsElementStoreType()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new[] { 10, 30 };
+
+        var query = ctx.Entities.Where(e => vals.Contains(e.IntVal));
+        Assert.Contains(":Array(Int32)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task String_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var names = new List<string> { "alpha", "gamma" };
+
+        var query = ctx.Entities.Where(e => names.Contains(e.StrVal));
+        Assert.Contains(":Array(String)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task Guid_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var guids = new[] { ParamContainsFixture.Guid1, ParamContainsFixture.Guid3 };
+
+        var query = ctx.Entities.Where(e => guids.Contains(e.GuidVal));
+        Assert.Contains(":Array(UUID)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task DateTime_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var dates = new[] { new DateTime(2021, 1, 1), new DateTime(2023, 3, 3) };
+
+        var query = ctx.Entities.Where(e => dates.Contains(e.DateVal));
+        Assert.Contains(":Array(DateTime)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task DateOnly_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var dates = new[] { new DateOnly(2021, 1, 1), new DateOnly(2023, 3, 3) };
+
+        var query = ctx.Entities.Where(e => dates.Contains(e.DateOnlyVal));
+        Assert.Contains(":Array(Date32)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task BigInteger_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new BigInteger[] { 111, 333 };
+
+        var query = ctx.Entities.Where(e => vals.Contains(e.BigVal));
+        Assert.Contains(":Array(Int128)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task IPAddress_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ips = new[] { IPAddress.Parse("10.0.0.1"), IPAddress.Parse("10.0.0.3") };
+
+        var query = ctx.Entities.Where(e => ips.Contains(e.IpVal));
+        Assert.Contains(":Array(IPv4)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task Decimal_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var amounts = new[] { 1.5m, 3.5m };
+
+        var query = ctx.Entities.Where(e => amounts.Contains(e.DecimalVal));
+        Assert.Contains(" IN {", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task Bool_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var flags = new[] { true };
+
+        var query = ctx.Entities.Where(e => flags.Contains(e.BoolVal));
+        Assert.Contains(" IN {", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task NullableColumn_Contains_FallsBackToPreserveNullSemantics()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new int?[] { 100, 300 };
+
+        // A nullable tested column uses the EF Core expansion, which adds the null checks for .NET
+        // semantics. The array parameter removes null elements, which is correct only for an item that
+        // is never null.
+        var positive = ctx.Entities.Where(e => vals.Contains(e.NullableInt));
+        Assert.DoesNotContain(" IN {", positive.ToQueryString());
+        Assert.Equal([1L, 3L], await positive.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Enum_Collection_FallsBackToPerElementExpansion()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var colors = new[] { ContainsColor.Red, ContainsColor.Blue };
+
+        // A CLR enum maps to Enum8 via a value converter. The driver can't serialize the raw enum
+        // collection as a native array, so this element type falls back to the standard per-element
+        // expansion (the converter is applied to each parameter) rather than the array parameter.
+        var query = ctx.Entities.Where(e => colors.Contains(e.Color));
+        var sql = query.ToQueryString();
+        Assert.DoesNotContain(" IN {", sql);
+        Assert.Contains(" IN (", sql);
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task EmptyCollection_MatchesNoRows()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = System.Array.Empty<long>();
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        // Still a single array parameter — no special-casing to `WHERE 1=0`.
+        Assert.Contains(" IN {", query.ToQueryString());
+
+        var count = await query.CountAsync();
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public async Task LargeCollection_SendsSingleParameter()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        // With one parameter for each element, ClickHouse refuses a request with more than
+        // http_max_fields (1000 by default) parameters. 12,000 values stay below the size limit of one
+        // parameter value (http_max_field_value_size, 128 KiB by default).
+        var ids = Enumerable.Range(1, 12_000).Select(i => (long)i).ToArray();
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+
+        // Query text carries exactly one parameter placeholder regardless of collection size.
+        var sql = query.ToQueryString();
+        Assert.Contains(" IN {", sql);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, ":Array(Int64)}".Replace("(", "\\(").Replace(")", "\\)")));
+
+        var count = await query.CountAsync();
+        Assert.Equal(3, count);
+    }
+
+    [Fact]
+    public async Task ListContains_TranslatesToArrayParameter()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new List<long> { 2L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        Assert.Contains(" IN {", query.ToQueryString());
+
+        var rows = await query.Select(e => e.Id).ToListAsync();
+        Assert.Equal([2L], rows);
+    }
+
+    [Fact]
+    public async Task EfConstant_InlinesValues()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new[] { 1L, 2L };
+
+        var query = ctx.Entities.Where(e => EF.Constant(ids).Contains(e.Id));
+        var sql = query.ToQueryString();
+
+        // EF.Constant opts out of the array parameter and inlines the values as literals.
+        Assert.DoesNotContain(" IN {", sql);
+        Assert.Contains(" IN (1, 2)", sql);
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 2L], rows);
+    }
+
+    [Fact]
+    public async Task EfMultipleParameters_ExpandsToOneParameterPerElement()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new[] { 1L, 2L };
+
+        var query = ctx.Entities.Where(e => EF.MultipleParameters(ids).Contains(e.Id));
+        var sql = query.ToQueryString();
+
+        // EF.MultipleParameters keeps the legacy one-parameter-per-element expansion.
+        Assert.DoesNotContain(" IN {", sql);
+        Assert.Contains(" IN ({", sql);
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 2L], rows);
+    }
+
+    [Fact]
+    public async Task InlineCollection_StillInlines()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+
+        // A literal (non-captured) collection is not a parameter, so it continues to inline.
+        var query = ctx.Entities.Where(e => new[] { 1L, 2L }.Contains(e.Id));
+        var sql = query.ToQueryString();
+
+        Assert.DoesNotContain(" IN {", sql);
+        Assert.Contains(" IN (1, 2)", sql);
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 2L], rows);
+    }
+
+    [Fact]
+    public async Task ParameterCollectionJoin_StillUsesUnionAll()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new[] { 1L, 3L };
+
+        // A collection parameter used as a JOIN source is NOT a Contains, so it keeps the
+        // SELECT … UNION ALL … rewrite (the array-parameter path is Contains-only).
+        var query = from e in ctx.Entities
+                    join id in ids on e.Id equals id
+                    orderby e.Id
+                    select e.Id;
+        var sql = query.ToQueryString();
+
+        Assert.Contains("UNION ALL", sql);
+        Assert.DoesNotContain(" IN {", sql);
+
+        Assert.Equal([1L, 3L], await query.ToListAsync());
+    }
+
+    [Fact]
+    public async Task NegatedContains_MatchesComplement()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new[] { 1L };
+
+        var query = ctx.Entities.Where(e => !ids.Contains(e.Id));
+        Assert.Contains("`p`.`id` NOT IN {ids:Array(Int64)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([2L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task HashSet_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = new HashSet<long> { 1L, 3L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        Assert.Contains("`p`.`id` IN {ids:Array(Int64)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task LazyEnumerable_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = Enumerable.Range(1, 3).Where(i => i != 2).Select(i => (long)i);
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        Assert.Contains("`p`.`id` IN {ids:Array(Int64)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task ImmutableArray_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var ids = ImmutableArray.Create(1L, 3L);
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        Assert.Contains("`p`.`id` IN {ids:Array(Int64)}", query.ToQueryString());
+
+        var rows = await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync();
+        Assert.Equal([1L, 3L], rows);
+    }
+
+    [Fact]
+    public async Task NullElement_DoesNotMatchDefaultValue()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new int?[] { 5, null, 7 };
+
+        // The column is never null, so a null element cannot match. Row 1 holds 0: without the
+        // provider, the driver sends [5,,7] and the server reads the empty element as 0.
+        var query = ctx.Defaults.Where(e => vals.Contains(e.IntVal));
+        Assert.Contains(" IN {vals:Array(Int32)}", query.ToQueryString());
+        Assert.Equal([2L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+
+        var negated = ctx.Defaults.Where(e => !vals.Contains(e.IntVal));
+        Assert.Contains(" NOT IN {vals:Array(Int32)}", negated.ToQueryString());
+        Assert.Equal([1L], await negated.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task NullStringElement_DoesNotMatchEmptyString()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new List<string?> { "x", null, "y" };
+
+        // The driver cannot format a null element of an Array(String). The provider removes it.
+        var query = ctx.Defaults.Where(e => vals.Contains(e.StrVal));
+        Assert.Contains(" IN {vals:Array(String)}", query.ToQueryString());
+        Assert.Equal([2L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+
+        var negated = ctx.Defaults.Where(e => !vals.Contains(e.StrVal));
+        Assert.Equal([1L], await negated.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task NullCollection_MatchesNoRows()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        List<long>? ids = null;
+
+        // As in the EF Core expansion, a null collection is empty.
+        var query = ctx.Entities.Where(e => ids!.Contains(e.Id));
+        Assert.Empty(await query.Select(e => e.Id).ToListAsync());
+
+        var negated = ctx.Entities.Where(e => !ids!.Contains(e.Id));
+        Assert.Equal([1L, 2L, 3L], await negated.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task WiderElementType_CastsColumn()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new long[] { 10, 5_000_000_000, 30 };
+
+        // The array type follows the collection (Int64), and EF Core casts the Int32 column.
+        var query = ctx.Entities.Where(e => vals.Contains(e.IntVal));
+        Assert.Contains("CAST(`p`.`int_val` AS Int64) IN {vals:Array(Int64)}", query.ToQueryString());
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(ParameterTranslationMode.MultipleParameters, " IN ({ids1:Int64}, {ids2:Int64})")]
+    [InlineData(ParameterTranslationMode.Constant, " IN (1, 3)")]
+    public async Task ExplicitCollectionMode_UsesEfCoreExpansion(ParameterTranslationMode mode, string expectedSql)
+    {
+        await using var ctx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(mode));
+        var ids = new[] { 1L, 3L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        var sql = query.ToQueryString();
+        Assert.Contains(expectedSql, sql);
+        Assert.DoesNotContain(" IN {", sql);
+
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ExplicitCollectionMode_DoesNotChangeOtherContexts()
+    {
+        await using (var explicitCtx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(ParameterTranslationMode.MultipleParameters)))
+        {
+            var ids = new[] { 1L, 3L };
+            Assert.DoesNotContain(" IN {", explicitCtx.Entities.Where(e => ids.Contains(e.Id)).ToQueryString());
+        }
+
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var otherIds = new[] { 1L, 3L };
+        Assert.Contains(" IN {otherIds:Array(Int64)}", ctx.Entities.Where(e => otherIds.Contains(e.Id)).ToQueryString());
+    }
+
+    [Fact]
+    public void ExplicitCollectionMode_ChangedOnSharedInternalServiceProvider_Throws()
+    {
+        using var serviceProvider = new ServiceCollection().AddEntityFrameworkClickHouse().BuildServiceProvider();
+
+        DbContextOptions CreateOptions(Action<ClickHouseDbContextOptionsBuilder>? configure)
+            => new DbContextOptionsBuilder()
+                .UseInternalServiceProvider(serviceProvider)
+                .UseClickHouse(_fixture.ConnectionString, configure)
+                .Options;
+
+        // The first context sets the singleton options of the service provider.
+        using (var first = new DbContext(CreateOptions(configure: null)))
+            _ = first.Model;
+
+        using var second = new DbContext(
+            CreateOptions(o => o.UseParameterizedCollectionMode(ParameterTranslationMode.MultipleParameters)));
+        var exception = Assert.Throws<InvalidOperationException>(() => second.Model);
+        Assert.Contains("UseParameterizedCollectionMode", exception.Message);
+    }
+
+    [Fact]
+    public async Task SameCollection_TwoStoreTypes_SendsTwoParameters()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new[] { "x", "a" };
+
+        // EF Core names the second use of the parameter `vals0`, because it has a different store type.
+        var query = ctx.Defaults.Where(e => vals.Contains(e.StrVal) || vals.Contains(e.LcVal));
+        var sql = query.ToQueryString();
+        Assert.Contains(" IN {vals:Array(String)}", sql);
+        Assert.Contains(" IN {vals0:Array(LowCardinality(String))}", sql);
+
+        Assert.Equal([1L, 2L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task SameScalar_TwoStoreTypes_SendsTwoParameters()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var val = "a";
+
+        var query = ctx.Defaults.Where(e => e.StrVal == val || e.LcVal == val);
+        var sql = query.ToQueryString();
+        Assert.Contains("{val:String}", sql);
+        Assert.Contains("{val0:LowCardinality(String)}", sql);
+
+        Assert.Equal([1L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ExplicitParameterMode_UsesArrayParameter()
+    {
+        await using var ctx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(ParameterTranslationMode.Parameter));
+        var ids = new[] { 1L, 3L };
+
+        var query = ctx.Entities.Where(e => ids.Contains(e.Id));
+        Assert.Contains("`p`.`id` IN {ids:Array(Int64)}", query.ToQueryString());
+
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task NullableStoreType_UsesEfCoreExpansion()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new[] { 100, 300 };
+
+        // After the null check, EF Core knows that the item is not null, but its store type is
+        // Nullable(Int32). The provider uses the array parameter only when the store type is not Nullable.
+        var query = ctx.Entities.Where(e => e.NullableInt != null && vals.Contains(e.NullableInt.Value));
+        Assert.DoesNotContain(" IN {", query.ToQueryString());
+
+        Assert.Equal([1L, 3L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ContainsInProjection_ReturnsBoolean()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new int?[] { 5, null };
+
+        var query = ctx.Defaults.OrderBy(e => e.Id).Select(e => vals.Contains(e.IntVal));
+        Assert.Contains(" IN {vals:Array(Int32)}", query.ToQueryString());
+
+        Assert.Equal([false, true], await query.ToListAsync());
+    }
+
+    [Fact]
+    public async Task ByteArray_Collection_TranslatesAndMatches()
+    {
+        await using var ctx = new ParamContainsDbContext(_fixture.ConnectionString);
+        var vals = new byte[] { 5, 7 };
+
+        // The driver formats a byte[] for an Array(UInt8) parameter as a list of numbers, not as binary text.
+        var query = ctx.Defaults.Where(e => vals.Contains(e.ByteVal));
+        Assert.Contains(" IN {vals:Array(UInt8)}", query.ToQueryString());
+        Assert.Equal([2L], await query.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+
+        var negated = ctx.Defaults.Where(e => !vals.Contains(e.ByteVal));
+        Assert.Equal([1L], await negated.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+
+    [Fact]
+    public async Task ExplicitParameterMode_NullableColumnAndEnum_UseEfCoreExpansion()
+    {
+        await using var ctx = new ParamContainsDbContext(
+            _fixture.ConnectionString, o => o.UseParameterizedCollectionMode(ParameterTranslationMode.Parameter));
+
+        // With the Parameter mode, the EF Core expansion still writes one parameter for each element.
+        var vals = new int?[] { 100, null };
+        var nullable = ctx.Entities.Where(e => vals.Contains(e.NullableInt));
+        var nullableSql = nullable.ToQueryString();
+        Assert.DoesNotContain(" IN {", nullableSql);
+        Assert.Contains("{vals1:Nullable(Int32)}", nullableSql);
+        Assert.Equal([1L, 2L], await nullable.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+
+        var colors = new[] { ContainsColor.Red, ContainsColor.Blue };
+        var enums = ctx.Entities.Where(e => colors.Contains(e.Color));
+        Assert.DoesNotContain(" IN {", enums.ToQueryString());
+        Assert.Equal([1L, 3L], await enums.OrderBy(e => e.Id).Select(e => e.Id).ToListAsync());
+    }
+}
