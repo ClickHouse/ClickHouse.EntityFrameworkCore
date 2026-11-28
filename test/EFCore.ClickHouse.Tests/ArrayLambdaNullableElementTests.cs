@@ -13,6 +13,7 @@ public class ArrayLambdaNullsEntity
     public int[] Ints { get; set; } = [];
     public int?[] NInts { get; set; } = [];
     public List<int?> NIntList { get; set; } = [];
+    public int?[] LcNInts { get; set; } = [];
 }
 
 public class ArrayLambdaNullsDbContext : DbContext
@@ -39,6 +40,7 @@ public class ArrayLambdaNullsDbContext : DbContext
             entity.Property(e => e.Ints).HasColumnName("ints").HasColumnType("Array(Int32)");
             entity.Property(e => e.NInts).HasColumnName("nints").HasColumnType("Array(Nullable(Int32))");
             entity.Property(e => e.NIntList).HasColumnName("nint_list").HasColumnType("Array(Nullable(Int32))");
+            entity.Property(e => e.LcNInts).HasColumnName("lc_nints").HasColumnType("Array(LowCardinality(Nullable(Int32)))");
         });
     }
 }
@@ -63,20 +65,22 @@ public class ArrayLambdaNullsFixture : IAsyncLifetime
                 lc_ntags Array(LowCardinality(Nullable(String))),
                 ints Array(Int32),
                 nints Array(Nullable(Int32)),
-                nint_list Array(Nullable(Int32))
+                nint_list Array(Nullable(Int32)),
+                lc_nints Array(LowCardinality(Nullable(Int32)))
             ) ENGINE = MergeTree()
             ORDER BY id
+            SETTINGS allow_suspicious_low_cardinality_types = 1
             """;
         await command.ExecuteNonQueryAsync();
 
         // Row 1 and row 4 have NULL elements. Row 3 has empty arrays.
         command.CommandText = """
             INSERT INTO array_lambda_nulls VALUES
-            (1, ['a', 'b'], ['a', NULL], ['a', NULL], [1, 2], [1, NULL], [1, NULL]),
-            (2, ['zzz'],    ['zzz'],     ['zzz'],     [2],    [2],       [2]),
-            (3, [],         [],          [],          [],     [],        []),
-            (4, ['b'],      [NULL],      [NULL],      [3],    [NULL],    [NULL]),
-            (5, ['b', 'c'], ['b', 'c'],  ['b', 'c'],  [1, 3], [1, 3],    [1, 3])
+            (1, ['a', 'b'], ['a', NULL], ['a', NULL], [1, 2], [1, NULL], [1, NULL], [1, NULL]),
+            (2, ['zzz'],    ['zzz'],     ['zzz'],     [2],    [2],       [2],       [2]),
+            (3, [],         [],          [],          [],     [],        [],        []),
+            (4, ['b'],      [NULL],      [NULL],      [3],    [NULL],    [NULL],    [NULL]),
+            (5, ['b', 'c'], ['b', 'c'],  ['b', 'c'],  [1, 3], [1, 3],    [1, 3],    [1, 3])
             """;
         await command.ExecuteNonQueryAsync();
     }
@@ -338,6 +342,106 @@ public class ArrayLambdaNullableElementTests : IClassFixture<ArrayLambdaNullsFix
         var sql = await AssertSameRowsAsDotNet(e => e.LcNTags.FirstOrDefault() == null, [3, 4]);
 
         Assert.Contains("arrayElement(`a`.`lc_ntags`, 1) IS NULL", sql);
+    }
+
+    // ─── Captured values on Nullable value-type elements ────────────
+    //
+    // A captured value that is compared with an element gets the store type of the element as its
+    // parameter type. ClickHouse refuses Nullable(Nullable(T)) and Nullable(LowCardinality(Nullable(T))).
+
+    [Fact]
+    public async Task Count_EqualsCapturedValue_NullableValueType()
+    {
+        int? one = 1;
+
+        var sql = await AssertSameRowsAsDotNet(e => e.NInts.Count(n => n == one) == 1, [1, 5]);
+
+        Assert.Contains("{one:Nullable(Int32)}", sql);
+    }
+
+    [Fact]
+    public async Task Count_EqualsCapturedValue_ListOfNullableValueType()
+    {
+        int? one = 1;
+
+        var sql = await AssertSameRowsAsDotNet(e => e.NIntList.Count(n => n == one) == 1, [1, 5]);
+
+        Assert.Contains("{one:Nullable(Int32)}", sql);
+    }
+
+    [Fact]
+    public async Task Count_EqualsCapturedValue_LowCardinalityNullableValueType()
+    {
+        int? one = 1;
+
+        var sql = await AssertSameRowsAsDotNet(e => e.LcNInts.Count(n => n == one) == 1, [1, 5]);
+
+        Assert.Contains("{one:LowCardinality(Nullable(Int32))}", sql);
+    }
+
+    [Fact]
+    public async Task Count_EqualsCapturedNull_NullableValueType_CountsNullElements()
+    {
+        int? none = null;
+
+        await AssertSameRowsAsDotNet(e => e.NInts.Count(n => n == none) == 1, [1, 4]);
+    }
+
+    [Fact]
+    public async Task Any_CapturedCollectionContains_NullableValueType()
+    {
+        int?[] ids = [2, 3];
+
+        var sql = await AssertSameRowsAsDotNet(e => e.NInts.Any(n => ids.Contains(n)), [2, 5]);
+
+        Assert.Contains(":Nullable(Int32)}", sql);
+    }
+
+    [Fact]
+    public async Task Any_CapturedCollectionContains_WithNull_NullableValueType_MatchesNullElements()
+    {
+        int?[] ids = [2, null];
+
+        var sql = await AssertSameRowsAsDotNet(e => e.NInts.Any(n => ids.Contains(n)), [1, 2, 4]);
+
+        Assert.Contains(":Nullable(Int32)}", sql);
+    }
+
+    [Fact]
+    public async Task Any_CapturedCollectionContains_LowCardinalityNullableValueType()
+    {
+        int?[] ids = [2, 3];
+
+        var sql = await AssertSameRowsAsDotNet(e => e.LcNInts.Any(n => ids.Contains(n)), [2, 5]);
+
+        Assert.Contains(":LowCardinality(Nullable(Int32))}", sql);
+    }
+
+    [Fact]
+    public async Task Select_Add_Contains_CapturedValue_NullableValueType()
+    {
+        // Row 1 [1, NULL] → [2, NULL]. Row 5 [1, 3] → [2, 4].
+        int? two = 2;
+
+        var sql = await AssertSameRowsAsDotNet(e => e.NInts.Select(n => n + 1).Contains(two), [1, 5]);
+
+        Assert.Contains("{two:Nullable(Int32)}", sql);
+    }
+
+    [Fact]
+    public async Task Contains_CapturedValue_NullableValueType()
+    {
+        int? one = 1;
+
+        await AssertSameRowsAsDotNet(e => e.NInts.Contains(one), [1, 5]);
+    }
+
+    [Fact]
+    public async Task FirstOrDefault_EqualsCapturedValue_NullableValueType()
+    {
+        int? one = 1;
+
+        await AssertSameRowsAsDotNet(e => e.NInts.FirstOrDefault() == one, [1, 5]);
     }
 
     // ─── helpers ────────────────────────────────────────────────────

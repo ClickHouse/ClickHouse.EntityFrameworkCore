@@ -60,7 +60,7 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
                 valueGeneratorFactory: null,
                 elementMapping: inner.ElementTypeMapping,
                 jsonValueReaderWriter: inner.JsonValueReaderWriter),
-            $"Nullable({inner.StoreType})",
+            BuildStoreType(inner.StoreType),
             inner.StoreTypePostfix,
             inner.DbType,
             inner.IsUnicode,
@@ -69,6 +69,17 @@ public sealed class ClickHouseNullableElementMapping : RelationalTypeMapping
             inner.Precision,
             inner.Scale);
     }
+
+    /// <summary>
+    /// The inner mapping of an element that is written as <c>Nullable(T)</c> or
+    /// <c>LowCardinality(Nullable(T))</c> keeps that text as its store type, because
+    /// <c>FindMapping</c> keeps an explicit store type. ClickHouse refuses a second
+    /// <c>Nullable(...)</c> around it (code 43), so use the inner store type as it is.
+    /// </summary>
+    private static string BuildStoreType(string innerStoreType)
+        => ClickHouseTypeMappingSource.IsNullableStoreType(innerStoreType)
+            ? innerStoreType
+            : $"Nullable({innerStoreType})";
 
     protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters)
         => new ClickHouseNullableElementMapping(parameters, Inner);
